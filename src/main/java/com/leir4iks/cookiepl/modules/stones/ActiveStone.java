@@ -45,11 +45,6 @@ public class ActiveStone {
     }
 
     public void tick() {
-        if (!isValid()) {
-            manager.removeStone(this.stone, false);
-            return;
-        }
-
         velocity.add(this.gravityVector);
 
         Location currentLocation = stone.getLocation();

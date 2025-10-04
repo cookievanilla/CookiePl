@@ -2,7 +2,6 @@ package com.leir4iks.cookiepl.modules.stones;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.util.LogManager;
-import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -77,6 +76,18 @@ public class StoneManager {
         ActiveStone activeStone = new ActiveStone(plugin, this, thrower, stand, velocity);
         activeStones.put(stand.getUniqueId(), activeStone);
 
+        plugin.getFoliaLib().getScheduler().runAtEntityTimer(stand, (task) -> {
+            ActiveStone currentStone = activeStones.get(stand.getUniqueId());
+            if (currentStone == null || !currentStone.isValid()) {
+                task.cancel();
+                if (currentStone != null) {
+                    removeStone(currentStone.getStoneEntity(), true);
+                }
+                return;
+            }
+            currentStone.tick();
+        }, 0L, 1L);
+
         logManager.debug("Player " + thrower.getName() + " threw a stone with velocity " + velocity.toString());
     }
 
@@ -105,9 +116,5 @@ public class StoneManager {
         }
         activeStones.clear();
         logManager.info("Cleaned up all active stones.");
-    }
-
-    public ConcurrentHashMap<UUID, ActiveStone> getActiveStones() {
-        return activeStones;
     }
 }
