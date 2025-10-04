@@ -3,10 +3,6 @@ modules:
     enabled: true
     tag-block: FLETCHING_TABLE
     tag-format: "&7#{player}"
-    messages:
-      tag-applied: "&aYou have successfully tagged the item."
-      already-tagged: "&cThis item already has your tag."
-      no-item: "&cYou must hold an item in your main hand."
 
   where-my-frame:
     enabled: true
@@ -35,14 +31,15 @@ modules:
 
   door-knock:
     enabled: true
-    knock-text: "&f* knocks on the door *"
+    text-display:
+      enabled: true
+      text: "&f* knocks on the door *"
+      duration-ticks: 20
     cooldown-seconds: 1
-    freeze-duration-ticks: 20
 
   police-batons:
     enabled: true
     fbi-baton:
-      enabled: true
       display-name: "&9FBI Baton"
       custom-model-data: 101
       effects:
@@ -54,7 +51,6 @@ modules:
           duration-seconds: 5
       message: "&6Player &e{player} &6was lightly stunned."
     electroshock-baton:
-      enabled: true
       display-name: "&9FBI Electroshock Baton"
       custom-model-data: 102
       effects:
@@ -115,7 +111,6 @@ modules:
       pat-receiver: "&6{player} patted you on the shoulder!"
       slap-sender: "&6You slapped {player} on the ass!"
       slap-receiver: "&6{player} slapped you on the ass!"
-      cooldown: "&cYou must wait before slapping again."
 
   throwable-stones:
     enabled: true

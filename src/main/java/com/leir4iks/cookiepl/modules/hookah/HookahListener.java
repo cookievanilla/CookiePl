@@ -88,14 +88,7 @@ public class HookahListener implements Listener {
             }
 
             Location eyeLocation = player.getEyeLocation();
-            Vector randomOffset = new Vector(
-                    ThreadLocalRandom.current().nextDouble(-0.1, 0.1),
-                    ThreadLocalRandom.current().nextDouble(-0.1, 0.1),
-                    ThreadLocalRandom.current().nextDouble(-0.1, 0.1)
-            );
-            Vector velocity = eyeLocation.getDirection().clone().add(randomOffset).multiply(0.2);
-
-            player.getWorld().spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, eyeLocation.clone().add(eyeLocation.getDirection().multiply(0.5)), 1, 0, 0, 0, 0, velocity);
+            player.getWorld().spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, eyeLocation.clone().add(eyeLocation.getDirection().multiply(0.5)), 1, 0.1, 0.1, 0.1, 0.02);
             player.getWorld().playSound(player.getLocation(), Sound.ENTITY_PHANTOM_AMBIENT, 0.05f, 0.5f);
             count[0]++;
         }, 0L, 1L);

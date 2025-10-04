@@ -10,8 +10,6 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.potion.PotionEffect;
-import org.bukkit.potion.PotionEffectType;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.HashMap;
@@ -51,16 +49,13 @@ public class DoorKnockListener implements Listener {
 
         player.getWorld().playSound(player.getLocation(), sound, 1.0f, 1.0f);
 
-        int freezeTicks = plugin.getConfig().getInt("modules.door-knock.freeze-duration-ticks", 20);
-        if (freezeTicks > 0) {
-            player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, freezeTicks, 250, false, false));
+        if (plugin.getConfig().getBoolean("modules.door-knock.text-display.enabled", true)) {
+            spawnKnockText(player);
         }
-
-        spawnKnockText(player);
     }
 
     private void spawnKnockText(Player player) {
-        String text = plugin.getConfig().getString("modules.door-knock.knock-text", "&f* knocks on the door *");
+        String text = plugin.getConfig().getString("modules.door-knock.text-display.text", "&f* knocks on the door *");
         if (text.isEmpty()) {
             return;
         }
@@ -73,8 +68,8 @@ public class DoorKnockListener implements Listener {
             display.setBrightness(new Display.Brightness(15, 15));
         });
 
-        long textDurationTicks = plugin.getConfig().getInt("modules.door-knock.freeze-duration-ticks", 20);
-        plugin.getFoliaLib().getScheduler().runLater(textDisplay::remove, textDurationTicks);
+        long textDurationTicks = plugin.getConfig().getLong("modules.door-knock.text-display.duration-ticks", 20);
+        plugin.getFoliaLib().getScheduler().runAtLocationLater(textDisplay.getLocation(), textDisplay::remove, textDurationTicks);
     }
 
     private boolean isOnCooldown(Player player) {

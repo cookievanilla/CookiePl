@@ -3,6 +3,7 @@ version: 1.0.0
 main: com.leir4iks.cookiepl.CookiePl
 api-version: '1.21'
 author: leir4iks
+folia-supported: true
 
 commands:
   cookiepl:
@@ -28,7 +29,7 @@ commands:
     permission-message: "You do not have permission to use this command."
   police:
     description: Police system commands.
-    usage: /<command> give <handcuffs|baton>
+    usage: /<command> give <item>
     permission: cookiepl.police.use
     permission-message: "You do not have permission to use this command."
   resize:

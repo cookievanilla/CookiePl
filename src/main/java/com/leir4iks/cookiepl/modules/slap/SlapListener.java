@@ -25,7 +25,6 @@ public class SlapListener implements Listener {
 
     private final long cooldownMillis;
     private final double patChance;
-    private final String msgCooldown;
     private final String msgActionBar;
     private final String msgPatSender;
     private final String msgPatReceiver;
@@ -36,7 +35,6 @@ public class SlapListener implements Listener {
         this.plugin = plugin;
         this.cooldownMillis = plugin.getConfig().getLong("modules.slap.cooldown-seconds", 3) * 1000;
         this.patChance = plugin.getConfig().getDouble("modules.slap.pat-chance", 90.0);
-        this.msgCooldown = formatColor(plugin.getConfig().getString("modules.slap.messages.cooldown", "&cYou must wait before slapping again."));
         this.msgActionBar = formatColor(plugin.getConfig().getString("modules.slap.messages.action-bar", "&6 <- {player} ->"));
         this.msgPatSender = formatColor(plugin.getConfig().getString("modules.slap.messages.pat-sender", "&6You patted {player} on the shoulder!"));
         this.msgPatReceiver = formatColor(plugin.getConfig().getString("modules.slap.messages.pat-receiver", "&6{player} patted you on the shoulder!"));
@@ -54,7 +52,6 @@ public class SlapListener implements Listener {
         Player victim = (Player) event.getRightClicked();
 
         if (isOnCooldown(slapper)) {
-            slapper.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(this.msgCooldown));
             event.setCancelled(true);
             return;
         }

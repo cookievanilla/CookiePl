@@ -64,10 +64,8 @@ public class FunCommandsExecutor implements CommandExecutor {
 
     private void executeFart(Player player) {
         player.getWorld().playSound(player.getLocation(), Sound.ENTITY_BEE_HURT, 0.4f, 0.4f);
-
         Location particleLoc = player.getLocation().add(0, 0.5, 0);
-        Vector particleVel = player.getLocation().getDirection().multiply(-1).multiply(0.1);
-        player.getWorld().spawnParticle(Particle.SNEEZE, particleLoc, 1, 0, 0, 0, 0, particleVel);
+        player.getWorld().spawnParticle(Particle.SNEEZE, particleLoc, 1, 0, 0, 0, 0);
     }
 
     private void executeSpit(Player player) {

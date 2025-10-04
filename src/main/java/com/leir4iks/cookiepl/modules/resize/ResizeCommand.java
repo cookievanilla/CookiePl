@@ -10,6 +10,7 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -104,7 +105,7 @@ public class ResizeCommand implements CommandExecutor, TabCompleter {
     @Override
     public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
         if (args.length == 1) {
-            List<String> completions = Arrays.asList("0.8", "1.0", "1.15");
+            List<String> completions = new ArrayList<>(Arrays.asList("0.8", "1.0", "1.15"));
             if (sender.hasPermission(plugin.getConfig().getString("modules.resize.permission-extended", "cookiepl.resize.extended"))) {
                 completions.addAll(Arrays.asList("0.0625", "16.0"));
             }

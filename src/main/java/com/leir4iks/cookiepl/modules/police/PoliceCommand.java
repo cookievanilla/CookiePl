@@ -1,6 +1,7 @@
 package com.leir4iks.cookiepl.modules.police;
 
 import com.leir4iks.cookiepl.CookiePl;
+import com.leir4iks.cookiepl.modules.policebatons.BatonManager;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -44,14 +45,22 @@ public class PoliceCommand implements CommandExecutor {
                     break;
                 case "baton":
                     player.getInventory().addItem(createPoliceItem("baton-item"));
-                    player.sendMessage(ChatColor.GREEN + "You received a baton.");
+                    player.sendMessage(ChatColor.GREEN + "You received a police baton.");
+                    break;
+                case "fbi-baton":
+                    player.getInventory().addItem(BatonManager.createFbiBaton(plugin));
+                    player.sendMessage(ChatColor.GREEN + "You received an FBI baton.");
+                    break;
+                case "electroshock-baton":
+                    player.getInventory().addItem(BatonManager.createElectroshockBaton(plugin));
+                    player.sendMessage(ChatColor.GREEN + "You received an electroshock baton.");
                     break;
                 default:
-                    player.sendMessage(ChatColor.RED + "Usage: /police give <handcuffs|baton>");
+                    player.sendMessage(ChatColor.RED + "Usage: /police give <handcuffs|baton|fbi-baton|electroshock-baton>");
                     break;
             }
         } else {
-            player.sendMessage(ChatColor.RED + "Usage: /police give <handcuffs|baton>");
+            player.sendMessage(ChatColor.RED + "Usage: /police give <item>");
         }
         return true;
     }

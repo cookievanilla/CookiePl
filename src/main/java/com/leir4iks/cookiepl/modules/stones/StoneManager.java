@@ -2,6 +2,7 @@ package com.leir4iks.cookiepl.modules.stones;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.util.LogManager;
+import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -16,7 +17,6 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,7 +64,7 @@ public class StoneManager {
         });
 
         Slime hitbox = location.getWorld().spawn(location, Slime.class, slime -> {
-            slime.setSize(2);
+            slime.setSize(1);
             slime.setSilent(true);
             slime.setAI(false);
             slime.setCollidable(false);
@@ -85,7 +85,7 @@ public class StoneManager {
 
         activeStones.remove(stand.getUniqueId());
 
-        if (stand.getPassengers().size() > 0 && stand.getPassengers().get(0) instanceof Slime) {
+        if (!stand.getPassengers().isEmpty() && stand.getPassengers().get(0) instanceof Slime) {
             stand.getPassengers().get(0).remove();
         }
         if (dropItem) {
@@ -95,6 +95,11 @@ public class StoneManager {
     }
 
     public void cleanupAllStones() {
+        if (plugin.getServer().isStopping()) {
+            activeStones.clear();
+            logManager.info("Server is stopping, skipping entity removal for stones.");
+            return;
+        }
         for (ActiveStone stone : activeStones.values()) {
             removeStone(stone.getStoneEntity(), true);
         }
@@ -102,7 +107,7 @@ public class StoneManager {
         logManager.info("Cleaned up all active stones.");
     }
 
-    public Collection<ActiveStone> getActiveStones() {
-        return activeStones.values();
+    public ConcurrentHashMap<UUID, ActiveStone> getActiveStones() {
+        return activeStones;
     }
 }

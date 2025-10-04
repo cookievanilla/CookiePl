@@ -16,7 +16,7 @@ public class StonePhysicsEngine implements Runnable {
             return;
         }
 
-        for (ActiveStone stone : new ArrayList<>(stoneManager.getActiveStones())) {
+        for (ActiveStone stone : new ArrayList<>(stoneManager.getActiveStones().values())) {
             if (stone.isValid()) {
                 stone.tick();
             }

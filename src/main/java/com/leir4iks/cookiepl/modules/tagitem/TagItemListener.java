@@ -58,7 +58,6 @@ public class TagItemListener implements Listener {
         ItemStack itemInHand = player.getInventory().getItemInMainHand();
 
         if (itemInHand.getType() == Material.AIR) {
-            sendMessage(player, plugin.getConfig().getString("modules.tag-item.messages.no-item"));
             return;
         }
 
@@ -71,7 +70,6 @@ public class TagItemListener implements Listener {
         String tagLine = formatColor(tagFormat.replace("{player}", player.getName()));
 
         if (meta.hasLore() && Objects.requireNonNull(meta.getLore()).contains(tagLine)) {
-            sendMessage(player, plugin.getConfig().getString("modules.tag-item.messages.already-tagged"));
             return;
         }
 
@@ -80,14 +78,7 @@ public class TagItemListener implements Listener {
         meta.setLore(lore);
         itemInHand.setItemMeta(meta);
 
-        sendMessage(player, plugin.getConfig().getString("modules.tag-item.messages.tag-applied"));
         logManager.debug("Player " + player.getName() + " tagged item " + itemInHand.getType());
-    }
-
-    private void sendMessage(@NotNull Player player, String message) {
-        if (message != null && !message.isEmpty()) {
-            player.sendMessage(formatColor(message));
-        }
     }
 
     @NotNull
