@@ -3,7 +3,6 @@ package com.leir4iks.cookiepl.modules.resize;
 import com.leir4iks.cookiepl.CookiePl;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.Map;
 import java.util.UUID;
@@ -47,22 +46,18 @@ public class ResizeManager {
     }
 
     public void smoothlyResizePlayer(Player player, double targetScale) {
-        double initialScale = player.getAttribute(Attribute.SCALE).getBaseValue();
+        double initialScale = player.getAttribute(Attribute.GENERIC_SCALE).getBaseValue();
         double step = (targetScale - initialScale) / this.resizeSteps;
 
-        new BukkitRunnable() {
-            int count = 0;
-
-            @Override
-            public void run() {
-                if (count++ >= resizeSteps) {
-                    player.getAttribute(Attribute.SCALE).setBaseValue(targetScale);
-                    this.cancel();
-                } else {
-                    player.getAttribute(Attribute.SCALE).setBaseValue(initialScale + step * count);
-                }
+        plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, (task) -> {
+            long count = task.getRunCount() + 1;
+            if (count >= resizeSteps) {
+                player.getAttribute(Attribute.GENERIC_SCALE).setBaseValue(targetScale);
+                task.cancel();
+            } else {
+                player.getAttribute(Attribute.GENERIC_SCALE).setBaseValue(initialScale + step * count);
             }
-        }.runTaskTimer(plugin, 0L, 1L);
+        }, 0L, 1L);
     }
 
     public boolean isValidScale(double scale, boolean hasExtendedPermission) {

@@ -16,6 +16,7 @@ import org.bukkit.inventory.BrewerInventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.Vector;
 
 import java.util.*;
@@ -58,8 +59,9 @@ public class HookahListener implements Listener {
             if (item != null && item.getItemMeta() instanceof PotionMeta) {
                 PotionMeta meta = (PotionMeta) item.getItemMeta();
                 possibleEffects.addAll(meta.getCustomEffects());
-                if (meta.getBasePotionData().getType().getEffectType() != null) {
-                    possibleEffects.addAll(meta.getBasePotionData().getType().getEffectType().getPotionEffects());
+                PotionEffectType baseEffectType = meta.getBasePotionData().getType().getEffectType();
+                if (baseEffectType != null) {
+                    possibleEffects.add(new PotionEffect(baseEffectType, 0, 0));
                 }
             }
         }
@@ -78,7 +80,7 @@ public class HookahListener implements Listener {
     }
 
     private void spawnSmokeEffect(Player player) {
-        plugin.getFoliaLib().getScheduler().runAtEntityWithTimer(player, (task) -> {
+        plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, (task) -> {
             if (task.getRunCount() >= smokeParticleCount || !player.isOnline()) {
                 task.cancel();
                 return;

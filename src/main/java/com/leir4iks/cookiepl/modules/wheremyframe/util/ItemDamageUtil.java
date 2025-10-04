@@ -24,8 +24,8 @@ public final class ItemDamageUtil {
             return;
         }
 
-        if (item.hasItemMeta() && item.getItemMeta().hasEnchant(Enchantment.DURABILITY)) {
-            int level = item.getEnchantmentLevel(Enchantment.DURABILITY);
+        if (item.hasItemMeta() && item.getItemMeta().hasEnchant(Enchantment.UNBREAKING)) {
+            int level = item.getEnchantmentLevel(Enchantment.UNBREAKING);
             int chanceToResist = UNBREAKING_CHANCES.getOrDefault(level, 0);
             if (ThreadLocalRandom.current().nextInt(100) < chanceToResist) {
                 return;

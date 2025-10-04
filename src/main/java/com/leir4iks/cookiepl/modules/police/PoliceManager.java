@@ -12,6 +12,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 
+import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -42,11 +43,15 @@ public class PoliceManager {
         return cuffedPlayers.get(uuid);
     }
 
+    public Collection<CuffedData> getActiveCuffedData() {
+        return cuffedPlayers.values();
+    }
+
     public void nockPlayer(Player victim, Player policeman) {
         if (isCuffed(victim.getUniqueId()) || isNocked(victim.getUniqueId())) return;
 
         int duration = plugin.getConfig().getInt("modules.police-system.nock.duration-seconds", 4);
-        WrappedTask task = plugin.getFoliaLib().getScheduler().runLaterAtEntity(victim, () -> unnockPlayer(victim, false), duration * 20L);
+        WrappedTask task = plugin.getFoliaLib().getScheduler().runLater(() -> unnockPlayer(victim, false), duration * 20L);
 
         nockedPlayers.put(victim.getUniqueId(), new NockedData(policeman.getUniqueId(), task));
         victim.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, duration * 20, 0, true, false));
@@ -83,14 +88,14 @@ public class PoliceManager {
 
         chicken.setLeashHolder(policeman);
 
-        WrappedTask dragTask = plugin.getFoliaLib().getScheduler().runAtEntityWithTimer(victim, (task) -> {
+        WrappedTask dragTask = plugin.getFoliaLib().getScheduler().runAtEntityTimer(victim, (task) -> {
             if (!victim.isOnline() || chicken.isDead()) {
                 task.cancel();
                 return;
             }
             Location chickenLocation = chicken.getLocation();
             if (victim.getLocation().distanceSquared(chickenLocation) > 1.5 * 1.5) {
-                victim.teleportAsync(chickenLocation);
+                plugin.getFoliaLib().getScheduler().teleportAsync(victim, chickenLocation);
             }
         }, 0L, 2L);
 
@@ -125,7 +130,7 @@ public class PoliceManager {
                 String message = plugin.getConfig().getString("modules.police-system.cuff.uncuff-message", "&ePlayer {player} has been released!");
                 policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
             }
-            logManager.info("Player " + victim.getName() + " has been uncuffed.");
+            logManager.info("Player " + (victim.isOnline() ? victim.getName() : victimUUID) + " has been uncuffed.");
         }
     }
 

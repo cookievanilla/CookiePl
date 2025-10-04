@@ -1,7 +1,6 @@
 package com.leir4iks.cookiepl.modules.funcommands;
 
 import com.leir4iks.cookiepl.CookiePl;
-import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.*;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -74,8 +73,8 @@ public class FunCommandsExecutor implements CommandExecutor {
     private void executeSpit(Player player) {
         player.getWorld().playSound(player.getLocation(), Sound.ENTITY_LLAMA_SPIT, 1.0f, 1.0f);
 
-        plugin.getFoliaLib().getScheduler().runAtEntityWithTimer(player, (task) -> {
-            int distance = (int) task.getRunCount() + 1;
+        plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, (task) -> {
+            long distance = task.getRunCount() + 1;
             if (distance > 5) {
                 task.cancel();
                 return;
@@ -86,7 +85,7 @@ public class FunCommandsExecutor implements CommandExecutor {
             Location particleLoc = eyeLoc.clone().add(direction.multiply(distance));
 
             Particle.DustOptions dustOptions = new Particle.DustOptions(Color.WHITE, 1.0f);
-            player.getWorld().spawnParticle(Particle.REDSTONE, particleLoc, 2, 0.1, 0.1, 0.1, 0, dustOptions);
+            player.getWorld().spawnParticle(Particle.DUST, particleLoc, 2, 0.1, 0.1, 0.1, 0, dustOptions);
         }, 0L, 1L);
     }
 

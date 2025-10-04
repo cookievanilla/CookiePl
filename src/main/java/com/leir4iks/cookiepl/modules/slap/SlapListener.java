@@ -72,7 +72,7 @@ public class SlapListener implements Listener {
         victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_PLAYER_ATTACK_STRONG, 1.0f, 1.0f);
 
         Particle.DustOptions dustOptions = new Particle.DustOptions(Color.fromRGB(255, 153, 0), 1.0f);
-        victim.getWorld().spawnParticle(Particle.REDSTONE, victim.getLocation().add(0, 1, 0), 20, 0.4, 0.4, 0.4, 0, dustOptions);
+        victim.getWorld().spawnParticle(Particle.DUST, victim.getLocation().add(0, 1, 0), 20, 0.4, 0.4, 0.4, 0, dustOptions);
 
         if (ThreadLocalRandom.current().nextDouble(100.0) < this.patChance) {
             slapper.sendMessage(this.msgPatSender.replace("{player}", victim.getName()));

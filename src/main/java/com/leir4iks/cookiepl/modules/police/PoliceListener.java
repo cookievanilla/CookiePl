@@ -115,7 +115,7 @@ public class PoliceListener implements Listener {
                 manager.uncuffPlayer(player.getUniqueId());
             }
         } else if (event.getEntity() instanceof Chicken) {
-            for (PoliceManager.CuffedData data : manager.cuffedPlayers.values()) {
+            for (PoliceManager.CuffedData data : manager.getActiveCuffedData()) {
                 if (data.getChickenUUID().equals(event.getEntity().getUniqueId())) {
                     manager.uncuffPlayer(Bukkit.getPlayer(data.getPolicemanUUID()).getUniqueId());
                     break;

@@ -78,11 +78,11 @@ public class ActiveStone {
         stone.teleport(result.getHitPosition().toLocation(stone.getWorld()));
 
         Vector normal = (result.getHitBlockFace() != null) ? result.getHitBlockFace().getDirection() : result.getHitPosition().subtract(stone.getLocation().toVector()).normalize();
-        velocity.reflect(normal).multiply(this.bounceModifier);
+        velocity.subtract(normal.multiply(2 * velocity.dot(normal))).multiply(this.bounceModifier);
 
         if (result.getHitBlock() != null) {
             Block hitBlock = result.getHitBlock();
-            hitBlock.getWorld().spawnParticle(Particle.BLOCK_DUST, stone.getLocation(), 15, 0.2, 0.2, 0.2, hitBlock.getBlockData());
+            hitBlock.getWorld().spawnParticle(Particle.BLOCK, stone.getLocation(), 15, 0.2, 0.2, 0.2, hitBlock.getBlockData());
             playSoundForMaterial(hitBlock);
         }
 

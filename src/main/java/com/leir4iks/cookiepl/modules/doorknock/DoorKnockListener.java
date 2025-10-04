@@ -53,7 +53,7 @@ public class DoorKnockListener implements Listener {
 
         int freezeTicks = plugin.getConfig().getInt("modules.door-knock.freeze-duration-ticks", 20);
         if (freezeTicks > 0) {
-            player.addPotionEffect(new PotionEffect(PotionEffectType.SLOW, freezeTicks, 250, false, false));
+            player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, freezeTicks, 250, false, false));
         }
 
         spawnKnockText(player);

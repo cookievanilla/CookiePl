@@ -1,7 +1,6 @@
 package com.leir4iks.cookiepl.modules.policebatons;
 
 import com.leir4iks.cookiepl.CookiePl;
-import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Player;
@@ -62,7 +61,7 @@ public class BatonListener implements Listener {
         int slowDur = plugin.getConfig().getInt(path + "effects.slowness.duration-seconds", 5) * 20;
 
         victim.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, darkDur, darkAmp - 1));
-        victim.addPotionEffect(new PotionEffect(PotionEffectType.SLOW, slowDur, slowAmp - 1));
+        victim.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, slowDur, slowAmp - 1));
 
         String message = plugin.getConfig().getString(path + "message", "&6Player &e{player} &6was lightly stunned.");
         damager.sendMessage(formatColor(message.replace("{player}", victim.getName())));
@@ -77,7 +76,7 @@ public class BatonListener implements Listener {
         long sitDur = plugin.getConfig().getLong(path + "sit-duration-seconds", 7) * 20;
 
         victim.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, darkDur, darkAmp - 1));
-        victim.addPotionEffect(new PotionEffect(PotionEffectType.SLOW, slowDur, slowAmp - 1));
+        victim.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, slowDur, slowAmp - 1));
 
         forceSit(victim, sitDur);
 
@@ -94,7 +93,7 @@ public class BatonListener implements Listener {
         });
         seat.addPassenger(player);
 
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+        plugin.getFoliaLib().getScheduler().runLater(() -> {
             if (!seat.isDead() && seat.getPassengers().contains(player)) {
                 seat.removePassenger(player);
             }
