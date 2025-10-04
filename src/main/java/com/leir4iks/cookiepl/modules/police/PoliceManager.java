@@ -88,8 +88,10 @@ public class PoliceManager {
 
         chicken.setLeashHolder(policeman);
 
-        WrappedTask dragTask = plugin.getFoliaLib().getScheduler().runAtEntityTimer(victim, (task) -> {
-            if (!victim.isOnline() || chicken.isDead()) {
+        cuffedPlayers.put(victim.getUniqueId(), new CuffedData(policeman.getUniqueId(), chicken.getUniqueId()));
+
+        plugin.getFoliaLib().getScheduler().runAtEntityTimer(victim, (task) -> {
+            if (!cuffedPlayers.containsKey(victim.getUniqueId()) || !victim.isOnline() || chicken.isDead()) {
                 task.cancel();
                 return;
             }
@@ -98,8 +100,6 @@ public class PoliceManager {
                 plugin.getFoliaLib().getScheduler().teleportAsync(victim, chickenLocation);
             }
         }, 0L, 2L);
-
-        cuffedPlayers.put(victim.getUniqueId(), new CuffedData(policeman.getUniqueId(), chicken.getUniqueId(), dragTask));
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());
@@ -112,10 +112,6 @@ public class PoliceManager {
     public void uncuffPlayer(UUID victimUUID) {
         CuffedData data = cuffedPlayers.remove(victimUUID);
         if (data == null) return;
-
-        if (data.getDragTask() != null) {
-            data.getDragTask().cancel();
-        }
 
         Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
         if (chicken != null) {
@@ -187,17 +183,14 @@ public class PoliceManager {
     static class CuffedData {
         private final UUID policemanUUID;
         private final UUID chickenUUID;
-        private final WrappedTask dragTask;
 
-        public CuffedData(UUID policemanUUID, UUID chickenUUID, WrappedTask dragTask) {
+        public CuffedData(UUID policemanUUID, UUID chickenUUID) {
             this.policemanUUID = policemanUUID;
             this.chickenUUID = chickenUUID;
-            this.dragTask = dragTask;
         }
 
         public UUID getPolicemanUUID() { return policemanUUID; }
         public UUID getChickenUUID() { return chickenUUID; }
-        public WrappedTask getDragTask() { return dragTask; }
     }
 
     static class NockedData {
