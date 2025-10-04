@@ -58,7 +58,7 @@ public class ActiveStone {
         if (result != null) {
             handleCollision(result);
         } else {
-            stone.teleport(currentLocation.add(velocity));
+            plugin.getFoliaLib().getScheduler().teleportAsync(stone, currentLocation.add(velocity));
             damageEntities();
         }
 
@@ -75,7 +75,7 @@ public class ActiveStone {
     }
 
     private void handleCollision(RayTraceResult result) {
-        stone.teleport(result.getHitPosition().toLocation(stone.getWorld()));
+        plugin.getFoliaLib().getScheduler().teleportAsync(stone, result.getHitPosition().toLocation(stone.getWorld()));
 
         Vector normal = (result.getHitBlockFace() != null) ? result.getHitBlockFace().getDirection() : result.getHitPosition().subtract(stone.getLocation().toVector()).normalize();
         velocity.subtract(normal.multiply(2 * velocity.dot(normal))).multiply(this.bounceModifier);

@@ -80,8 +80,9 @@ public class HookahListener implements Listener {
     }
 
     private void spawnSmokeEffect(Player player) {
+        final long[] count = {0};
         plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, (task) -> {
-            if (task.getRunCount() >= smokeParticleCount || !player.isOnline()) {
+            if (count[0] >= smokeParticleCount || !player.isOnline()) {
                 task.cancel();
                 return;
             }
@@ -96,6 +97,7 @@ public class HookahListener implements Listener {
 
             player.getWorld().spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, eyeLocation.clone().add(eyeLocation.getDirection().multiply(0.5)), 1, 0, 0, 0, 0, velocity);
             player.getWorld().playSound(player.getLocation(), Sound.ENTITY_PHANTOM_AMBIENT, 0.05f, 0.5f);
+            count[0]++;
         }, 0L, 1L);
     }
 
@@ -104,37 +106,4 @@ public class HookahListener implements Listener {
         final double overdoseDecrease = plugin.getConfig().getDouble("modules.hookah.overdose-level-decrease-per-second", 4.2);
         final double threshold = plugin.getConfig().getDouble("modules.hookah.overdose-threshold", 8.0);
 
-        this.reducerTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
-            if (hookahLevels.isEmpty()) {
-                return;
-            }
-
-            Iterator<Map.Entry<UUID, Double>> iterator = hookahLevels.entrySet().iterator();
-            while (iterator.hasNext()) {
-                Map.Entry<UUID, Double> entry = iterator.next();
-                UUID uuid = entry.getKey();
-                double currentLevel = entry.getValue();
-
-                Player player = plugin.getServer().getPlayer(uuid);
-                if (player != null && player.isOnline()) {
-                    double decreaseAmount = (currentLevel >= threshold) ? overdoseDecrease : normalDecrease;
-                    double newLevel = Math.max(0, currentLevel - decreaseAmount);
-
-                    if (newLevel <= 0) {
-                        iterator.remove();
-                    } else {
-                        entry.setValue(newLevel);
-                    }
-                } else {
-                    iterator.remove();
-                }
-            }
-        }, 20L, 20L);
-    }
-
-    public void cancelTask() {
-        if (reducerTask != null && !reducerTask.isCancelled()) {
-            reducerTask.cancel();
-        }
-    }
-}
+        this.reducerTask = plugi

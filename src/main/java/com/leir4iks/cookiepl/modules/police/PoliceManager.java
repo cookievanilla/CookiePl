@@ -65,7 +65,7 @@ public class PoliceManager {
     public void unnockPlayer(Player victim, boolean force) {
         NockedData data = nockedPlayers.remove(victim.getUniqueId());
         if (data != null) {
-            if (!force) {
+            if (!force && data.getExpireTask() != null) {
                 data.getExpireTask().cancel();
             }
             logManager.info("Player " + victim.getName() + " is no longer nocked.");
@@ -113,7 +113,10 @@ public class PoliceManager {
         CuffedData data = cuffedPlayers.remove(victimUUID);
         if (data == null) return;
 
-        data.getDragTask().cancel();
+        if (data.getDragTask() != null) {
+            data.getDragTask().cancel();
+        }
+
         Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
         if (chicken != null) {
             chicken.setLeashHolder(null);
@@ -142,7 +145,9 @@ public class PoliceManager {
     }
 
     public void cleanUpAll() {
-        watchdogTask.cancel();
+        if (watchdogTask != null) {
+            watchdogTask.cancel();
+        }
         for (UUID uuid : cuffedPlayers.keySet()) {
             uncuffPlayer(uuid);
         }

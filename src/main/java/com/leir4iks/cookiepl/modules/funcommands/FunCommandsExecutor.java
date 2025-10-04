@@ -73,8 +73,9 @@ public class FunCommandsExecutor implements CommandExecutor {
     private void executeSpit(Player player) {
         player.getWorld().playSound(player.getLocation(), Sound.ENTITY_LLAMA_SPIT, 1.0f, 1.0f);
 
+        final long[] count = {0};
         plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, (task) -> {
-            long distance = task.getRunCount() + 1;
+            long distance = count[0] + 1;
             if (distance > 5) {
                 task.cancel();
                 return;
@@ -86,6 +87,7 @@ public class FunCommandsExecutor implements CommandExecutor {
 
             Particle.DustOptions dustOptions = new Particle.DustOptions(Color.WHITE, 1.0f);
             player.getWorld().spawnParticle(Particle.DUST, particleLoc, 2, 0.1, 0.1, 0.1, 0, dustOptions);
+            count[0]++;
         }, 0L, 1L);
     }
 

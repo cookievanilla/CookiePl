@@ -49,14 +49,15 @@ public class ResizeManager {
         double initialScale = player.getAttribute(Attribute.GENERIC_SCALE).getBaseValue();
         double step = (targetScale - initialScale) / this.resizeSteps;
 
+        final long[] count = {0};
         plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, (task) -> {
-            long count = task.getRunCount() + 1;
-            if (count >= resizeSteps) {
+            if (count[0] >= resizeSteps) {
                 player.getAttribute(Attribute.GENERIC_SCALE).setBaseValue(targetScale);
                 task.cancel();
             } else {
-                player.getAttribute(Attribute.GENERIC_SCALE).setBaseValue(initialScale + step * count);
+                player.getAttribute(Attribute.GENERIC_SCALE).setBaseValue(initialScale + step * (count[0] + 1));
             }
+            count[0]++;
         }, 0L, 1L);
     }
 
