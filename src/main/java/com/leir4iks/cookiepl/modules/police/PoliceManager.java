@@ -86,6 +86,7 @@ public class PoliceManager {
             c.setCollidable(false);
             c.setInvisible(true);
             c.setAgeLock(true);
+            c.setAI(false);
         });
 
         chicken.setLeashHolder(policeman);
@@ -101,13 +102,11 @@ public class PoliceManager {
             Location chickenLocation = chicken.getLocation();
             Location victimLocation = victim.getLocation();
 
-            if (victimLocation.distanceSquared(chickenLocation) > 0.25) { // 0.5
-                Vector pullVector = chickenLocation.toVector().subtract(victimLocation.toVector());
-                double originalY = victim.getVelocity().getY();
-                Vector horizontalPull = pullVector.normalize().multiply(0.4);
-                Vector newVelocity = new Vector(horizontalPull.getX(), originalY, horizontalPull.getZ());
-                victim.setVelocity(newVelocity);
-            }
+            Vector pullVector = chickenLocation.toVector().subtract(victimLocation.toVector());
+            Vector newVelocity = victim.getVelocity().add(pullVector.multiply(0.2));
+
+            victim.setVelocity(newVelocity);
+
         }, 0L, 2L);
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
