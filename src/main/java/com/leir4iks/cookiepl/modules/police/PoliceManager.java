@@ -178,7 +178,7 @@ public class PoliceManager {
                 if (shouldUncuff) {
                     Location location = victim != null ? victim.getLocation() : (policeman != null ? policeman.getLocation() : null);
                     if (location != null) {
-                        plugin.getFoliaLib().getScheduler().runAtLocation(location, () -> uncuffPlayer(victimUUID));
+                        plugin.getFoliaLib().getScheduler().runAtLocation(location, (task) -> uncuffPlayer(victimUUID));
                     } else {
                         plugin.getServer().getScheduler().runTask(plugin, () -> uncuffPlayer(victimUUID));
                     }
