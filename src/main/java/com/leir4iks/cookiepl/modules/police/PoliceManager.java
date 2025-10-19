@@ -8,6 +8,7 @@ import org.bukkit.entity.Chicken;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.Vector;
 
 import java.util.Collection;
 import java.util.Map;
@@ -85,7 +86,6 @@ public class PoliceManager {
             c.setCollidable(false);
             c.setInvisible(true);
             c.setAgeLock(true);
-            c.setAI(false);
         });
 
         chicken.setLeashHolder(policeman);
@@ -97,11 +97,15 @@ public class PoliceManager {
                 task.cancel();
                 return;
             }
+
             Location chickenLocation = chicken.getLocation();
-            if (victim.getLocation().distanceSquared(chickenLocation) > 1.5 * 1.5) {
-                plugin.getFoliaLib().getScheduler().teleportAsync(victim, chickenLocation);
+            Location victimLocation = victim.getLocation();
+
+            if (victimLocation.distanceSquared(chickenLocation) > 2.25) { // 1.5 blocks
+                Vector pullVector = chickenLocation.toVector().subtract(victimLocation.toVector());
+                victim.setVelocity(pullVector.normalize().multiply(1.2));
             }
-        }, 0L, 2L);
+        }, 0L, 3L);
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());

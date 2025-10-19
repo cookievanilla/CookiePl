@@ -106,6 +106,9 @@ public class StoneManager {
     }
 
     public void cleanupAllStones() {
+        if (plugin.getServer().isStopping()) {
+            return;
+        }
         for (ActiveStone stone : activeStones.values()) {
             removeStone(stone.getStoneEntity(), true);
         }
