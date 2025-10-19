@@ -3,10 +3,7 @@ package com.leir4iks.cookiepl.modules.police;
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
-import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
-import org.bukkit.Location;
-import org.bukkit.Sound;
+import org.bukkit.*;
 import org.bukkit.entity.Chicken;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
@@ -25,10 +22,15 @@ public class PoliceManager {
     private final Map<UUID, NockedData> nockedPlayers = new ConcurrentHashMap<>();
     private final WrappedTask watchdogTask;
 
+    public static NamespacedKey HANDCUFFS_KEY;
+    public static NamespacedKey BATON_KEY;
+
     public PoliceManager(CookiePl plugin, LogManager logManager) {
         this.plugin = plugin;
         this.logManager = logManager;
         this.watchdogTask = startWatchdogTask();
+        HANDCUFFS_KEY = new NamespacedKey(plugin, "handcuffs_item");
+        BATON_KEY = new NamespacedKey(plugin, "baton_item");
     }
 
     public boolean isCuffed(UUID uuid) {
@@ -51,7 +53,7 @@ public class PoliceManager {
         if (isCuffed(victim.getUniqueId()) || isNocked(victim.getUniqueId())) return;
 
         int duration = plugin.getConfig().getInt("modules.police-system.nock.duration-seconds", 4);
-        WrappedTask task = plugin.getFoliaLib().getScheduler().runLater(() -> unnockPlayer(victim, false), duration * 20L);
+        WrappedTask task = plugin.getFoliaLib().getScheduler().runAtEntityLater(victim, () -> unnockPlayer(victim, false), duration * 20L);
 
         nockedPlayers.put(victim.getUniqueId(), new NockedData(policeman.getUniqueId(), task));
         victim.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, duration * 20, 0, true, false));
@@ -136,7 +138,8 @@ public class PoliceManager {
     private void executeEmoteCommand(String type, String playerName) {
         String command = plugin.getConfig().getString("modules.police-system.emote-commands." + type, "");
         if (command != null && !command.isEmpty()) {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command.replace("{player}", playerName));
+            String finalCommand = command.replace("{player}", playerName);
+            plugin.getServer().getScheduler().runTask(plugin, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), finalCommand));
         }
     }
 
@@ -173,7 +176,12 @@ public class PoliceManager {
                 }
 
                 if (shouldUncuff) {
-                    uncuffPlayer(victimUUID);
+                    Location location = victim != null ? victim.getLocation() : (policeman != null ? policeman.getLocation() : null);
+                    if (location != null) {
+                        plugin.getFoliaLib().getScheduler().runAtLocation(location, () -> uncuffPlayer(victimUUID));
+                    } else {
+                        plugin.getServer().getScheduler().runTask(plugin, () -> uncuffPlayer(victimUUID));
+                    }
                     logManager.debug("Auto-uncuffed player " + (victim != null ? victim.getName() : victimUUID) + " due to watchdog conditions.");
                 }
             }

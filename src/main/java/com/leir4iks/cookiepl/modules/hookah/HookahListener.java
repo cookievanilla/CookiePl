@@ -20,12 +20,13 @@ import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.Vector;
 
 import java.util.*;
+        import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 public class HookahListener implements Listener {
 
     private final CookiePl plugin;
-    private final Map<UUID, Double> hookahLevels = new HashMap<>();
+    private final Map<UUID, Double> hookahLevels = new ConcurrentHashMap<>();
     private WrappedTask reducerTask;
 
     private final int effectDuration;

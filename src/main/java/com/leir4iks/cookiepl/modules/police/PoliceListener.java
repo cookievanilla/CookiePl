@@ -17,14 +17,10 @@ public class PoliceListener implements Listener {
 
     private final CookiePl plugin;
     private final PoliceManager manager;
-    private final NamespacedKey handcuffsKey;
-    private final NamespacedKey batonKey;
 
     public PoliceListener(CookiePl plugin, PoliceManager manager) {
         this.plugin = plugin;
         this.manager = manager;
-        this.handcuffsKey = new NamespacedKey(plugin, "handcuffs_item");
-        this.batonKey = new NamespacedKey(plugin, "baton_item");
     }
 
     private boolean isPoliceItem(ItemStack item, NamespacedKey key) {
@@ -62,7 +58,7 @@ public class PoliceListener implements Listener {
                 return;
             }
 
-            if (event.getEntity() instanceof Player && isPoliceItem(damager.getInventory().getItemInMainHand(), batonKey)) {
+            if (event.getEntity() instanceof Player && isPoliceItem(damager.getInventory().getItemInMainHand(), PoliceManager.BATON_KEY)) {
                 Player victim = (Player) event.getEntity();
                 String permission = plugin.getConfig().getString("modules.police-system.permission");
                 if (damager.hasPermission(permission)) {
@@ -80,17 +76,14 @@ public class PoliceListener implements Listener {
         Player victim = (Player) event.getRightClicked();
         ItemStack item = policeman.getInventory().getItemInMainHand();
 
-        if (isPoliceItem(item, handcuffsKey)) {
+        if (isPoliceItem(item, PoliceManager.HANDCUFFS_KEY)) {
             String permission = plugin.getConfig().getString("modules.police-system.permission");
             if (policeman.hasPermission(permission)) {
                 event.setCancelled(true);
                 if (manager.isNocked(victim.getUniqueId())) {
                     manager.cuffPlayer(victim, policeman);
                 } else if (manager.isCuffed(victim.getUniqueId())) {
-                    PoliceManager.CuffedData data = manager.getCuffedData(victim.getUniqueId());
-                    if (data != null && data.getPolicemanUUID().equals(policeman.getUniqueId())) {
-                        manager.uncuffPlayer(victim.getUniqueId());
-                    }
+                    manager.uncuffPlayer(victim.getUniqueId());
                 }
             }
         }

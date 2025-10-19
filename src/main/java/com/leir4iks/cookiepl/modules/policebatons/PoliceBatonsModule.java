@@ -16,6 +16,7 @@ public class PoliceBatonsModule implements IModule {
     @Override
     public void disable(CookiePl plugin) {
         if (listener != null) {
+            listener.cleanUpAllSeats();
             HandlerList.unregisterAll(listener);
         }
     }

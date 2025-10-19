@@ -9,19 +9,19 @@ import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class FunCommandsExecutor implements CommandExecutor {
 
     private final CookiePl plugin;
-    private final Map<String, Map<UUID, Long>> cooldowns = new HashMap<>();
+    private final Map<String, Map<UUID, Long>> cooldowns = new ConcurrentHashMap<>();
 
     public FunCommandsExecutor(CookiePl plugin) {
         this.plugin = plugin;
-        this.cooldowns.put("fart", new HashMap<>());
-        this.cooldowns.put("spit", new HashMap<>());
+        this.cooldowns.put("fart", new ConcurrentHashMap<>());
+        this.cooldowns.put("spit", new ConcurrentHashMap<>());
     }
 
     @Override
