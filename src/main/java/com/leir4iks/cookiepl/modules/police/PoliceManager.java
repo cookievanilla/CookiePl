@@ -139,7 +139,7 @@ public class PoliceManager {
         String command = plugin.getConfig().getString("modules.police-system.emote-commands." + type, "");
         if (command != null && !command.isEmpty()) {
             String finalCommand = command.replace("{player}", playerName);
-            plugin.getFoliaLib().getGlobalRegionScheduler().run((task) -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), finalCommand));
+            plugin.getFoliaLib().getScheduler().run((task) -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), finalCommand));
         }
     }
 
@@ -180,7 +180,7 @@ public class PoliceManager {
                     if (location != null) {
                         plugin.getFoliaLib().getScheduler().runAtLocation(location, (task) -> uncuffPlayer(victimUUID));
                     } else {
-                        plugin.getFoliaLib().getGlobalRegionScheduler().run((task) -> uncuffPlayer(victimUUID));
+                        plugin.getFoliaLib().getScheduler().run((task) -> uncuffPlayer(victimUUID));
                     }
                     logManager.debug("Auto-uncuffed player " + (victim != null ? victim.getName() : victimUUID) + " due to watchdog conditions.");
                 }
