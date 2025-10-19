@@ -83,7 +83,7 @@ public class PoliceListener implements Listener {
                 if (manager.isNocked(victim.getUniqueId())) {
                     manager.cuffPlayer(victim, policeman);
                 } else if (manager.isCuffed(victim.getUniqueId())) {
-                    manager.uncuffPlayer(victim.getUniqueId());
+                    manager.uncuffPlayer(victim.getUniqueId(), "Manual uncuff by " + policeman.getName());
                 }
             }
         }
@@ -93,7 +93,7 @@ public class PoliceListener implements Listener {
     public void onQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
         if (manager.isCuffed(player.getUniqueId())) {
-            manager.uncuffPlayer(player.getUniqueId());
+            manager.uncuffPlayer(player.getUniqueId(), "Player Quit");
         }
         if (manager.isNocked(player.getUniqueId())) {
             manager.unnockPlayer(player, true);
@@ -105,15 +105,12 @@ public class PoliceListener implements Listener {
         if (event.getEntity() instanceof Player) {
             Player player = (Player) event.getEntity();
             if (manager.isCuffed(player.getUniqueId())) {
-                manager.uncuffPlayer(player.getUniqueId());
+                manager.uncuffPlayer(player.getUniqueId(), "Entered Portal");
             }
         } else if (event.getEntity() instanceof Chicken) {
             for (PoliceManager.CuffedData data : manager.getActiveCuffedData()) {
                 if (data.getChickenUUID().equals(event.getEntity().getUniqueId())) {
-                    Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
-                    if (policeman != null) {
-                        manager.uncuffPlayer(policeman.getUniqueId());
-                    }
+                    manager.uncuffPlayer(data.getPolicemanUUID(), "Chicken Entered Portal");
                     break;
                 }
             }

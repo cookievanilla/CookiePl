@@ -91,6 +91,7 @@ public class PoliceManager {
         chicken.setLeashHolder(policeman);
 
         cuffedPlayers.put(victim.getUniqueId(), new CuffedData(policeman.getUniqueId(), chicken.getUniqueId()));
+        logManager.debug("Player " + victim.getName() + " cuffed by " + policeman.getName() + ". Timestamp: " + cuffedPlayers.get(victim.getUniqueId()).getCuffTimestamp());
 
         plugin.getFoliaLib().getScheduler().runAtEntityTimer(victim, (task) -> {
             if (!cuffedPlayers.containsKey(victim.getUniqueId()) || !victim.isOnline() || chicken.isDead()) {
@@ -111,9 +112,13 @@ public class PoliceManager {
         logManager.info("Player " + policeman.getName() + " cuffed " + victim.getName());
     }
 
-    public void uncuffPlayer(UUID victimUUID) {
+    public void uncuffPlayer(UUID victimUUID, String reason) {
+        logManager.debug("uncuffPlayer called for " + victimUUID + ". Reason: " + reason);
         CuffedData data = cuffedPlayers.remove(victimUUID);
-        if (data == null) return;
+        if (data == null) {
+            logManager.debug("uncuffPlayer: No cuffed data found for " + victimUUID + ". Aborting.");
+            return;
+        }
 
         Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
         if (chicken != null) {
@@ -131,7 +136,7 @@ public class PoliceManager {
                 String message = plugin.getConfig().getString("modules.police-system.cuff.uncuff-message", "&ePlayer {player} has been released!");
                 policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
             }
-            logManager.info("Player " + (victim.isOnline() ? victim.getName() : victimUUID) + " has been uncuffed.");
+            logManager.info("Player " + (victim.isOnline() ? victim.getName() : victimUUID) + " has been uncuffed. Reason: " + reason);
         }
     }
 
@@ -148,7 +153,7 @@ public class PoliceManager {
             watchdogTask.cancel();
         }
         for (UUID uuid : cuffedPlayers.keySet()) {
-            uncuffPlayer(uuid);
+            uncuffPlayer(uuid, "Plugin Disable");
         }
         cuffedPlayers.clear();
         nockedPlayers.clear();
@@ -157,12 +162,20 @@ public class PoliceManager {
 
     private WrappedTask startWatchdogTask() {
         return plugin.getFoliaLib().getScheduler().runTimer(() -> {
+            if (cuffedPlayers.isEmpty()) return;
+            logManager.debug("Watchdog: Starting check for " + cuffedPlayers.size() + " cuffed players.");
             double maxDist = plugin.getConfig().getDouble("modules.police-system.max-cuff-distance", 20.0);
+
             for (UUID victimUUID : cuffedPlayers.keySet()) {
                 CuffedData data = cuffedPlayers.get(victimUUID);
                 if (data == null) continue;
 
-                if (System.currentTimeMillis() - data.getCuffTimestamp() < 2000L) {
+                logManager.debug("Watchdog: Checking player " + victimUUID);
+
+                long timeSinceCuff = System.currentTimeMillis() - data.getCuffTimestamp();
+                logManager.debug("Watchdog: Time since cuff: " + timeSinceCuff + "ms.");
+                if (timeSinceCuff < 3000L) {
+                    logManager.debug("Watchdog: Player is in grace period. Skipping.");
                     continue;
                 }
 
@@ -171,22 +184,38 @@ public class PoliceManager {
                 Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
 
                 boolean shouldUncuff = false;
-                if (policeman == null || !policeman.isOnline() || victim == null || !victim.isOnline()) {
+                String uncuffReason = "Unknown";
+
+                if (policeman == null || !policeman.isOnline()) {
                     shouldUncuff = true;
-                } else if (chicken == null || chicken.isDead() || !chicken.isLeashed()) {
+                    uncuffReason = "Policeman is offline or null.";
+                } else if (victim == null || !victim.isOnline()) {
                     shouldUncuff = true;
-                } else if (victim.getWorld() != policeman.getWorld() || victim.getLocation().distance(policeman.getLocation()) > maxDist) {
+                    uncuffReason = "Victim is offline or null.";
+                } else if (chicken == null || chicken.isDead()) {
                     shouldUncuff = true;
+                    uncuffReason = "Chicken entity is invalid (null or dead).";
+                } else if (!chicken.isLeashed()) {
+                    shouldUncuff = true;
+                    uncuffReason = "Chicken is not leashed.";
+                } else if (victim.getWorld() != policeman.getWorld()) {
+                    shouldUncuff = true;
+                    uncuffReason = "Player and policeman are in different worlds.";
+                } else if (victim.getLocation().distance(policeman.getLocation()) > maxDist) {
+                    shouldUncuff = true;
+                    uncuffReason = "Distance limit exceeded.";
                 }
 
+                logManager.debug("Watchdog: Check complete for " + victimUUID + ". Should uncuff: " + shouldUncuff + ". Reason: " + uncuffReason);
+
                 if (shouldUncuff) {
+                    final String finalUncuffReason = "Watchdog: " + uncuffReason;
                     Location location = victim != null ? victim.getLocation() : (policeman != null ? policeman.getLocation() : null);
                     if (location != null) {
-                        plugin.getFoliaLib().getScheduler().runAtLocation(location, (task) -> uncuffPlayer(victimUUID));
+                        plugin.getFoliaLib().getScheduler().runAtLocation(location, (task) -> uncuffPlayer(victimUUID, finalUncuffReason));
                     } else {
-                        plugin.getFoliaLib().getScheduler().runNextTick((task) -> uncuffPlayer(victimUUID));
+                        plugin.getFoliaLib().getScheduler().runNextTick((task) -> uncuffPlayer(victimUUID, finalUncuffReason));
                     }
-                    logManager.debug("Auto-uncuffed player " + (victim != null ? victim.getName() : victimUUID) + " due to watchdog conditions.");
                 }
             }
         }, 20L, 20L);
