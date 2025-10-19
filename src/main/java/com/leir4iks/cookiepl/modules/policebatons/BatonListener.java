@@ -118,6 +118,9 @@ public class BatonListener implements Listener {
     }
 
     public void cleanUpSeatFor(Player player) {
+        if (plugin.getServer().isStopping()) {
+            return;
+        }
         ArmorStand seat = activeSeats.remove(player.getUniqueId());
         if (seat != null && !seat.isDead()) {
             seat.remove();
@@ -125,6 +128,9 @@ public class BatonListener implements Listener {
     }
 
     public void cleanUpAllSeats() {
+        if (plugin.getServer().isStopping()) {
+            return;
+        }
         for (ArmorStand seat : activeSeats.values()) {
             if (seat != null && !seat.isDead()) {
                 seat.remove();

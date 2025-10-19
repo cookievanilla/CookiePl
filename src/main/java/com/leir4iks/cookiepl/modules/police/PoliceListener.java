@@ -84,18 +84,15 @@ public class PoliceListener implements Listener {
         if (isPoliceItem(item, PoliceManager.HANDCUFFS_KEY)) {
             long now = System.currentTimeMillis();
             long lastUse = interactCooldowns.getOrDefault(policeman.getUniqueId(), 0L);
-            if (now - lastUse < 2000L) { // 2 second cooldown
-                plugin.getLogManager().debug("PoliceListener: " + policeman.getName() + " on cooldown. Aborting interact event.");
+            if (now - lastUse < 2000L) {
                 event.setCancelled(true);
                 return;
             }
             interactCooldowns.put(policeman.getUniqueId(), now);
-            plugin.getLogManager().debug("PoliceListener: " + policeman.getName() + " used handcuffs on " + victim.getName() + ". Cooldown set.");
 
             String permission = plugin.getConfig().getString("modules.police-system.permission");
             if (policeman.hasPermission(permission)) {
                 event.setCancelled(true);
-                plugin.getLogManager().debug("PoliceListener: Policeman has permission. Victim nocked: " + manager.isNocked(victim.getUniqueId()) + ", Victim cuffed: " + manager.isCuffed(victim.getUniqueId()));
                 if (manager.isNocked(victim.getUniqueId())) {
                     manager.cuffPlayer(victim, policeman);
                 } else if (manager.isCuffed(victim.getUniqueId())) {
