@@ -162,6 +162,10 @@ public class PoliceManager {
                 CuffedData data = cuffedPlayers.get(victimUUID);
                 if (data == null) continue;
 
+                if (System.currentTimeMillis() - data.getCuffTimestamp() < 2000L) {
+                    continue;
+                }
+
                 Player victim = Bukkit.getPlayer(victimUUID);
                 Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
                 Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
@@ -191,14 +195,17 @@ public class PoliceManager {
     static class CuffedData {
         private final UUID policemanUUID;
         private final UUID chickenUUID;
+        private final long cuffTimestamp;
 
         public CuffedData(UUID policemanUUID, UUID chickenUUID) {
             this.policemanUUID = policemanUUID;
             this.chickenUUID = chickenUUID;
+            this.cuffTimestamp = System.currentTimeMillis();
         }
 
         public UUID getPolicemanUUID() { return policemanUUID; }
         public UUID getChickenUUID() { return chickenUUID; }
+        public long getCuffTimestamp() { return cuffTimestamp; }
     }
 
     static class NockedData {

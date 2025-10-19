@@ -106,11 +106,6 @@ public class StoneManager {
     }
 
     public void cleanupAllStones() {
-        if (plugin.getServer().isStopping()) {
-            activeStones.clear();
-            logManager.info("Server is stopping, skipping entity removal for stones.");
-            return;
-        }
         for (ActiveStone stone : activeStones.values()) {
             removeStone(stone.getStoneEntity(), true);
         }

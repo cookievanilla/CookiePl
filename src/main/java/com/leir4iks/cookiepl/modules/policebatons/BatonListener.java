@@ -120,22 +120,14 @@ public class BatonListener implements Listener {
     public void cleanUpSeatFor(Player player) {
         ArmorStand seat = activeSeats.remove(player.getUniqueId());
         if (seat != null && !seat.isDead()) {
-            plugin.getFoliaLib().getScheduler().runAtEntity(seat, (task) -> {
-                if (!seat.isDead()) {
-                    seat.remove();
-                }
-            });
+            seat.remove();
         }
     }
 
     public void cleanUpAllSeats() {
         for (ArmorStand seat : activeSeats.values()) {
             if (seat != null && !seat.isDead()) {
-                plugin.getFoliaLib().getScheduler().runAtEntity(seat, (task) -> {
-                    if (!seat.isDead()) {
-                        seat.remove();
-                    }
-                });
+                seat.remove();
             }
         }
         activeSeats.clear();
