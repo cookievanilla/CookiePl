@@ -13,10 +13,15 @@ import org.bukkit.event.player.*;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
 public class PoliceListener implements Listener {
 
     private final CookiePl plugin;
     private final PoliceManager manager;
+    private final Map<UUID, Long> interactCooldowns = new ConcurrentHashMap<>();
 
     public PoliceListener(CookiePl plugin, PoliceManager manager) {
         this.plugin = plugin;
@@ -77,9 +82,20 @@ public class PoliceListener implements Listener {
         ItemStack item = policeman.getInventory().getItemInMainHand();
 
         if (isPoliceItem(item, PoliceManager.HANDCUFFS_KEY)) {
+            long now = System.currentTimeMillis();
+            long lastUse = interactCooldowns.getOrDefault(policeman.getUniqueId(), 0L);
+            if (now - lastUse < 2000L) { // 2 second cooldown
+                plugin.getLogManager().debug("PoliceListener: " + policeman.getName() + " on cooldown. Aborting interact event.");
+                event.setCancelled(true);
+                return;
+            }
+            interactCooldowns.put(policeman.getUniqueId(), now);
+            plugin.getLogManager().debug("PoliceListener: " + policeman.getName() + " used handcuffs on " + victim.getName() + ". Cooldown set.");
+
             String permission = plugin.getConfig().getString("modules.police-system.permission");
             if (policeman.hasPermission(permission)) {
                 event.setCancelled(true);
+                plugin.getLogManager().debug("PoliceListener: Policeman has permission. Victim nocked: " + manager.isNocked(victim.getUniqueId()) + ", Victim cuffed: " + manager.isCuffed(victim.getUniqueId()));
                 if (manager.isNocked(victim.getUniqueId())) {
                     manager.cuffPlayer(victim, policeman);
                 } else if (manager.isCuffed(victim.getUniqueId())) {

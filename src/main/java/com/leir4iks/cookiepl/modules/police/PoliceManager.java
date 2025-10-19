@@ -50,7 +50,11 @@ public class PoliceManager {
     }
 
     public void nockPlayer(Player victim, Player policeman) {
-        if (isCuffed(victim.getUniqueId()) || isNocked(victim.getUniqueId())) return;
+        logManager.debug("nockPlayer triggered by " + policeman.getName() + " on " + victim.getName());
+        if (isCuffed(victim.getUniqueId()) || isNocked(victim.getUniqueId())) {
+            logManager.debug("nockPlayer cancelled: victim is already cuffed or nocked.");
+            return;
+        }
 
         int duration = plugin.getConfig().getInt("modules.police-system.nock.duration-seconds", 4);
         WrappedTask task = plugin.getFoliaLib().getScheduler().runAtEntityLater(victim, () -> unnockPlayer(victim, false), duration * 20L);
@@ -65,17 +69,24 @@ public class PoliceManager {
     }
 
     public void unnockPlayer(Player victim, boolean force) {
+        logManager.debug("unnockPlayer triggered for " + victim.getName() + ". Force: " + force);
         NockedData data = nockedPlayers.remove(victim.getUniqueId());
         if (data != null) {
             if (!force && data.getExpireTask() != null) {
                 data.getExpireTask().cancel();
             }
             logManager.info("Player " + victim.getName() + " is no longer nocked.");
+        } else {
+            logManager.debug("unnockPlayer: Player " + victim.getName() + " was not nocked.");
         }
     }
 
     public void cuffPlayer(Player victim, Player policeman) {
-        if (isCuffed(victim.getUniqueId())) return;
+        logManager.debug("cuffPlayer triggered by " + policeman.getName() + " on " + victim.getName());
+        if (isCuffed(victim.getUniqueId())) {
+            logManager.debug("cuffPlayer cancelled: victim is already cuffed.");
+            return;
+        }
         unnockPlayer(victim, true);
 
         Location chickenLoc = victim.getLocation();
@@ -87,8 +98,10 @@ public class PoliceManager {
             c.setAgeLock(true);
             c.setAI(false);
         });
+        logManager.debug("Spawned invisible chicken with UUID: " + chicken.getUniqueId());
 
         chicken.setLeashHolder(policeman);
+        logManager.debug("Set leash holder to " + policeman.getName());
 
         cuffedPlayers.put(victim.getUniqueId(), new CuffedData(policeman.getUniqueId(), chicken.getUniqueId()));
         logManager.debug("Player " + victim.getName() + " cuffed by " + policeman.getName() + ". Timestamp: " + cuffedPlayers.get(victim.getUniqueId()).getCuffTimestamp());
@@ -122,8 +135,11 @@ public class PoliceManager {
 
         Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
         if (chicken != null) {
+            logManager.debug("Found chicken " + chicken.getUniqueId() + ". Removing leash and chicken.");
             chicken.setLeashHolder(null);
             chicken.remove();
+        } else {
+            logManager.debug("Could not find chicken with UUID: " + data.getChickenUUID());
         }
 
         Player victim = Bukkit.getPlayer(victimUUID);
@@ -144,6 +160,7 @@ public class PoliceManager {
         String command = plugin.getConfig().getString("modules.police-system.emote-commands." + type, "");
         if (command != null && !command.isEmpty()) {
             String finalCommand = command.replace("{player}", playerName);
+            logManager.debug("Dispatching emote command: " + finalCommand);
             plugin.getFoliaLib().getScheduler().runNextTick((task) -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), finalCommand));
         }
     }
@@ -173,9 +190,8 @@ public class PoliceManager {
                 logManager.debug("Watchdog: Checking player " + victimUUID);
 
                 long timeSinceCuff = System.currentTimeMillis() - data.getCuffTimestamp();
-                logManager.debug("Watchdog: Time since cuff: " + timeSinceCuff + "ms.");
                 if (timeSinceCuff < 3000L) {
-                    logManager.debug("Watchdog: Player is in grace period. Skipping.");
+                    logManager.debug("Watchdog: Player " + victimUUID + " is in grace period (" + timeSinceCuff + "ms). Skipping.");
                     continue;
                 }
 
@@ -186,15 +202,24 @@ public class PoliceManager {
                 boolean shouldUncuff = false;
                 String uncuffReason = "Unknown";
 
-                if (policeman == null || !policeman.isOnline()) {
+                if (policeman == null) {
                     shouldUncuff = true;
-                    uncuffReason = "Policeman is offline or null.";
-                } else if (victim == null || !victim.isOnline()) {
+                    uncuffReason = "Policeman is null.";
+                } else if (!policeman.isOnline()) {
                     shouldUncuff = true;
-                    uncuffReason = "Victim is offline or null.";
-                } else if (chicken == null || chicken.isDead()) {
+                    uncuffReason = "Policeman is offline.";
+                } else if (victim == null) {
                     shouldUncuff = true;
-                    uncuffReason = "Chicken entity is invalid (null or dead).";
+                    uncuffReason = "Victim is null.";
+                } else if (!victim.isOnline()) {
+                    shouldUncuff = true;
+                    uncuffReason = "Victim is offline.";
+                } else if (chicken == null) {
+                    shouldUncuff = true;
+                    uncuffReason = "Chicken entity is null.";
+                } else if (chicken.isDead()) {
+                    shouldUncuff = true;
+                    uncuffReason = "Chicken entity is dead.";
                 } else if (!chicken.isLeashed()) {
                     shouldUncuff = true;
                     uncuffReason = "Chicken is not leashed.";
@@ -203,12 +228,11 @@ public class PoliceManager {
                     uncuffReason = "Player and policeman are in different worlds.";
                 } else if (victim.getLocation().distance(policeman.getLocation()) > maxDist) {
                     shouldUncuff = true;
-                    uncuffReason = "Distance limit exceeded.";
+                    uncuffReason = "Distance limit exceeded (" + victim.getLocation().distance(policeman.getLocation()) + " > " + maxDist + ").";
                 }
 
-                logManager.debug("Watchdog: Check complete for " + victimUUID + ". Should uncuff: " + shouldUncuff + ". Reason: " + uncuffReason);
-
                 if (shouldUncuff) {
+                    logManager.debug("Watchdog: Decision for " + victimUUID + " is to UNCuff. Reason: " + uncuffReason);
                     final String finalUncuffReason = "Watchdog: " + uncuffReason;
                     Location location = victim != null ? victim.getLocation() : (policeman != null ? policeman.getLocation() : null);
                     if (location != null) {
@@ -216,6 +240,8 @@ public class PoliceManager {
                     } else {
                         plugin.getFoliaLib().getScheduler().runNextTick((task) -> uncuffPlayer(victimUUID, finalUncuffReason));
                     }
+                } else {
+                    logManager.debug("Watchdog: Check complete for " + victimUUID + ". No reason to uncuff.");
                 }
             }
         }, 20L, 20L);
