@@ -87,7 +87,7 @@ public class PoliceManager {
             c.setCollidable(false);
             c.setInvisible(true);
             c.setAgeLock(true);
-            c.setAI(false);
+            c.setAI(true);
         });
 
         chicken.setLeashHolder(policeman);
@@ -163,20 +163,23 @@ public class PoliceManager {
                 CuffedData data = entry.getValue();
 
                 Player victim = Bukkit.getPlayer(victimUUID);
-                Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
+                Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
 
-                if (victim == null || !victim.isOnline() || policeman == null || !policeman.isOnline()) {
+                if (victim == null || !victim.isOnline() || chicken == null || chicken.isDead()) {
                     continue;
                 }
 
                 plugin.getFoliaLib().getScheduler().runAtEntity(victim, task -> {
-                    Location victimLocation = victim.getLocation();
-                    Vector direction = policeman.getLocation().toVector().subtract(victimLocation.toVector());
-                    victimLocation.setDirection(direction);
-                    plugin.getFoliaLib().getScheduler().teleportAsync(victim, victimLocation);
+                    Location playerLocation = victim.getLocation();
+                    Location chickenLocation = chicken.getLocation();
+
+                    if (playerLocation.distanceSquared(chickenLocation) > 0.25) {
+                        Vector pullVector = chickenLocation.toVector().subtract(playerLocation.toVector());
+                        victim.setVelocity(pullVector);
+                    }
                 });
             }
-        }, 0L, 2L);
+        }, 0L, 1L);
     }
 
     private WrappedTask startWatchdogTask() {
