@@ -22,6 +22,7 @@ public class PoliceManager {
     private final Map<UUID, CuffedData> cuffedPlayers = new ConcurrentHashMap<>();
     private final Map<UUID, NockedData> nockedPlayers = new ConcurrentHashMap<>();
     private final WrappedTask watchdogTask;
+    private final WrappedTask cuffUpdateTask;
 
     public static NamespacedKey HANDCUFFS_KEY;
     public static NamespacedKey BATON_KEY;
@@ -29,9 +30,10 @@ public class PoliceManager {
     public PoliceManager(CookiePl plugin, LogManager logManager) {
         this.plugin = plugin;
         this.logManager = logManager;
-        this.watchdogTask = startWatchdogTask();
         HANDCUFFS_KEY = new NamespacedKey(plugin, "handcuffs_item");
         BATON_KEY = new NamespacedKey(plugin, "baton_item");
+        this.watchdogTask = startWatchdogTask();
+        this.cuffUpdateTask = startCuffUpdateTask();
     }
 
     public boolean isCuffed(UUID uuid) {
@@ -79,8 +81,7 @@ public class PoliceManager {
         if (isCuffed(victim.getUniqueId())) return;
         unnockPlayer(victim, true);
 
-        Location chickenLoc = victim.getLocation();
-        Chicken chicken = victim.getWorld().spawn(chickenLoc, Chicken.class, c -> {
+        Chicken chicken = victim.getWorld().spawn(victim.getLocation(), Chicken.class, c -> {
             c.setSilent(true);
             c.setInvulnerable(true);
             c.setCollidable(false);
@@ -92,22 +93,6 @@ public class PoliceManager {
         chicken.setLeashHolder(policeman);
 
         cuffedPlayers.put(victim.getUniqueId(), new CuffedData(policeman.getUniqueId(), chicken.getUniqueId()));
-
-        plugin.getFoliaLib().getScheduler().runAtEntityTimer(victim, (task) -> {
-            if (!cuffedPlayers.containsKey(victim.getUniqueId()) || !victim.isOnline() || chicken.isDead()) {
-                task.cancel();
-                return;
-            }
-
-            Location chickenLocation = chicken.getLocation();
-            Location victimLocation = victim.getLocation();
-
-            Vector pullVector = chickenLocation.toVector().subtract(victimLocation.toVector());
-            Vector newVelocity = victim.getVelocity().add(pullVector.multiply(0.2));
-
-            victim.setVelocity(newVelocity);
-
-        }, 0L, 2L);
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());
@@ -156,12 +141,47 @@ public class PoliceManager {
         if (watchdogTask != null) {
             watchdogTask.cancel();
         }
+        if (cuffUpdateTask != null) {
+            cuffUpdateTask.cancel();
+        }
         for (UUID uuid : cuffedPlayers.keySet()) {
             uncuffPlayer(uuid, "Plugin Disable");
         }
         cuffedPlayers.clear();
         nockedPlayers.clear();
         logManager.info("Cleaned up all police data.");
+    }
+
+    private WrappedTask startCuffUpdateTask() {
+        return plugin.getFoliaLib().getScheduler().runTimer(() -> {
+            if (cuffedPlayers.isEmpty()) {
+                return;
+            }
+
+            for (Map.Entry<UUID, CuffedData> entry : cuffedPlayers.entrySet()) {
+                UUID victimUUID = entry.getKey();
+                CuffedData data = entry.getValue();
+
+                Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
+                Player victim = Bukkit.getPlayer(victimUUID);
+                Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
+
+                if (victim == null || !victim.isOnline() || chicken == null || policeman == null || !policeman.isOnline()) {
+                    continue;
+                }
+
+                plugin.getFoliaLib().getScheduler().runAtEntity(chicken, task -> {
+                    chicken.teleport(victim.getLocation());
+                });
+
+                plugin.getFoliaLib().getScheduler().runAtEntity(victim, task -> {
+                    Location victimLocation = victim.getLocation();
+                    Vector direction = policeman.getLocation().toVector().subtract(victimLocation.toVector());
+                    victimLocation.setDirection(direction);
+                    victim.teleport(victimLocation);
+                });
+            }
+        }, 0L, 2L);
     }
 
     private WrappedTask startWatchdogTask() {
