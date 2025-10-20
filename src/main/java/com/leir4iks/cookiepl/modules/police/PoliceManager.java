@@ -162,23 +162,18 @@ public class PoliceManager {
                 UUID victimUUID = entry.getKey();
                 CuffedData data = entry.getValue();
 
-                Chicken chicken = (Chicken) Bukkit.getEntity(data.getChickenUUID());
                 Player victim = Bukkit.getPlayer(victimUUID);
                 Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
 
-                if (victim == null || !victim.isOnline() || chicken == null || policeman == null || !policeman.isOnline()) {
+                if (victim == null || !victim.isOnline() || policeman == null || !policeman.isOnline()) {
                     continue;
                 }
-
-                plugin.getFoliaLib().getScheduler().runAtEntity(chicken, task -> {
-                    chicken.teleport(victim.getLocation());
-                });
 
                 plugin.getFoliaLib().getScheduler().runAtEntity(victim, task -> {
                     Location victimLocation = victim.getLocation();
                     Vector direction = policeman.getLocation().toVector().subtract(victimLocation.toVector());
                     victimLocation.setDirection(direction);
-                    victim.teleport(victimLocation);
+                    plugin.getFoliaLib().getScheduler().teleportAsync(victim, victimLocation);
                 });
             }
         }, 0L, 2L);
