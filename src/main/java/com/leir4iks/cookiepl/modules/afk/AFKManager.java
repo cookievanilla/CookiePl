@@ -24,7 +24,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
 
 public class AFKManager implements Listener {
 
@@ -76,13 +75,14 @@ public class AFKManager implements Listener {
 
         Location afkLocation = player.getLocation();
         TextDisplay indicator = null;
-        WrappedTask immobilityTask = null;
+        AFKData afkData = new AFKData(afkLocation);
 
         if (indicatorEnabled) {
             indicator = spawnIndicator(player);
+            afkData.setIndicator(indicator);
         }
         if (immobilityEnabled) {
-            immobilityTask = startImmobilityTask(player, afkLocation);
+            startImmobilityTask(player, afkData);
         }
         if (preventBlockBreak) {
             afkProtectedBlocks.add(afkLocation.clone().subtract(0, 1, 0).getBlock().getLocation());
@@ -94,21 +94,20 @@ public class AFKManager implements Listener {
             player.setSleepingIgnored(true);
         }
 
-        afkPlayers.put(player.getUniqueId(), new AFKData(afkLocation, indicator, immobilityTask));
+        afkPlayers.put(player.getUniqueId(), afkData);
     }
 
     public void unsetAfk(Player player) {
         AFKData data = afkPlayers.remove(player.getUniqueId());
         if (data == null) return;
 
-        if (data.indicator != null) {
-            data.indicator.remove();
-        }
-        if (data.immobilityTask != null && !data.immobilityTask.isCancelled()) {
-            data.immobilityTask.cancel();
+        data.cancel();
+
+        if (data.getIndicator() != null) {
+            data.getIndicator().remove();
         }
         if (preventBlockBreak) {
-            afkProtectedBlocks.remove(data.originalLocation.clone().subtract(0, 1, 0).getBlock().getLocation());
+            afkProtectedBlocks.remove(data.getOriginalLocation().clone().subtract(0, 1, 0).getBlock().getLocation());
         }
         if (invulnerabilityEnabled) {
             player.setInvulnerable(false);
@@ -130,21 +129,18 @@ public class AFKManager implements Listener {
         });
     }
 
-    private WrappedTask startImmobilityTask(Player player, Location afkLocation) {
-        return plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, new Consumer<WrappedTask>() {
-            @Override
-            public void accept(WrappedTask task) {
-                if (!player.isOnline() || !isAfk(player.getUniqueId())) {
-                    task.cancel();
-                    return;
-                }
-                if (player.getLocation().distanceSquared(afkLocation) > 0.01) {
-                    Location currentLoc = player.getLocation();
-                    Location teleportTarget = afkLocation.clone();
-                    teleportTarget.setYaw(currentLoc.getYaw());
-                    teleportTarget.setPitch(currentLoc.getPitch());
-                    player.teleport(teleportTarget);
-                }
+    private void startImmobilityTask(Player player, AFKData afkData) {
+        plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, task -> {
+            if (afkData.isCancelled() || !player.isOnline() || !isAfk(player.getUniqueId())) {
+                task.cancel();
+                return;
+            }
+            if (player.getLocation().distanceSquared(afkData.getOriginalLocation()) > 0.01) {
+                Location currentLoc = player.getLocation();
+                Location teleportTarget = afkData.getOriginalLocation().clone();
+                teleportTarget.setYaw(currentLoc.getYaw());
+                teleportTarget.setPitch(currentLoc.getPitch());
+                player.teleport(teleportTarget);
             }
         }, 1L, 1L);
     }
@@ -237,14 +233,32 @@ public class AFKManager implements Listener {
     }
 
     private static class AFKData {
-        final Location originalLocation;
-        final TextDisplay indicator;
-        final WrappedTask immobilityTask;
+        private final Location originalLocation;
+        private TextDisplay indicator;
+        private boolean isCancelled = false;
 
-        AFKData(Location originalLocation, TextDisplay indicator, WrappedTask immobilityTask) {
+        AFKData(Location originalLocation) {
             this.originalLocation = originalLocation;
+        }
+
+        public Location getOriginalLocation() {
+            return originalLocation;
+        }
+
+        public TextDisplay getIndicator() {
+            return indicator;
+        }
+
+        public void setIndicator(TextDisplay indicator) {
             this.indicator = indicator;
-            this.immobilityTask = immobilityTask;
+        }
+
+        public boolean isCancelled() {
+            return isCancelled;
+        }
+
+        public void cancel() {
+            this.isCancelled = true;
         }
     }
 }
