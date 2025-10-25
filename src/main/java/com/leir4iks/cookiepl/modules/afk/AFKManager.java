@@ -18,6 +18,7 @@ import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.HashSet;
@@ -120,14 +121,14 @@ public class AFKManager implements Listener {
     }
 
     private TextDisplay spawnIndicator(Player player) {
-        Location loc = player.getLocation().add(0, player.getHeight() + this.indicatorYOffset, 0);
-        return player.getWorld().spawn(loc, TextDisplay.class, display -> {
+        return player.getWorld().spawn(player.getLocation(), TextDisplay.class, display -> {
             display.getPersistentDataContainer().set(AFKModule.AFK_INDICATOR_KEY, PersistentDataType.BYTE, (byte) 1);
             display.setText(indicatorText);
             display.setBillboard(Display.Billboard.CENTER);
             display.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
             display.setSeeThrough(true);
             player.addPassenger(display);
+            display.setTranslation(new Vector(0, this.indicatorYOffset, 0));
         });
     }
 
@@ -155,11 +156,8 @@ public class AFKManager implements Listener {
         if (afkCheckTask != null && !afkCheckTask.isCancelled()) {
             afkCheckTask.cancel();
         }
-        for (UUID uuid : afkPlayers.keySet()) {
-            Player player = plugin.getServer().getPlayer(uuid);
-            if (player != null) {
-                unsetAfk(player);
-            }
+        for (AFKData data : afkPlayers.values()) {
+            data.cancel();
         }
         afkPlayers.clear();
         lastActivity.clear();
