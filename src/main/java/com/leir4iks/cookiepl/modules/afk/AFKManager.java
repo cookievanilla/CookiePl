@@ -197,6 +197,13 @@ public class AFKManager implements Listener {
     }
 
     @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        unsetAfk(player);
+        lastActivity.put(player.getUniqueId(), System.currentTimeMillis());
+    }
+
+    @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
         unsetAfk(player);
