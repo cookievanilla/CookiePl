@@ -15,6 +15,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.persistence.PersistentDataType;
 import org.jetbrains.annotations.NotNull;
@@ -36,6 +37,7 @@ public class AFKManager implements Listener {
     private final long afkTimeMillis;
     private final boolean indicatorEnabled;
     private final String indicatorText;
+    private final double indicatorYOffset;
     private final boolean immobilityEnabled;
     private final boolean preventBlockBreak;
     private final boolean invulnerabilityEnabled;
@@ -49,6 +51,7 @@ public class AFKManager implements Listener {
         this.afkTimeMillis = plugin.getConfig().getLong(configKey + ".afk-time-seconds", 300) * 1000;
         this.indicatorEnabled = plugin.getConfig().getBoolean(configKey + ".indicator.enabled", true);
         this.indicatorText = formatColor(plugin.getConfig().getString(configKey + ".indicator.text", "&e⌛"));
+        this.indicatorYOffset = plugin.getConfig().getDouble(configKey + ".indicator.y-offset", 0.5);
         this.immobilityEnabled = plugin.getConfig().getBoolean(configKey + ".immobility.enabled", true);
         this.preventBlockBreak = plugin.getConfig().getBoolean(configKey + ".immobility.prevent-block-break", true);
         this.invulnerabilityEnabled = plugin.getConfig().getBoolean(configKey + ".invulnerability.enabled", true);
@@ -71,14 +74,13 @@ public class AFKManager implements Listener {
     }
 
     public void setAfk(Player player) {
-        if (isAfk(player.getUniqueId())) return;
+        if (isAfk(player.getUniqueId()) || player.isDead()) return;
 
         Location afkLocation = player.getLocation();
-        TextDisplay indicator = null;
         AFKData afkData = new AFKData(afkLocation);
 
         if (indicatorEnabled) {
-            indicator = spawnIndicator(player);
+            TextDisplay indicator = spawnIndicator(player);
             afkData.setIndicator(indicator);
         }
         if (immobilityEnabled) {
@@ -103,7 +105,7 @@ public class AFKManager implements Listener {
 
         data.cancel();
 
-        if (data.getIndicator() != null) {
+        if (data.getIndicator() != null && data.getIndicator().isValid()) {
             data.getIndicator().remove();
         }
         if (preventBlockBreak) {
@@ -118,7 +120,7 @@ public class AFKManager implements Listener {
     }
 
     private TextDisplay spawnIndicator(Player player) {
-        Location loc = player.getLocation().add(0, player.getHeight() + 0.25, 0);
+        Location loc = player.getLocation().add(0, player.getHeight() + this.indicatorYOffset, 0);
         return player.getWorld().spawn(loc, TextDisplay.class, display -> {
             display.getPersistentDataContainer().set(AFKModule.AFK_INDICATOR_KEY, PersistentDataType.BYTE, (byte) 1);
             display.setText(indicatorText);
@@ -131,7 +133,7 @@ public class AFKManager implements Listener {
 
     private void startImmobilityTask(Player player, AFKData afkData) {
         plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, task -> {
-            if (afkData.isCancelled() || !player.isOnline() || !isAfk(player.getUniqueId())) {
+            if (afkData.isCancelled() || !player.isOnline() || player.isDead() || !isAfk(player.getUniqueId())) {
                 task.cancel();
                 return;
             }
@@ -140,7 +142,7 @@ public class AFKManager implements Listener {
                 Location teleportTarget = afkData.getOriginalLocation().clone();
                 teleportTarget.setYaw(currentLoc.getYaw());
                 teleportTarget.setPitch(currentLoc.getPitch());
-                player.teleport(teleportTarget);
+                plugin.getFoliaLib().getScheduler().teleportAsync(player, teleportTarget);
             }
         }, 1L, 1L);
     }
@@ -198,6 +200,13 @@ public class AFKManager implements Listener {
         Player player = event.getPlayer();
         unsetAfk(player);
         lastActivity.remove(player.getUniqueId());
+    }
+
+    @EventHandler
+    public void onPlayerDeath(PlayerDeathEvent event) {
+        if (isAfk(event.getPlayer().getUniqueId())) {
+            unsetAfk(event.getPlayer());
+        }
     }
 
     @EventHandler(ignoreCancelled = true)

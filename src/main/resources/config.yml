@@ -173,6 +173,7 @@ modules:
     indicator:
       enabled: true
       text: "&e⌛"
+      y-offset: 0.5
     immobility:
       enabled: true
       prevent-block-break: true
