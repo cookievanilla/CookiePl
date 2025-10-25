@@ -180,7 +180,7 @@ public class AFKManager implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerChat(AsyncPlayerChatEvent event) {
-        plugin.getFoliaLib().getScheduler().runAtEntity(event.getPlayer(), (task) -> updateActivity(event.getPlayer()));
+        plugin.getFoliaLib().getScheduler().runAtEntity(event.getPlayer(), () -> updateActivity(event.getPlayer()));
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
