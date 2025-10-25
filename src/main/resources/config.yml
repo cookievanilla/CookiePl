@@ -156,6 +156,35 @@ modules:
       players-only: "&cThis command can only be used by players."
       no-permission: "&cYou do not have permission to use this command."
 
+  anti-elytra:
+    enabled: true
+    mode: "blacklist"
+    worlds:
+      - "world_the_end"
+    bypass-permission: "cookiepl.antielytra.bypass"
+    feedback:
+      message: "&cElytra flight is disabled in this world."
+      sound: "ENTITY_ENDERMAN_TELEPORT"
+      particle: "SMOKE_NORMAL"
+
+  afk-system:
+    enabled: true
+    afk-time-seconds: 300
+    indicator:
+      enabled: true
+      text: "&e⌛"
+    immobility:
+      enabled: true
+      prevent-block-break: true
+    invulnerability:
+      enabled: true
+    no-hunger:
+      enabled: true
+    sleep-ignore:
+      enabled: true
+    placeholder:
+      afk-symbol: " &e[AFK]"
+
 logging:
   enabled: true
   log-level: "INFO"
