@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 public class AFKManager implements Listener {
 
@@ -130,17 +131,20 @@ public class AFKManager implements Listener {
     }
 
     private WrappedTask startImmobilityTask(Player player, Location afkLocation) {
-        return plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, task -> {
-            if (!player.isOnline() || !isAfk(player.getUniqueId())) {
-                task.cancel();
-                return;
-            }
-            if (player.getLocation().distanceSquared(afkLocation) > 0.01) {
-                Location currentLoc = player.getLocation();
-                Location teleportTarget = afkLocation.clone();
-                teleportTarget.setYaw(currentLoc.getYaw());
-                teleportTarget.setPitch(currentLoc.getPitch());
-                player.teleport(teleportTarget);
+        return plugin.getFoliaLib().getScheduler().runAtEntityTimer(player, new Consumer<WrappedTask>() {
+            @Override
+            public void accept(WrappedTask task) {
+                if (!player.isOnline() || !isAfk(player.getUniqueId())) {
+                    task.cancel();
+                    return;
+                }
+                if (player.getLocation().distanceSquared(afkLocation) > 0.01) {
+                    Location currentLoc = player.getLocation();
+                    Location teleportTarget = afkLocation.clone();
+                    teleportTarget.setYaw(currentLoc.getYaw());
+                    teleportTarget.setPitch(currentLoc.getPitch());
+                    player.teleport(teleportTarget);
+                }
             }
         }, 1L, 1L);
     }
