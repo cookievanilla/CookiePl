@@ -18,7 +18,7 @@ import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.persistence.PersistentDataType;
-import org.bukkit.util.Vector;
+import org.bukkit.util.Transformation;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.HashSet;
@@ -128,7 +128,10 @@ public class AFKManager implements Listener {
             display.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
             display.setSeeThrough(true);
             player.addPassenger(display);
-            display.setTranslation(new Vector(0, this.indicatorYOffset, 0));
+
+            Transformation transformation = display.getTransformation();
+            transformation.getTranslation().add(0f, (float) this.indicatorYOffset, 0f);
+            display.setTransformation(transformation);
         });
     }
 
