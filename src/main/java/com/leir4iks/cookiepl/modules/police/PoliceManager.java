@@ -105,23 +105,30 @@ public class PoliceManager {
         CuffedData data = cuffedPlayers.remove(victimUUID);
         if (data == null) return;
 
-        Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
-        if (anchor != null) {
-            plugin.getFoliaLib().getScheduler().runAtEntity(anchor, (task) -> anchor.remove());
-        }
-
-        Player victim = Bukkit.getPlayer(victimUUID);
-        if (victim != null) {
-            victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1.0f, 1.0f);
-            executeEmoteCommand("stop-cuff", victim.getName());
-
+        plugin.getFoliaLib().getScheduler().runNextTick((task) -> {
+            Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
             Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
-            if (policeman != null) {
-                String message = plugin.getConfig().getString("modules.police-system.cuff.uncuff-message", "&ePlayer {player} has been released!");
-                policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
+            Player victim = Bukkit.getPlayer(victimUUID);
+
+            if (anchor != null && policeman != null) {
+                broadcastToNearby(policeman, getDetachPacket(policeman, anchor));
             }
-        }
-        logManager.info("Player " + (victim != null ? victim.getName() : victimUUID) + " has been uncuffed. Reason: " + reason);
+
+            if (anchor != null) {
+                anchor.remove();
+            }
+
+            if (victim != null) {
+                victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1.0f, 1.0f);
+                executeEmoteCommand("stop-cuff", victim.getName());
+
+                if (policeman != null) {
+                    String message = plugin.getConfig().getString("modules.police-system.cuff.uncuff-message", "&ePlayer {player} has been released!");
+                    policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
+                }
+            }
+            logManager.info("Player " + (victim != null ? victim.getName() : victimUUID) + " has been uncuffed. Reason: " + reason);
+        });
     }
 
     private void executeEmoteCommand(String type, String playerName) {
@@ -230,20 +237,24 @@ public class PoliceManager {
                 }
 
                 if (shouldUncuff) {
-                    String finalUncuffReason = uncuffReason;
-                    plugin.getFoliaLib().getScheduler().runNextTick((task) -> {
-                        uncuffPlayer(victimUUID, "Watchdog: " + finalUncuffReason);
-                    });
+                    uncuffPlayer(victimUUID, "Watchdog: " + uncuffReason);
                 }
             }
         }, 20L, 20L);
     }
 
     private PacketContainer getLeashPacket(Player holder, Entity anchor) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
-        leashPacket.getIntegers().write(0, anchor.getEntityId());
-        leashPacket.getIntegers().write(1, holder.getEntityId());
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
+        leashPacket.getIntegers().write(0, holder.getEntityId());
+        leashPacket.getIntegers().write(1, anchor.getEntityId());
         return leashPacket;
+    }
+
+    private PacketContainer getDetachPacket(Player holder, Entity anchor) {
+        PacketContainer detachPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
+        detachPacket.getIntegers().write(0, holder.getEntityId());
+        detachPacket.getIntegers().write(1, -1);
+        return detachPacket;
     }
 
     private void broadcastToNearby(Player center, PacketContainer packet) {
