@@ -4,8 +4,8 @@ import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.ChatColor;
 import org.bukkit.Color;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
-import org.bukkit.block.Block;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
@@ -65,6 +65,11 @@ public class AFKManager implements Listener {
     private void checkAFK() {
         long now = System.currentTimeMillis();
         for (Player player : plugin.getServer().getOnlinePlayers()) {
+            if (player.getGameMode() == GameMode.SPECTATOR) {
+                lastActivity.remove(player.getUniqueId());
+                continue;
+            }
+
             if (isAfk(player.getUniqueId())) continue;
 
             long lastAction = lastActivity.getOrDefault(player.getUniqueId(), now);
@@ -113,7 +118,9 @@ public class AFKManager implements Listener {
             afkProtectedBlocks.remove(data.getOriginalLocation().clone().subtract(0, 1, 0).getBlock().getLocation());
         }
         if (invulnerabilityEnabled) {
-            player.setInvulnerable(false);
+            if (player.getGameMode() != GameMode.CREATIVE && player.getGameMode() != GameMode.SPECTATOR) {
+                player.setInvulnerable(false);
+            }
         }
         if (sleepIgnoreEnabled) {
             player.setSleepingIgnored(false);
@@ -159,8 +166,11 @@ public class AFKManager implements Listener {
         if (afkCheckTask != null && !afkCheckTask.isCancelled()) {
             afkCheckTask.cancel();
         }
-        for (AFKData data : afkPlayers.values()) {
-            data.cancel();
+        for (UUID playerUUID : new HashSet<>(afkPlayers.keySet())) {
+            Player player = plugin.getServer().getPlayer(playerUUID);
+            if (player != null && player.isOnline()) {
+                unsetAfk(player);
+            }
         }
         afkPlayers.clear();
         lastActivity.clear();
@@ -211,6 +221,13 @@ public class AFKManager implements Listener {
     }
 
     @EventHandler
+    public void onPlayerKick(PlayerKickEvent event) {
+        Player player = event.getPlayer();
+        unsetAfk(player);
+        lastActivity.remove(player.getUniqueId());
+    }
+
+    @EventHandler
     public void onPlayerDeath(PlayerDeathEvent event) {
         if (isAfk(event.getPlayer().getUniqueId())) {
             unsetAfk(event.getPlayer());
@@ -241,6 +258,27 @@ public class AFKManager implements Listener {
 
         if (afkProtectedBlocks.contains(event.getBlock().getLocation())) {
             event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onPlayerChangedWorld(PlayerChangedWorldEvent event) {
+        Player player = event.getPlayer();
+        if (isAfk(player.getUniqueId())) {
+            unsetAfk(player);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerTeleport(PlayerTeleportEvent event) {
+        Player player = event.getPlayer();
+        if (isAfk(player.getUniqueId()) && immobilityEnabled) {
+            if (event.getCause() == PlayerTeleportEvent.TeleportCause.PLUGIN || event.getCause() == PlayerTeleportEvent.TeleportCause.COMMAND) {
+                AFKData afkData = afkPlayers.get(player.getUniqueId());
+                if (afkData != null && afkData.getOriginalLocation().distanceSquared(event.getTo()) > 0.01) {
+                    event.setCancelled(true);
+                }
+            }
         }
     }
 
