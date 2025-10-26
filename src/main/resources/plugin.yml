@@ -9,7 +9,7 @@ softdepend: [PlaceholderAPI]
 commands:
   cookiepl:
     description: Main command for the CookiePl plugin.
-    usage: /<command> <reload>
+    usage: /<command> <reload|fixinvulnerable>
     permission: cookiepl.command.base
     permission-message: "You do not have permission to use this command."
   wheremyframe:
