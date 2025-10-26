@@ -9,8 +9,6 @@ public class PoliceBatonsModule implements IModule {
 
     @Override
     public void enable(CookiePl plugin) {
-        this.listener = new BatonListener(plugin);
-        plugin.getServer().getPluginManager().registerEvents(listener, plugin);
     }
 
     @Override

@@ -83,6 +83,11 @@ modules:
     enabled: true
     permission: "cookiepl.police.use"
     max-cuff-distance: 20.0
+    physics:
+      pull-force: 0.4
+      max-speed: 1.5
+      pull-start-distance: 2.0
+      prevent-wall-dragging: true
     handcuffs-item:
       material: "LEAD"
       display-name: "&fHandcuffs"
@@ -92,8 +97,9 @@ modules:
       display-name: "&cPolice Baton"
       custom-model-data: 0
     nock:
-      duration-seconds: 4
+      duration-seconds: 10
       message: "&aYou have stunned player {player}!"
+      not-stunned-message: "&cTarget player is not stunned."
     cuff:
       message: "&aYou have cuffed player {player}!"
       uncuff-message: "&ePlayer {player} has been released!"

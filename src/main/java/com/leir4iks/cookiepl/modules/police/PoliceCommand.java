@@ -40,11 +40,11 @@ public class PoliceCommand implements CommandExecutor {
         if (args.length == 2 && args[0].equalsIgnoreCase("give")) {
             switch (args[1].toLowerCase()) {
                 case "handcuffs":
-                    player.getInventory().addItem(createPoliceItem("handcuffs-item", PoliceManager.HANDCUFFS_KEY));
+                    player.getInventory().addItem(createPoliceItem("handcuffs-item", PoliceManager.HANDCUFFS_KEY, false));
                     player.sendMessage(ChatColor.GREEN + "You received handcuffs.");
                     break;
                 case "baton":
-                    player.getInventory().addItem(createPoliceItem("baton-item", PoliceManager.BATON_KEY));
+                    player.getInventory().addItem(createPoliceItem("baton-item", PoliceManager.BATON_KEY, true));
                     player.sendMessage(ChatColor.GREEN + "You received a police baton.");
                     break;
                 case "fbi-baton":
@@ -65,7 +65,7 @@ public class PoliceCommand implements CommandExecutor {
         return true;
     }
 
-    private ItemStack createPoliceItem(String configKey, NamespacedKey itemKey) {
+    private ItemStack createPoliceItem(String configKey, NamespacedKey itemKey, boolean unbreakable) {
         ConfigurationSection section = plugin.getConfig().getConfigurationSection("modules.police-system." + configKey);
         Material material = Material.matchMaterial(section.getString("material", "AIR"));
         String name = ChatColor.translateAlternateColorCodes('&', section.getString("display-name", ""));
@@ -77,7 +77,7 @@ public class PoliceCommand implements CommandExecutor {
         if (modelData > 0) {
             meta.setCustomModelData(modelData);
         }
-
+        meta.setUnbreakable(unbreakable);
         meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
         item.setItemMeta(meta);
 

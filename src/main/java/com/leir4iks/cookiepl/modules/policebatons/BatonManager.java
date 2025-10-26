@@ -27,6 +27,7 @@ public class BatonManager {
 
         meta.setDisplayName(formatColor(name));
         meta.setCustomModelData(modelData);
+        meta.setUnbreakable(true);
         meta.getPersistentDataContainer().set(getBatonTypeKey(plugin), PersistentDataType.STRING, FBI_BATON_ID);
 
         item.setItemMeta(meta);
@@ -42,6 +43,7 @@ public class BatonManager {
 
         meta.setDisplayName(formatColor(name));
         meta.setCustomModelData(modelData);
+        meta.setUnbreakable(true);
         meta.getPersistentDataContainer().set(getBatonTypeKey(plugin), PersistentDataType.STRING, ELECTROSHOCK_BATON_ID);
 
         item.setItemMeta(meta);
