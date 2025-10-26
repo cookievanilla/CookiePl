@@ -16,7 +16,6 @@ import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
-import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -108,7 +107,7 @@ public class PoliceManager {
 
         Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
         if (anchor != null) {
-            anchor.remove();
+            plugin.getFoliaLib().getScheduler().runAtEntity(anchor, (task) -> anchor.remove());
         }
 
         Player victim = Bukkit.getPlayer(victimUUID);
@@ -231,16 +230,19 @@ public class PoliceManager {
                 }
 
                 if (shouldUncuff) {
-                    uncuffPlayer(victimUUID, "Watchdog: " + uncuffReason);
+                    String finalUncuffReason = uncuffReason;
+                    plugin.getFoliaLib().getScheduler().runNextTick((task) -> {
+                        uncuffPlayer(victimUUID, "Watchdog: " + finalUncuffReason);
+                    });
                 }
             }
         }, 20L, 20L);
     }
 
     private PacketContainer getLeashPacket(Player holder, Entity anchor) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
-        leashPacket.getIntegers().write(0, holder.getEntityId());
-        leashPacket.getIntegers().write(1, anchor.getEntityId());
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
+        leashPacket.getIntegers().write(0, anchor.getEntityId());
+        leashPacket.getIntegers().write(1, holder.getEntityId());
         return leashPacket;
     }
 
