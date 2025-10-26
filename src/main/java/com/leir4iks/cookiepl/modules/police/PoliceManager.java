@@ -272,6 +272,9 @@ public class PoliceManager {
                 .write(0, loc.getX())
                 .write(1, loc.getY())
                 .write(2, loc.getZ());
+        teleportPacket.getBytes()
+                .write(0, (byte) (loc.getYaw() * 256.0F / 360.0F))
+                .write(1, (byte) (loc.getPitch() * 256.0F / 360.0F));
         teleportPacket.getBooleans().write(0, true);
         return teleportPacket;
     }
