@@ -105,20 +105,24 @@ public class PoliceManager {
         CuffedData data = cuffedPlayers.remove(victimUUID);
         if (data == null) return;
 
-        plugin.getFoliaLib().getScheduler().runNextTick((task) -> {
-            Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
-            if (anchor != null) {
+        Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
+
+        if (anchor == null) {
+            logManager.info("Player " + victimUUID + " has been uncuffed (anchor not found). Reason: " + reason);
+            return;
+        }
+
+        plugin.getFoliaLib().getScheduler().runAtEntity(anchor, (task) -> {
+            if (!anchor.isDead()) {
                 anchor.remove();
             }
 
             Player victim = Bukkit.getPlayer(victimUUID);
-            if (victim != null) {
+            if (victim != null && victim.isOnline()) {
                 Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
-                if (policeman != null && policeman.isOnline()) {
-                    broadcastToNearby(policeman, getUnleashPacket(victim));
-                } else {
-                    broadcastToNearby(victim, getUnleashPacket(victim));
-                }
+
+                Player broadcastCenter = (policeman != null && policeman.isOnline()) ? policeman : victim;
+                broadcastToNearby(broadcastCenter, getUnleashPacket(victim));
 
                 victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1.0f, 1.0f);
                 executeEmoteCommand("stop-cuff", victim.getName());
