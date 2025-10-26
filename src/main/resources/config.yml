@@ -84,9 +84,9 @@ modules:
     permission: "cookiepl.police.use"
     max-cuff-distance: 20.0
     physics:
-      pull-force: 0.4
-      max-speed: 1.5
-      pull-start-distance: 2.0
+      min-distance: 2.0
+      max-distance: 4.0
+      pull-force: 0.3
       prevent-wall-dragging: true
     handcuffs-item:
       material: "LEAD"
