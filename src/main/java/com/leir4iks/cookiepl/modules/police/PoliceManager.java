@@ -1,28 +1,36 @@
 package com.leir4iks.cookiepl.modules.police;
 
+import com.comphenix.protocol.PacketType;
+import com.comphenix.protocol.ProtocolLibrary;
+import com.comphenix.protocol.ProtocolManager;
+import com.comphenix.protocol.events.PacketContainer;
+import com.comphenix.protocol.wrappers.WrappedDataValue;
+import com.comphenix.protocol.wrappers.WrappedDataWatcher;
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.*;
-import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class PoliceManager {
 
     private final CookiePl plugin;
     private final LogManager logManager;
+    private final ProtocolManager protocolManager;
     private final Map<UUID, CuffedData> cuffedPlayers = new ConcurrentHashMap<>();
     private final Map<UUID, NockedData> nockedPlayers = new ConcurrentHashMap<>();
     private final WrappedTask watchdogTask;
     private final WrappedTask cuffUpdateTask;
+    private static final AtomicInteger entityIdCounter = new AtomicInteger(Integer.MAX_VALUE - 10000);
 
     public static NamespacedKey HANDCUFFS_KEY;
     public static NamespacedKey BATON_KEY;
@@ -30,6 +38,7 @@ public class PoliceManager {
     public PoliceManager(CookiePl plugin, LogManager logManager) {
         this.plugin = plugin;
         this.logManager = logManager;
+        this.protocolManager = ProtocolLibrary.getProtocolManager();
         HANDCUFFS_KEY = new NamespacedKey(plugin, "handcuffs_item");
         BATON_KEY = new NamespacedKey(plugin, "baton_item");
         this.watchdogTask = startWatchdogTask();
@@ -73,16 +82,12 @@ public class PoliceManager {
         if (isCuffed(victim.getUniqueId())) return;
         unnockPlayer(victim, true);
 
-        ArmorStand anchor = victim.getWorld().spawn(victim.getLocation(), ArmorStand.class, as -> {
-            as.setVisible(false);
-            as.setGravity(false);
-            as.setMarker(true);
-            as.setInvulnerable(true);
-            as.setSilent(true);
-        });
-        anchor.setLeashHolder(policeman);
+        int anchorId = entityIdCounter.decrementAndGet();
+        CuffedData cuffedData = new CuffedData(policeman.getUniqueId(), anchorId);
+        cuffedPlayers.put(victim.getUniqueId(), cuffedData);
 
-        cuffedPlayers.put(victim.getUniqueId(), new CuffedData(policeman.getUniqueId(), anchor.getUniqueId()));
+        broadcastToNearby(policeman, getAnchorSpawnPackets(anchorId, policeman.getLocation()));
+        broadcastToNearby(policeman, getLeashPacket(policeman, anchorId));
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());
@@ -96,17 +101,17 @@ public class PoliceManager {
         CuffedData data = cuffedPlayers.remove(victimUUID);
         if (data == null) return;
 
-        Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
-        if (anchor != null) {
-            anchor.remove();
+        Player victim = Bukkit.getPlayer(victimUUID);
+        Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
+
+        if (policeman != null) {
+            broadcastToNearby(policeman, getDestroyPacket(data.getAnchorId()));
         }
 
-        Player victim = Bukkit.getPlayer(victimUUID);
         if (victim != null) {
             victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1.0f, 1.0f);
             executeEmoteCommand("stop-cuff", victim.getName());
 
-            Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
             if (policeman != null) {
                 String message = plugin.getConfig().getString("modules.police-system.cuff.uncuff-message", "&ePlayer {player} has been released!");
                 policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
@@ -147,21 +152,18 @@ public class PoliceManager {
             for (Map.Entry<UUID, CuffedData> entry : cuffedPlayers.entrySet()) {
                 Player victim = Bukkit.getPlayer(entry.getKey());
                 Player policeman = Bukkit.getPlayer(entry.getValue().getPolicemanUUID());
-                Entity anchor = Bukkit.getEntity(entry.getValue().getAnchorUUID());
+                int anchorId = entry.getValue().getAnchorId();
 
-                if (victim == null || policeman == null || anchor == null || !victim.isOnline() || !policeman.isOnline() || anchor.isDead()) {
+                if (victim == null || policeman == null || !victim.isOnline() || !policeman.isOnline()) {
                     continue;
                 }
 
                 plugin.getFoliaLib().getScheduler().runAtEntity(victim, task -> {
-                    Location anchorLoc = anchor.getLocation();
                     Location policeLoc = policeman.getLocation();
-                    if (anchorLoc.getWorld() != policeLoc.getWorld()) return;
-
-                    plugin.getFoliaLib().getScheduler().teleportAsync(anchor, policeLoc);
+                    broadcastToNearby(policeman, getTeleportPacket(anchorId, policeLoc));
 
                     Location victimLoc = victim.getLocation();
-                    double distance = victimLoc.distance(anchorLoc);
+                    double distance = victimLoc.distance(policeLoc);
 
                     if (distance < minDistance) {
                         if (victim.getVelocity().lengthSquared() > 0.01) {
@@ -172,14 +174,14 @@ public class PoliceManager {
 
                     if (preventWallDragging) {
                         RayTraceResult rayTrace = victim.getWorld().rayTraceBlocks(victim.getEyeLocation(),
-                                anchorLoc.toVector().subtract(victim.getEyeLocation().toVector()).normalize(), distance);
+                                policeLoc.toVector().subtract(victim.getEyeLocation().toVector()).normalize(), distance);
                         if (rayTrace != null && rayTrace.getHitBlock() != null) {
                             return;
                         }
                     }
 
                     double forceMultiplier = Math.min(1.0, (distance - minDistance) / (maxDistance - minDistance));
-                    Vector direction = anchorLoc.toVector().subtract(victimLoc.toVector()).normalize();
+                    Vector direction = policeLoc.toVector().subtract(victimLoc.toVector()).normalize();
                     Vector pullVector = direction.multiply(pullForce * forceMultiplier);
                     victim.setVelocity(victim.getVelocity().add(pullVector));
                 });
@@ -195,7 +197,6 @@ public class PoliceManager {
             for (Map.Entry<UUID, CuffedData> entry : cuffedPlayers.entrySet()) {
                 UUID victimUUID = entry.getKey();
                 CuffedData data = entry.getValue();
-                Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
 
                 Player victim = Bukkit.getPlayer(victimUUID);
                 Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
@@ -209,9 +210,6 @@ public class PoliceManager {
                 } else if (victim == null || !victim.isOnline()) {
                     shouldUncuff = true;
                     uncuffReason = "Victim is offline or null.";
-                } else if (anchor == null || anchor.isDead()) {
-                    shouldUncuff = true;
-                    uncuffReason = "Anchor entity is invalid.";
                 } else if (victim.getWorld() != policeman.getWorld()) {
                     shouldUncuff = true;
                     uncuffReason = "Player and policeman are in different worlds.";
@@ -227,19 +225,90 @@ public class PoliceManager {
         }, 20L, 20L);
     }
 
+    private List<PacketContainer> getAnchorSpawnPackets(int entityId, Location loc) {
+        PacketContainer spawnPacket = new PacketContainer(PacketType.Play.Server.SPAWN);
+        spawnPacket.getIntegers().write(0, entityId);
+        spawnPacket.getUUIDs().write(0, UUID.randomUUID());
+        spawnPacket.getEntityTypeModifier().write(0, EntityType.ARMOR_STAND);
+        spawnPacket.getDoubles()
+                .write(0, loc.getX())
+                .write(1, loc.getY())
+                .write(2, loc.getZ());
+
+        PacketContainer metadataPacket = new PacketContainer(PacketType.Play.Server.ENTITY_METADATA);
+        metadataPacket.getIntegers().write(0, entityId);
+        WrappedDataWatcher watcher = new WrappedDataWatcher();
+        watcher.setObject(new WrappedDataWatcher.WrappedDataWatcherObject(0, WrappedDataWatcher.Registry.get(Byte.class)), (byte) 0x20); // Invisible
+        watcher.setObject(new WrappedDataWatcher.WrappedDataWatcherObject(15, WrappedDataWatcher.Registry.get(Byte.class)), (byte) 0x10); // isMarker
+        final List<WrappedDataValue> wrappedDataValueList = new ArrayList<>();
+        watcher.getWatchableObjects().stream()
+                .filter(Objects::nonNull)
+                .forEach(entry -> {
+                    final WrappedDataWatcher.WrappedDataWatcherObject dataWatcherObject = entry.getWatcherObject();
+                    wrappedDataValueList.add(
+                            new WrappedDataValue(
+                                    dataWatcherObject.getIndex(),
+                                    dataWatcherObject.getSerializer(),
+                                    entry.getRawValue()
+                            )
+                    );
+                });
+        metadataPacket.getDataValueCollectionModifier().write(0, wrappedDataValueList);
+
+        return Arrays.asList(spawnPacket, metadataPacket);
+    }
+
+    private PacketContainer getLeashPacket(Player holder, int anchorId) {
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
+        leashPacket.getIntegers().write(0, holder.getEntityId());
+        leashPacket.getIntegers().write(1, anchorId);
+        return leashPacket;
+    }
+
+    private PacketContainer getTeleportPacket(int entityId, Location loc) {
+        PacketContainer teleportPacket = new PacketContainer(PacketType.Play.Server.ENTITY_TELEPORT);
+        teleportPacket.getIntegers().write(0, entityId);
+        teleportPacket.getDoubles()
+                .write(0, loc.getX())
+                .write(1, loc.getY())
+                .write(2, loc.getZ());
+        teleportPacket.getBooleans().write(0, true);
+        return teleportPacket;
+    }
+
+    private PacketContainer getDestroyPacket(int entityId) {
+        PacketContainer destroyPacket = new PacketContainer(PacketType.Play.Server.ENTITY_DESTROY);
+        destroyPacket.getIntLists().write(0, Collections.singletonList(entityId));
+        return destroyPacket;
+    }
+
+    private void broadcastToNearby(Player center, PacketContainer packet) {
+        for (Player observer : center.getWorld().getPlayers()) {
+            if (observer.getLocation().distanceSquared(center.getLocation()) < 64 * 64) {
+                protocolManager.sendServerPacket(observer, packet);
+            }
+        }
+    }
+
+    private void broadcastToNearby(Player center, List<PacketContainer> packets) {
+        for (PacketContainer packet : packets) {
+            broadcastToNearby(center, packet);
+        }
+    }
+
     static class CuffedData {
         private final UUID policemanUUID;
-        private final UUID anchorUUID;
+        private final int anchorId;
         private final long cuffTimestamp;
 
-        public CuffedData(UUID policemanUUID, UUID anchorUUID) {
+        public CuffedData(UUID policemanUUID, int anchorId) {
             this.policemanUUID = policemanUUID;
-            this.anchorUUID = anchorUUID;
+            this.anchorId = anchorId;
             this.cuffTimestamp = System.currentTimeMillis();
         }
 
         public UUID getPolicemanUUID() { return policemanUUID; }
-        public UUID getAnchorUUID() { return anchorUUID; }
+        public int getAnchorId() { return anchorId; }
         public long getCuffTimestamp() { return cuffTimestamp; }
     }
 
