@@ -245,14 +245,14 @@ public class PoliceManager {
     }
 
     private PacketContainer getLeashPacket(Entity leashed, Entity holder) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
         leashPacket.getIntegers().write(0, leashed.getEntityId());
         leashPacket.getIntegers().write(1, holder.getEntityId());
         return leashPacket;
     }
 
     private PacketContainer getUnleashPacket(Entity leashed) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
         leashPacket.getIntegers().write(0, leashed.getEntityId());
         leashPacket.getIntegers().write(1, -1);
         return leashPacket;
