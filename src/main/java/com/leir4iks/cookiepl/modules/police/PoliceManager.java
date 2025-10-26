@@ -91,7 +91,7 @@ public class PoliceManager {
         CuffedData cuffedData = new CuffedData(policeman.getUniqueId(), anchor.getUniqueId());
         cuffedPlayers.put(victim.getUniqueId(), cuffedData);
 
-        broadcastToNearby(policeman, getLeashPacket(policeman, anchor));
+        broadcastToNearby(policeman, getLeashPacket(victim, policeman));
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());
@@ -107,18 +107,19 @@ public class PoliceManager {
 
         plugin.getFoliaLib().getScheduler().runNextTick((task) -> {
             Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
-            Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
-            Player victim = Bukkit.getPlayer(victimUUID);
-
-            if (anchor != null && policeman != null) {
-                broadcastToNearby(policeman, getDetachPacket(policeman, anchor));
-            }
-
             if (anchor != null) {
                 anchor.remove();
             }
 
+            Player victim = Bukkit.getPlayer(victimUUID);
             if (victim != null) {
+                Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
+                if (policeman != null && policeman.isOnline()) {
+                    broadcastToNearby(policeman, getUnleashPacket(victim));
+                } else {
+                    broadcastToNearby(victim, getUnleashPacket(victim));
+                }
+
                 victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1.0f, 1.0f);
                 executeEmoteCommand("stop-cuff", victim.getName());
 
@@ -243,18 +244,18 @@ public class PoliceManager {
         }, 20L, 20L);
     }
 
-    private PacketContainer getLeashPacket(Player holder, Entity anchor) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
-        leashPacket.getIntegers().write(0, holder.getEntityId());
-        leashPacket.getIntegers().write(1, anchor.getEntityId());
+    private PacketContainer getLeashPacket(Entity leashed, Entity holder) {
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
+        leashPacket.getIntegers().write(0, leashed.getEntityId());
+        leashPacket.getIntegers().write(1, holder.getEntityId());
         return leashPacket;
     }
 
-    private PacketContainer getDetachPacket(Player holder, Entity anchor) {
-        PacketContainer detachPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
-        detachPacket.getIntegers().write(0, holder.getEntityId());
-        detachPacket.getIntegers().write(1, -1);
-        return detachPacket;
+    private PacketContainer getUnleashPacket(Entity leashed) {
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
+        leashPacket.getIntegers().write(0, leashed.getEntityId());
+        leashPacket.getIntegers().write(1, -1);
+        return leashPacket;
     }
 
     private void broadcastToNearby(Player center, PacketContainer packet) {
