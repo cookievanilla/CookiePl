@@ -6,6 +6,7 @@ import com.comphenix.protocol.ProtocolManager;
 import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.wrappers.WrappedDataValue;
 import com.comphenix.protocol.wrappers.WrappedDataWatcher;
+import com.comphenix.protocol.wrappers.WrappedDataWatcher.Serializers;
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
@@ -226,7 +227,7 @@ public class PoliceManager {
     }
 
     private List<PacketContainer> getAnchorSpawnPackets(int entityId, Location loc) {
-        PacketContainer spawnPacket = new PacketContainer(PacketType.Play.Server.SPAWN);
+        PacketContainer spawnPacket = new PacketContainer(PacketType.Play.Server.SPAWN_ENTITY);
         spawnPacket.getIntegers().write(0, entityId);
         spawnPacket.getUUIDs().write(0, UUID.randomUUID());
         spawnPacket.getEntityTypeModifier().write(0, EntityType.ARMOR_STAND);
@@ -238,8 +239,8 @@ public class PoliceManager {
         PacketContainer metadataPacket = new PacketContainer(PacketType.Play.Server.ENTITY_METADATA);
         metadataPacket.getIntegers().write(0, entityId);
         WrappedDataWatcher watcher = new WrappedDataWatcher();
-        watcher.setObject(new WrappedDataWatcher.WrappedDataWatcherObject(0, WrappedDataWatcher.Registry.get(Byte.class)), (byte) 0x20); // Invisible
-        watcher.setObject(new WrappedDataWatcher.WrappedDataWatcherObject(15, WrappedDataWatcher.Registry.get(Byte.class)), (byte) 0x10); // isMarker
+        watcher.setObject(new WrappedDataWatcher.WrappedDataWatcherObject(0, Serializers.BYTE), (byte) 0x20); // Invisible
+        watcher.setObject(new WrappedDataWatcher.WrappedDataWatcherObject(15, Serializers.BYTE), (byte) 0x10); // isMarker
         final List<WrappedDataValue> wrappedDataValueList = new ArrayList<>();
         watcher.getWatchableObjects().stream()
                 .filter(Objects::nonNull)
