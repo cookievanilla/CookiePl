@@ -259,7 +259,7 @@ public class PoliceManager {
     }
 
     private PacketContainer getLeashPacket(Player holder, int anchorId) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.LEASH_ENTITY);
+        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
         leashPacket.getIntegers().write(0, holder.getEntityId());
         leashPacket.getIntegers().write(1, anchorId);
         return leashPacket;
