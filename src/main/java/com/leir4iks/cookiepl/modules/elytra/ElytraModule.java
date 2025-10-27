@@ -11,6 +11,7 @@ import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.components.DataComponents;
 import org.bukkit.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
 
@@ -90,7 +91,7 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
         plugin.getFoliaLib().getScheduler().runAtEntity(player, task -> {
             ItemStack elytra = new ItemStack(Material.ELYTRA);
             elytra.editMeta(meta -> {
-                meta.setCustomModelData(customModelData);
+                meta.set(DataComponents.CUSTOM_MODEL_DATA, customModelData);
             });
 
             player.getInventory().addItem(elytra);
