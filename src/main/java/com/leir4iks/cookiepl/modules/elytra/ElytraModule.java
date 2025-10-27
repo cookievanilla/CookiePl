@@ -93,7 +93,7 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
             ItemStack bukkitElytra = new ItemStack(Material.ELYTRA);
 
             CustomModelData data = CustomModelData.customModelData()
-                    .addInt(customModelData)
+                    .addFloat((float) customModelData.intValue())
                     .build();
             bukkitElytra.setData(DataComponentTypes.CUSTOM_MODEL_DATA, data);
 
