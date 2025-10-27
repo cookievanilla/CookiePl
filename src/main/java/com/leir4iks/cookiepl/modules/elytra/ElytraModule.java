@@ -2,6 +2,7 @@ package com.leir4iks.cookiepl.modules.elytra;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
+import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
@@ -9,12 +10,12 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabCompleter;
-import org.bukkit.craftbukkit.inventory.CraftItemStack;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -90,19 +91,46 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
 
         plugin.getFoliaLib().getScheduler().runAtEntity(player, task -> {
             ItemStack bukkitElytra = new ItemStack(Material.ELYTRA);
+            ItemStack finalElytra = setCustomModelDataNBT(bukkitElytra, customModelData);
 
-            net.minecraft.world.item.ItemStack nmsElytra = CraftItemStack.asNMSCopy(bukkitElytra);
-            net.minecraft.nbt.CompoundTag tag = nmsElytra.getOrCreateTag();
-            tag.putInt("CustomModelData", customModelData);
-            nmsElytra.setTag(tag);
-
-            ItemStack finalElytra = CraftItemStack.asBukkitCopy(nmsElytra);
+            if (finalElytra == null) {
+                player.sendMessage(ChatColor.RED + "An internal error occurred while creating the item.");
+                return;
+            }
 
             player.getInventory().addItem(finalElytra);
             player.sendMessage(ChatColor.GREEN + "You have received a " + color + " elytra!");
         });
 
         return true;
+    }
+
+    private ItemStack setCustomModelDataNBT(ItemStack item, int modelData) {
+        try {
+            String version = Bukkit.getServer().getClass().getPackage().getName().split("\\.")[3];
+            Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit." + version + ".inventory.CraftItemStack");
+            Class<?> nmsItemStackClass = Class.forName("net.minecraft.world.item.ItemStack");
+            Class<?> nbtTagCompoundClass = Class.forName("net.minecraft.nbt.CompoundTag");
+
+            Method asNMSCopyMethod = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
+            Method asBukkitCopyMethod = craftItemStackClass.getMethod("asBukkitCopy", nmsItemStackClass);
+
+            Object nmsItemStack = asNMSCopyMethod.invoke(null, item);
+
+            Method getOrCreateTagMethod = nmsItemStackClass.getMethod("getOrCreateTag");
+            Object nbtTagCompound = getOrCreateTagMethod.invoke(nmsItemStack);
+
+            Method setIntMethod = nbtTagCompoundClass.getMethod("putInt", String.class, int.class);
+            setIntMethod.invoke(nbtTagCompound, "CustomModelData", modelData);
+
+            Method setTagMethod = nmsItemStackClass.getMethod("setTag", nbtTagCompoundClass);
+            setTagMethod.invoke(nmsItemStack, nbtTagCompound);
+
+            return (ItemStack) asBukkitCopyMethod.invoke(null, nmsItemStack);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
     }
 
     @Override
