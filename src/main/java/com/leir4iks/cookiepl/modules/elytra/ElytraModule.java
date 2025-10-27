@@ -25,11 +25,21 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
     private CookiePl plugin;
 
     private static final Map<String, Integer> ELYTRA_COLORS = Map.ofEntries(
-            Map.entry("black", 1), Map.entry("blue", 2), Map.entry("brown", 3),
-            Map.entry("cyan", 4), Map.entry("gray", 5), Map.entry("green", 6),
-            Map.entry("light_blue", 7), Map.entry("light_gray", 8), Map.entry("lime", 9),
-            Map.entry("magenta", 10), Map.entry("orange", 11), Map.entry("pink", 12),
-            Map.entry("purple", 13), Map.entry("red", 14), Map.entry("white", 15),
+            Map.entry("black", 1),
+            Map.entry("blue", 2),
+            Map.entry("brown", 3),
+            Map.entry("cyan", 4),
+            Map.entry("gray", 5),
+            Map.entry("green", 6),
+            Map.entry("light_blue", 7),
+            Map.entry("light_gray", 8),
+            Map.entry("lime", 9),
+            Map.entry("magenta", 10),
+            Map.entry("orange", 11),
+            Map.entry("pink", 12),
+            Map.entry("purple", 13),
+            Map.entry("red", 14),
+            Map.entry("white", 15),
             Map.entry("yellow", 16)
     );
 
