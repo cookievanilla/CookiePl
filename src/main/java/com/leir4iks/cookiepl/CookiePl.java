@@ -4,6 +4,7 @@ import com.leir4iks.cookiepl.commands.MainCommand;
 import com.leir4iks.cookiepl.modules.IModule;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.FoliaLib;
+import de.tr7zw.nbtapi.NBT;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.reflections.Reflections;
 
@@ -21,6 +22,11 @@ public final class CookiePl extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        if (!NBT.preloadApi()) {
+            getLogger().warning("NBT-API wasn't initialized properly, disabling the plugin");
+            getPluginLoader().disablePlugin(this);
+            return;
+        }
         this.foliaLib = new FoliaLib(this);
         saveDefaultConfig();
         this.logManager = new LogManager(this);
@@ -109,4 +115,4 @@ public final class CookiePl extends JavaPlugin {
     public FoliaLib getFoliaLib() {
         return foliaLib;
     }
-}
+}```

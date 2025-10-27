@@ -4,7 +4,7 @@ main: com.leir4iks.cookiepl.CookiePl
 api-version: '1.21'
 author: leir4iks
 folia-supported: true
-softdepend: [PlaceholderAPI]
+softdepend: [PlaceholderAPI, NBTAPI]
 
 commands:
   cookiepl:
