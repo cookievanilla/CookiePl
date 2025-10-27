@@ -2,7 +2,6 @@ package com.leir4iks.cookiepl.modules.elytra;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
-import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
@@ -107,8 +106,7 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
 
     private ItemStack setCustomModelDataNBT(ItemStack item, int modelData) {
         try {
-            String version = Bukkit.getServer().getClass().getPackage().getName().split("\\.")[3];
-            Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit." + version + ".inventory.CraftItemStack");
+            Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
             Class<?> nmsItemStackClass = Class.forName("net.minecraft.world.item.ItemStack");
             Class<?> nbtTagCompoundClass = Class.forName("net.minecraft.nbt.CompoundTag");
 
