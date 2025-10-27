@@ -2,6 +2,7 @@ package com.leir4iks.cookiepl.modules.elytra;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
+import de.tr7zw.changeme.nbtapi.NBT;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
@@ -11,7 +12,6 @@ import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
 
@@ -90,9 +90,10 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
 
         plugin.getFoliaLib().getScheduler().runAtEntity(player, task -> {
             ItemStack bukkitElytra = new ItemStack(Material.ELYTRA);
-            ItemMeta meta = bukkitElytra.getItemMeta();
-            meta.setCustomModelData(customModelData);
-            bukkitElytra.setItemMeta(meta);
+
+            NBT.modify(bukkitElytra, nbt -> {
+                nbt.setInteger("CustomModelData", customModelData);
+            });
 
             player.getInventory().addItem(bukkitElytra);
             player.sendMessage(ChatColor.GREEN + "You have received a " + color + " elytra!");

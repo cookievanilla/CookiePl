@@ -115,4 +115,4 @@ public final class CookiePl extends JavaPlugin {
     public FoliaLib getFoliaLib() {
         return foliaLib;
     }
-}```
+}
