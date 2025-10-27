@@ -192,6 +192,10 @@ modules:
     placeholder:
       afk-symbol: " &e[AFK]"
 
+  elytra:
+    enabled: true
+    permission: "cookiepl.elytra.give"
+
 logging:
   enabled: true
   log-level: "INFO"
