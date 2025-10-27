@@ -2,7 +2,7 @@ package com.leir4iks.cookiepl.modules.elytra;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
-import de.tr7zw.changeme.nbtapi.NBT;
+import de.tr7zw.nbtapi.NBT;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
