@@ -91,7 +91,10 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
 
         plugin.getFoliaLib().getScheduler().runAtEntity(player, task -> {
             ItemStack bukkitElytra = new ItemStack(Material.ELYTRA);
-            bukkitElytra.setData(DataComponentTypes.CUSTOM_MODEL_DATA, new CustomModelData(customModelData));
+
+            CustomModelData data = CustomModelData.customModelData().build();
+            bukkitElytra.setData(DataComponentTypes.CUSTOM_MODEL_DATA, data);
+
             player.getInventory().addItem(bukkitElytra);
             player.sendMessage(ChatColor.GREEN + "You have received a " + color + " elytra!");
         });
