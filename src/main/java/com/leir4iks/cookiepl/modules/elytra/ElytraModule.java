@@ -9,9 +9,9 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.craftbukkit.inventory.CraftItemStack;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.components.DataComponents;
 import org.bukkit.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
 
@@ -89,12 +89,16 @@ public class ElytraModule implements IModule, CommandExecutor, TabCompleter {
         }
 
         plugin.getFoliaLib().getScheduler().runAtEntity(player, task -> {
-            ItemStack elytra = new ItemStack(Material.ELYTRA);
-            elytra.editMeta(meta -> {
-                meta.set(DataComponents.CUSTOM_MODEL_DATA, customModelData);
-            });
+            ItemStack bukkitElytra = new ItemStack(Material.ELYTRA);
 
-            player.getInventory().addItem(elytra);
+            net.minecraft.world.item.ItemStack nmsElytra = CraftItemStack.asNMSCopy(bukkitElytra);
+            net.minecraft.nbt.CompoundTag tag = nmsElytra.getOrCreateTag();
+            tag.putInt("CustomModelData", customModelData);
+            nmsElytra.setTag(tag);
+
+            ItemStack finalElytra = CraftItemStack.asBukkitCopy(nmsElytra);
+
+            player.getInventory().addItem(finalElytra);
             player.sendMessage(ChatColor.GREEN + "You have received a " + color + " elytra!");
         });
 
