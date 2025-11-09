@@ -39,8 +39,3 @@ commands:
     aliases: [res]
     permission: cookiepl.resize
     permission-message: "You do not have permission to use this command."
-  elytra:
-    description: Gives a custom colored elytra.
-    usage: /<command> <color>
-    permission: cookiepl.elytra.give
-    permission-message: "You do not have permission to use this command."

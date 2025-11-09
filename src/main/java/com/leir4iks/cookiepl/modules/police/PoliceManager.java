@@ -86,12 +86,16 @@ public class PoliceManager {
             as.setMarker(true);
             as.setInvulnerable(true);
             as.setSilent(true);
+            as.setSmall(true);
         });
 
         CuffedData cuffedData = new CuffedData(policeman.getUniqueId(), anchor.getUniqueId());
         cuffedPlayers.put(victim.getUniqueId(), cuffedData);
 
-        broadcastToNearby(policeman, getLeashPacket(victim, policeman));
+        PacketContainer leashPacket = getLeashPacket(victim, anchor);
+        if (leashPacket != null) {
+            broadcastToNearby(victim, leashPacket);
+        }
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());
@@ -113,21 +117,26 @@ public class PoliceManager {
         }
 
         plugin.getFoliaLib().getScheduler().runAtEntity(anchor, (task) -> {
+            Player victim = Bukkit.getPlayer(victimUUID);
+
+            if (victim != null && victim.isOnline()) {
+                PacketContainer unleashPacket = getUnleashPacket(victim);
+                if (unleashPacket != null) {
+                    broadcastToNearby(victim, unleashPacket);
+                }
+            }
+
             if (!anchor.isDead()) {
                 anchor.remove();
             }
 
-            Player victim = Bukkit.getPlayer(victimUUID);
             if (victim != null && victim.isOnline()) {
                 Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
-
-                Player broadcastCenter = (policeman != null && policeman.isOnline()) ? policeman : victim;
-                broadcastToNearby(broadcastCenter, getUnleashPacket(victim));
 
                 victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_DIAMOND, 1.0f, 1.0f);
                 executeEmoteCommand("stop-cuff", victim.getName());
 
-                if (policeman != null) {
+                if (policeman != null && policeman.isOnline()) {
                     String message = plugin.getConfig().getString("modules.police-system.cuff.uncuff-message", "&ePlayer {player} has been released!");
                     policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
                 }
@@ -161,6 +170,7 @@ public class PoliceManager {
         final double maxDistance = plugin.getConfig().getDouble("modules.police-system.physics.max-distance", 4.0);
         final double pullForce = plugin.getConfig().getDouble("modules.police-system.physics.pull-force", 0.3);
         final boolean preventWallDragging = plugin.getConfig().getBoolean("modules.police-system.physics.prevent-wall-dragging", true);
+        final int leashUpdateInterval = plugin.getConfig().getInt("modules.police-system.leash-update-interval", 20);
 
         return plugin.getFoliaLib().getScheduler().runTimer(() -> {
             if (cuffedPlayers.isEmpty()) return;
@@ -178,6 +188,13 @@ public class PoliceManager {
                     Location policeLoc = policeman.getLocation();
                     if (!anchor.getLocation().getWorld().equals(policeLoc.getWorld()) || anchor.getLocation().distanceSquared(policeLoc) > 0.01) {
                         plugin.getFoliaLib().getScheduler().teleportAsync(anchor, policeLoc);
+                    }
+
+                    if (victim.getTicksLived() % leashUpdateInterval == 0) {
+                        PacketContainer leashPacket = getLeashPacket(victim, anchor);
+                        if (leashPacket != null) {
+                            broadcastToNearby(victim, leashPacket);
+                        }
                     }
 
                     Location victimLoc = victim.getLocation();
@@ -249,26 +266,38 @@ public class PoliceManager {
     }
 
     private PacketContainer getLeashPacket(Entity leashed, Entity holder) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
-        leashPacket.getIntegers().write(0, leashed.getEntityId());
-        leashPacket.getIntegers().write(1, holder.getEntityId());
-        return leashPacket;
+        try {
+            PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
+            leashPacket.getIntegers().write(0, leashed.getEntityId());
+            leashPacket.getIntegers().write(1, holder.getEntityId());
+            return leashPacket;
+        } catch (Exception e) {
+            logManager.severe("Failed to create leash packet: " + e.getMessage());
+            return null;
+        }
     }
 
     private PacketContainer getUnleashPacket(Entity leashed) {
-        PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
-        leashPacket.getIntegers().write(0, leashed.getEntityId());
-        leashPacket.getIntegers().write(1, -1);
-        return leashPacket;
+        try {
+            PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
+            leashPacket.getIntegers().write(0, leashed.getEntityId());
+            leashPacket.getIntegers().write(1, -1);
+            return leashPacket;
+        } catch (Exception e) {
+            logManager.severe("Failed to create unleash packet: " + e.getMessage());
+            return null;
+        }
     }
 
     private void broadcastToNearby(Player center, PacketContainer packet) {
+        if (packet == null) return;
+
         for (Player observer : center.getWorld().getPlayers()) {
-            if (observer.getLocation().distanceSquared(center.getLocation()) < 64 * 64) {
+            if (observer.getLocation().distanceSquared(center.getLocation()) < 128 * 128) {
                 try {
                     protocolManager.sendServerPacket(observer, packet);
                 } catch (Exception e) {
-                    logManager.severe("Failed to send packet: " + e.getMessage());
+                    logManager.severe("Failed to send packet to " + observer.getName() + ": " + e.getMessage());
                 }
             }
         }

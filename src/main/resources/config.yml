@@ -83,6 +83,7 @@ modules:
     enabled: true
     permission: "cookiepl.police.use"
     max-cuff-distance: 20.0
+    leash-update-interval: 20
     physics:
       min-distance: 2.0
       max-distance: 4.0
@@ -192,9 +193,14 @@ modules:
     placeholder:
       afk-symbol: " &e[AFK]"
 
-  elytra:
-    enabled: true
-    permission: "cookiepl.elytra.give"
+  update-server:
+    enabled: false
+    port: 20564
+    api-key: "UPDATE_SERVER_API_KEY"
+    public-url: "http://your.domain.com:20564"
+    downloads-dir: "downloads"
+    update-json-file: "update.json"
+    update-route: "/update/coreprotecttnt"
 
 logging:
   enabled: true
