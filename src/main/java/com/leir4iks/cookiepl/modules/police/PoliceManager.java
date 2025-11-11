@@ -294,7 +294,7 @@ public class PoliceManager {
                 if (shouldUncuff) {
                     uncuffPlayer(victimUUID, "Watchdog: " + uncuffReason);
                 } else if (anchor == null || anchor.isDead() || leashChicken == null || leashChicken.isDead()) {
-                    logManager.warning("Partial entity loss for cuffed player " + victim.getName() +
+                    logManager.warn("Partial entity loss for cuffed player " + victim.getName() +
                             " - anchor: " + (anchor != null) + ", leash: " + (leashChicken != null));
                 }
             }
