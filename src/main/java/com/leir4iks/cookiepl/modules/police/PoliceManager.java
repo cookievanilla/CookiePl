@@ -9,6 +9,7 @@ import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.*;
 import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Chicken;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
@@ -89,13 +90,26 @@ public class PoliceManager {
             as.setSmall(true);
         });
 
-        CuffedData cuffedData = new CuffedData(policeman.getUniqueId(), anchor.getUniqueId());
+        Chicken leashChicken = victim.getWorld().spawn(policeman.getLocation(), Chicken.class, c -> {
+            c.setInvisible(true);
+            c.setSilent(true);
+            c.setInvulnerable(true);
+            c.setGravity(false);
+            c.setAI(false);
+            c.setCollidable(false);
+            c.setAdult();
+            c.setBreed(false);
+        });
+
+        CuffedData cuffedData = new CuffedData(policeman.getUniqueId(), anchor.getUniqueId(), leashChicken.getUniqueId());
         cuffedPlayers.put(victim.getUniqueId(), cuffedData);
 
-        PacketContainer leashPacket = getLeashPacket(victim, anchor);
-        if (leashPacket != null) {
-            broadcastToNearby(victim, leashPacket);
-        }
+        plugin.getFoliaLib().getScheduler().runAtEntityLater(victim, () -> {
+            PacketContainer leashPacket = getLeashPacket(victim, leashChicken);
+            if (leashPacket != null) {
+                broadcastToNearby(victim, leashPacket);
+            }
+        }, 1L);
 
         victim.getWorld().playSound(victim.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 1.0f, 1.0f);
         executeEmoteCommand("start-cuff", victim.getName());
@@ -110,13 +124,12 @@ public class PoliceManager {
         if (data == null) return;
 
         Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
+        Entity leashChicken = Bukkit.getEntity(data.getLeashUUID());
 
-        if (anchor == null) {
-            logManager.info("Player " + victimUUID + " has been uncuffed (anchor not found). Reason: " + reason);
-            return;
-        }
+        Entity taskEntity = anchor != null ? anchor : leashChicken;
+        Location taskLocation = taskEntity != null ? taskEntity.getLocation() : Bukkit.getWorlds().get(0).getSpawnLocation();
 
-        plugin.getFoliaLib().getScheduler().runAtEntity(anchor, (task) -> {
+        plugin.getFoliaLib().getScheduler().runAtLocation(taskLocation, (task) -> {
             Player victim = Bukkit.getPlayer(victimUUID);
 
             if (victim != null && victim.isOnline()) {
@@ -126,8 +139,11 @@ public class PoliceManager {
                 }
             }
 
-            if (!anchor.isDead()) {
+            if (anchor != null && !anchor.isDead()) {
                 anchor.remove();
+            }
+            if (leashChicken != null && !leashChicken.isDead()) {
+                leashChicken.remove();
             }
 
             if (victim != null && victim.isOnline()) {
@@ -170,7 +186,6 @@ public class PoliceManager {
         final double maxDistance = plugin.getConfig().getDouble("modules.police-system.physics.max-distance", 4.0);
         final double pullForce = plugin.getConfig().getDouble("modules.police-system.physics.pull-force", 0.3);
         final boolean preventWallDragging = plugin.getConfig().getBoolean("modules.police-system.physics.prevent-wall-dragging", true);
-        final int leashUpdateInterval = plugin.getConfig().getInt("modules.police-system.leash-update-interval", 20);
 
         return plugin.getFoliaLib().getScheduler().runTimer(() -> {
             if (cuffedPlayers.isEmpty()) return;
@@ -179,47 +194,64 @@ public class PoliceManager {
                 Player victim = Bukkit.getPlayer(entry.getKey());
                 Player policeman = Bukkit.getPlayer(entry.getValue().getPolicemanUUID());
                 Entity anchor = Bukkit.getEntity(entry.getValue().getAnchorUUID());
+                Entity leashChicken = Bukkit.getEntity(entry.getValue().getLeashUUID());
 
-                if (victim == null || policeman == null || anchor == null || !victim.isOnline() || !policeman.isOnline() || anchor.isDead()) {
+                if (victim == null || policeman == null || !victim.isOnline() || !policeman.isOnline()) {
+                    continue;
+                }
+
+                if ((anchor == null || anchor.isDead()) && (leashChicken == null || leashChicken.isDead())) {
+                    uncuffPlayer(entry.getKey(), "Both entities lost");
                     continue;
                 }
 
                 plugin.getFoliaLib().getScheduler().runAtEntity(victim, task -> {
                     Location policeLoc = policeman.getLocation();
-                    if (!anchor.getLocation().getWorld().equals(policeLoc.getWorld()) || anchor.getLocation().distanceSquared(policeLoc) > 0.01) {
-                        plugin.getFoliaLib().getScheduler().teleportAsync(anchor, policeLoc);
+
+                    if (anchor != null && !anchor.isDead()) {
+                        if (!anchor.getLocation().getWorld().equals(policeLoc.getWorld()) ||
+                                anchor.getLocation().distanceSquared(policeLoc) > 0.01) {
+                            plugin.getFoliaLib().getScheduler().teleportAsync(anchor, policeLoc);
+                        }
                     }
 
-                    if (victim.getTicksLived() % leashUpdateInterval == 0) {
-                        PacketContainer leashPacket = getLeashPacket(victim, anchor);
+                    if (leashChicken != null && !leashChicken.isDead()) {
+                        if (!leashChicken.getLocation().getWorld().equals(policeLoc.getWorld()) ||
+                                leashChicken.getLocation().distanceSquared(policeLoc) > 0.01) {
+                            plugin.getFoliaLib().getScheduler().teleportAsync(leashChicken, policeLoc);
+                        }
+
+                        PacketContainer leashPacket = getLeashPacket(victim, leashChicken);
                         if (leashPacket != null) {
                             broadcastToNearby(victim, leashPacket);
                         }
                     }
 
-                    Location victimLoc = victim.getLocation();
-                    Location anchorLoc = anchor.getLocation();
-                    double distance = victimLoc.distance(anchorLoc);
+                    if (anchor != null && !anchor.isDead()) {
+                        Location victimLoc = victim.getLocation();
+                        Location anchorLoc = anchor.getLocation();
+                        double distance = victimLoc.distance(anchorLoc);
 
-                    if (distance < minDistance) {
-                        if (victim.getVelocity().lengthSquared() > 0.01) {
-                            victim.setVelocity(new Vector(0, victim.getVelocity().getY(), 0));
-                        }
-                        return;
-                    }
-
-                    if (preventWallDragging) {
-                        RayTraceResult rayTrace = victim.getWorld().rayTraceBlocks(victim.getEyeLocation(),
-                                anchorLoc.toVector().subtract(victim.getEyeLocation().toVector()).normalize(), distance);
-                        if (rayTrace != null && rayTrace.getHitBlock() != null) {
+                        if (distance < minDistance) {
+                            if (victim.getVelocity().lengthSquared() > 0.01) {
+                                victim.setVelocity(new Vector(0, victim.getVelocity().getY(), 0));
+                            }
                             return;
                         }
-                    }
 
-                    double forceMultiplier = Math.min(1.0, (distance - minDistance) / (maxDistance - minDistance));
-                    Vector direction = anchorLoc.toVector().subtract(victimLoc.toVector()).normalize();
-                    Vector pullVector = direction.multiply(pullForce * forceMultiplier);
-                    victim.setVelocity(victim.getVelocity().add(pullVector));
+                        if (preventWallDragging) {
+                            RayTraceResult rayTrace = victim.getWorld().rayTraceBlocks(victim.getEyeLocation(),
+                                    anchorLoc.toVector().subtract(victim.getEyeLocation().toVector()).normalize(), distance);
+                            if (rayTrace != null && rayTrace.getHitBlock() != null) {
+                                return;
+                            }
+                        }
+
+                        double forceMultiplier = Math.min(1.0, (distance - minDistance) / (maxDistance - minDistance));
+                        Vector direction = anchorLoc.toVector().subtract(victimLoc.toVector()).normalize();
+                        Vector pullVector = direction.multiply(pullForce * forceMultiplier);
+                        victim.setVelocity(victim.getVelocity().add(pullVector));
+                    }
                 });
             }
         }, 0L, 1L);
@@ -234,6 +266,7 @@ public class PoliceManager {
                 UUID victimUUID = entry.getKey();
                 CuffedData data = entry.getValue();
                 Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
+                Entity leashChicken = Bukkit.getEntity(data.getLeashUUID());
 
                 Player victim = Bukkit.getPlayer(victimUUID);
                 Player policeman = Bukkit.getPlayer(data.getPolicemanUUID());
@@ -247,9 +280,9 @@ public class PoliceManager {
                 } else if (victim == null || !victim.isOnline()) {
                     shouldUncuff = true;
                     uncuffReason = "Victim is offline or null.";
-                } else if (anchor == null || anchor.isDead()) {
+                } else if ((anchor == null || anchor.isDead()) && (leashChicken == null || leashChicken.isDead())) {
                     shouldUncuff = true;
-                    uncuffReason = "Anchor entity is invalid.";
+                    uncuffReason = "Both anchor and leash entities are invalid.";
                 } else if (victim.getWorld() != policeman.getWorld()) {
                     shouldUncuff = true;
                     uncuffReason = "Player and policeman are in different worlds.";
@@ -260,6 +293,9 @@ public class PoliceManager {
 
                 if (shouldUncuff) {
                     uncuffPlayer(victimUUID, "Watchdog: " + uncuffReason);
+                } else if (anchor == null || anchor.isDead() || leashChicken == null || leashChicken.isDead()) {
+                    logManager.warning("Partial entity loss for cuffed player " + victim.getName() +
+                            " - anchor: " + (anchor != null) + ", leash: " + (leashChicken != null));
                 }
             }
         }, 20L, 20L);
@@ -306,16 +342,19 @@ public class PoliceManager {
     static class CuffedData {
         private final UUID policemanUUID;
         private final UUID anchorUUID;
+        private final UUID leashUUID;
         private final long cuffTimestamp;
 
-        public CuffedData(UUID policemanUUID, UUID anchorUUID) {
+        public CuffedData(UUID policemanUUID, UUID anchorUUID, UUID leashUUID) {
             this.policemanUUID = policemanUUID;
             this.anchorUUID = anchorUUID;
+            this.leashUUID = leashUUID;
             this.cuffTimestamp = System.currentTimeMillis();
         }
 
         public UUID getPolicemanUUID() { return policemanUUID; }
         public UUID getAnchorUUID() { return anchorUUID; }
+        public UUID getLeashUUID() { return leashUUID; }
         public long getCuffTimestamp() { return cuffTimestamp; }
     }
 
