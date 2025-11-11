@@ -42,6 +42,7 @@ public class PoliceManager {
         BATON_KEY = new NamespacedKey(plugin, "baton_item");
         this.watchdogTask = startWatchdogTask();
         this.cuffUpdateTask = startCuffUpdateTask();
+        logManager.info("PoliceManager initialized");
     }
 
     public boolean isCuffed(UUID uuid) {
@@ -53,7 +54,12 @@ public class PoliceManager {
     }
 
     public void nockPlayer(Player victim, Player policeman) {
-        if (isCuffed(victim.getUniqueId()) || isNocked(victim.getUniqueId())) return;
+        logManager.info("nockPlayer called - victim: " + victim.getName() + ", policeman: " + policeman.getName());
+
+        if (isCuffed(victim.getUniqueId()) || isNocked(victim.getUniqueId())) {
+            logManager.info("Player already cuffed or nocked, returning");
+            return;
+        }
 
         int duration = plugin.getConfig().getInt("modules.police-system.nock.duration-seconds", 10);
         WrappedTask task = plugin.getFoliaLib().getScheduler().runAtEntityLater(victim, () -> unnockPlayer(victim, false), duration * 20L);
@@ -68,6 +74,8 @@ public class PoliceManager {
     }
 
     public void unnockPlayer(Player victim, boolean force) {
+        logManager.info("unnockPlayer called - victim: " + victim.getName() + ", force: " + force);
+
         NockedData data = nockedPlayers.remove(victim.getUniqueId());
         if (data != null) {
             if (!force && data.getExpireTask() != null && !data.getExpireTask().isCancelled()) {
@@ -78,10 +86,17 @@ public class PoliceManager {
     }
 
     public void cuffPlayer(Player victim, Player policeman) {
-        if (isCuffed(victim.getUniqueId())) return;
+        logManager.info("cuffPlayer called - victim: " + victim.getName() + ", policeman: " + policeman.getName());
+
+        if (isCuffed(victim.getUniqueId())) {
+            logManager.info("Player already cuffed, returning");
+            return;
+        }
         unnockPlayer(victim, true);
 
-        ArmorStand anchor = victim.getWorld().spawn(policeman.getLocation(), ArmorStand.class, as -> {
+        // Создаем ArmorStand для физики
+        logManager.info("Creating ArmorStand at victim location: " + victim.getLocation());
+        ArmorStand anchor = victim.getWorld().spawn(victim.getLocation(), ArmorStand.class, as -> {
             as.setVisible(false);
             as.setGravity(false);
             as.setMarker(true);
@@ -89,9 +104,11 @@ public class PoliceManager {
             as.setSilent(true);
             as.setSmall(true);
         });
+        logManager.info("ArmorStand created with ID: " + anchor.getUniqueId() + ", entity ID: " + anchor.getEntityId());
 
-        Chicken leashChicken = victim.getWorld().spawn(policeman.getLocation(), Chicken.class, c -> {
-            c.setInvisible(true);
+        // Создаем курицу для поводка
+        logManager.info("Creating Chicken at victim location: " + victim.getLocation());
+        Chicken leashChicken = victim.getWorld().spawn(victim.getLocation(), Chicken.class, c -> {
             c.setSilent(true);
             c.setInvulnerable(true);
             c.setGravity(false);
@@ -99,15 +116,30 @@ public class PoliceManager {
             c.setCollidable(false);
             c.setAdult();
             c.setBreed(false);
+            c.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, Integer.MAX_VALUE, 1, true, false));
         });
+        logManager.info("Chicken created with ID: " + leashChicken.getUniqueId() + ", entity ID: " + leashChicken.getEntityId());
 
         CuffedData cuffedData = new CuffedData(policeman.getUniqueId(), anchor.getUniqueId(), leashChicken.getUniqueId());
         cuffedPlayers.put(victim.getUniqueId(), cuffedData);
+        logManager.info("CuffedData created and stored for victim: " + victim.getUniqueId());
 
+        // Создаем поводок между игроком и курицей
+        logManager.info("Creating leash packet between victim (ID: " + victim.getEntityId() + ") and chicken (ID: " + leashChicken.getEntityId() + ")");
+        PacketContainer leashPacket = getLeashPacket(victim, leashChicken);
+        if (leashPacket != null) {
+            logManager.info("Leash packet created successfully, broadcasting to nearby players");
+            broadcastToNearby(victim, leashPacket);
+        } else {
+            logManager.severe("Failed to create leash packet!");
+        }
+
+        // Дублируем через 1 тик для надежности
         plugin.getFoliaLib().getScheduler().runAtEntityLater(victim, () -> {
-            PacketContainer leashPacket = getLeashPacket(victim, leashChicken);
-            if (leashPacket != null) {
-                broadcastToNearby(victim, leashPacket);
+            logManager.info("Sending duplicate leash packet after 1 tick");
+            PacketContainer duplicateLeashPacket = getLeashPacket(victim, leashChicken);
+            if (duplicateLeashPacket != null) {
+                broadcastToNearby(victim, duplicateLeashPacket);
             }
         }, 1L);
 
@@ -116,23 +148,32 @@ public class PoliceManager {
 
         String message = plugin.getConfig().getString("modules.police-system.cuff.message", "&aYou have cuffed player {player}!");
         policeman.sendMessage(ChatColor.translateAlternateColorCodes('&', message.replace("{player}", victim.getName())));
-        logManager.info("Player " + policeman.getName() + " cuffed " + victim.getName());
+        logManager.info("Player " + policeman.getName() + " cuffed " + victim.getName() + " - ArmorStand: " + anchor.getEntityId() + ", Chicken: " + leashChicken.getEntityId());
     }
 
     public void uncuffPlayer(UUID victimUUID, String reason) {
+        logManager.info("uncuffPlayer called - victim UUID: " + victimUUID + ", reason: " + reason);
+
         CuffedData data = cuffedPlayers.remove(victimUUID);
-        if (data == null) return;
+        if (data == null) {
+            logManager.info("No cuffed data found for victim UUID: " + victimUUID);
+            return;
+        }
 
         Entity anchor = Bukkit.getEntity(data.getAnchorUUID());
         Entity leashChicken = Bukkit.getEntity(data.getLeashUUID());
+
+        logManager.info("Found entities - anchor: " + (anchor != null) + ", leashChicken: " + (leashChicken != null));
 
         Entity taskEntity = anchor != null ? anchor : leashChicken;
         Location taskLocation = taskEntity != null ? taskEntity.getLocation() : Bukkit.getWorlds().get(0).getSpawnLocation();
 
         plugin.getFoliaLib().getScheduler().runAtLocation(taskLocation, (task) -> {
             Player victim = Bukkit.getPlayer(victimUUID);
+            logManager.info("Running uncuff task - victim: " + (victim != null ? victim.getName() : "null"));
 
             if (victim != null && victim.isOnline()) {
+                logManager.info("Sending unleash packet for victim ID: " + victim.getEntityId());
                 PacketContainer unleashPacket = getUnleashPacket(victim);
                 if (unleashPacket != null) {
                     broadcastToNearby(victim, unleashPacket);
@@ -140,10 +181,17 @@ public class PoliceManager {
             }
 
             if (anchor != null && !anchor.isDead()) {
+                logManager.info("Removing ArmorStand with ID: " + anchor.getUniqueId());
                 anchor.remove();
+            } else {
+                logManager.info("ArmorStand is null or already dead");
             }
+
             if (leashChicken != null && !leashChicken.isDead()) {
+                logManager.info("Removing Chicken with ID: " + leashChicken.getUniqueId());
                 leashChicken.remove();
+            } else {
+                logManager.info("Chicken is null or already dead");
             }
 
             if (victim != null && victim.isOnline()) {
@@ -170,6 +218,8 @@ public class PoliceManager {
     }
 
     public void cleanUpAll() {
+        logManager.info("cleanUpAll called");
+
         if (watchdogTask != null) watchdogTask.cancel();
         if (cuffUpdateTask != null) cuffUpdateTask.cancel();
 
@@ -201,6 +251,7 @@ public class PoliceManager {
                 }
 
                 if ((anchor == null || anchor.isDead()) && (leashChicken == null || leashChicken.isDead())) {
+                    logManager.warn("Both entities lost for victim: " + victim.getName());
                     uncuffPlayer(entry.getKey(), "Both entities lost");
                     continue;
                 }
@@ -208,29 +259,35 @@ public class PoliceManager {
                 plugin.getFoliaLib().getScheduler().runAtEntity(victim, task -> {
                     Location policeLoc = policeman.getLocation();
 
+                    // Телепортируем ArmorStand к полицейскому
                     if (anchor != null && !anchor.isDead()) {
                         if (!anchor.getLocation().getWorld().equals(policeLoc.getWorld()) ||
                                 anchor.getLocation().distanceSquared(policeLoc) > 0.01) {
-                            plugin.getFoliaLib().getScheduler().teleportAsync(anchor, policeLoc);
+                            anchor.teleport(policeLoc);
                         }
                     }
 
+                    // Телепортируем курицу к полицейскому и обновляем поводок
                     if (leashChicken != null && !leashChicken.isDead()) {
                         if (!leashChicken.getLocation().getWorld().equals(policeLoc.getWorld()) ||
                                 leashChicken.getLocation().distanceSquared(policeLoc) > 0.01) {
-                            plugin.getFoliaLib().getScheduler().teleportAsync(leashChicken, policeLoc);
+                            leashChicken.teleport(policeLoc);
                         }
 
+                        // Постоянно обновляем поводок
                         PacketContainer leashPacket = getLeashPacket(victim, leashChicken);
                         if (leashPacket != null) {
                             broadcastToNearby(victim, leashPacket);
                         }
                     }
 
+                    // Применяем физику к игроку
                     if (anchor != null && !anchor.isDead()) {
                         Location victimLoc = victim.getLocation();
                         Location anchorLoc = anchor.getLocation();
                         double distance = victimLoc.distance(anchorLoc);
+
+                        logManager.debug("Physics update - victim: " + victim.getName() + ", distance: " + distance);
 
                         if (distance < minDistance) {
                             if (victim.getVelocity().lengthSquared() > 0.01) {
@@ -292,6 +349,7 @@ public class PoliceManager {
                 }
 
                 if (shouldUncuff) {
+                    logManager.info("Watchdog uncuffing victim: " + victimUUID + ", reason: " + uncuffReason);
                     uncuffPlayer(victimUUID, "Watchdog: " + uncuffReason);
                 } else if (anchor == null || anchor.isDead() || leashChicken == null || leashChicken.isDead()) {
                     logManager.warn("Partial entity loss for cuffed player " + victim.getName() +
@@ -303,9 +361,11 @@ public class PoliceManager {
 
     private PacketContainer getLeashPacket(Entity leashed, Entity holder) {
         try {
+            logManager.debug("Creating leash packet - leashed: " + leashed.getEntityId() + ", holder: " + holder.getEntityId());
             PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
             leashPacket.getIntegers().write(0, leashed.getEntityId());
             leashPacket.getIntegers().write(1, holder.getEntityId());
+            logManager.debug("Leash packet created successfully");
             return leashPacket;
         } catch (Exception e) {
             logManager.severe("Failed to create leash packet: " + e.getMessage());
@@ -315,9 +375,11 @@ public class PoliceManager {
 
     private PacketContainer getUnleashPacket(Entity leashed) {
         try {
+            logManager.debug("Creating unleash packet for entity: " + leashed.getEntityId());
             PacketContainer leashPacket = new PacketContainer(PacketType.Play.Server.ATTACH_ENTITY);
             leashPacket.getIntegers().write(0, leashed.getEntityId());
             leashPacket.getIntegers().write(1, -1);
+            logManager.debug("Unleash packet created successfully");
             return leashPacket;
         } catch (Exception e) {
             logManager.severe("Failed to create unleash packet: " + e.getMessage());
@@ -326,17 +388,23 @@ public class PoliceManager {
     }
 
     private void broadcastToNearby(Player center, PacketContainer packet) {
-        if (packet == null) return;
+        if (packet == null) {
+            logManager.warn("Attempted to broadcast null packet");
+            return;
+        }
 
+        int sentCount = 0;
         for (Player observer : center.getWorld().getPlayers()) {
             if (observer.getLocation().distanceSquared(center.getLocation()) < 128 * 128) {
                 try {
                     protocolManager.sendServerPacket(observer, packet);
+                    sentCount++;
                 } catch (Exception e) {
                     logManager.severe("Failed to send packet to " + observer.getName() + ": " + e.getMessage());
                 }
             }
         }
+        logManager.debug("Leash packet broadcasted to " + sentCount + " players");
     }
 
     static class CuffedData {
