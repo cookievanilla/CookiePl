@@ -6,6 +6,8 @@ import org.bukkit.ChatColor;
 import org.bukkit.Color;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
@@ -21,19 +23,23 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.util.Transformation;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class AFKManager implements Listener {
 
     private final CookiePl plugin;
+
     private final Map<UUID, Long> lastActivity = new ConcurrentHashMap<>();
     private final Map<UUID, AFKData> afkPlayers = new ConcurrentHashMap<>();
     private final Set<Location> afkProtectedBlocks = new HashSet<>();
     private final WrappedTask afkCheckTask;
+
+    private final File dataFile;
+    private final FileConfiguration dataConfig;
+    private final Set<String> persistentAfkPlayers = Collections.synchronizedSet(new HashSet<>());
 
     private final long afkTimeMillis;
     private final boolean indicatorEnabled;
@@ -59,7 +65,50 @@ public class AFKManager implements Listener {
         this.noHungerEnabled = plugin.getConfig().getBoolean(configKey + ".no-hunger.enabled", true);
         this.sleepIgnoreEnabled = plugin.getConfig().getBoolean(configKey + ".sleep-ignore.enabled", true);
 
+        this.dataFile = new File(plugin.getDataFolder(), "data/afk_data.yml");
+        if (!dataFile.exists()) {
+            dataFile.getParentFile().mkdirs();
+            try {
+                dataFile.createNewFile();
+            } catch (IOException e) {
+                plugin.getLogManager().severe("Could not create afk_data.yml");
+                e.printStackTrace();
+            }
+        }
+        this.dataConfig = YamlConfiguration.loadConfiguration(dataFile);
+        this.persistentAfkPlayers.addAll(dataConfig.getStringList("afk-uuids"));
+
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+            checkAndRestorePlayer(player);
+        }
+
         this.afkCheckTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::checkAFK, 100L, 100L);
+    }
+
+    private void savePersistentData() {
+        plugin.getFoliaLib().getScheduler().runAsync(task -> {
+            synchronized (persistentAfkPlayers) {
+                dataConfig.set("afk-uuids", new ArrayList<>(persistentAfkPlayers));
+                try {
+                    dataConfig.save(dataFile);
+                } catch (IOException e) {
+                    plugin.getLogManager().severe("Failed to save afk_data.yml");
+                    e.printStackTrace();
+                }
+            }
+        });
+    }
+
+    private void markAfkPersistent(UUID uuid) {
+        if (persistentAfkPlayers.add(uuid.toString())) {
+            savePersistentData();
+        }
+    }
+
+    private void unmarkAfkPersistent(UUID uuid) {
+        if (persistentAfkPlayers.remove(uuid.toString())) {
+            savePersistentData();
+        }
     }
 
     private void checkAFK() {
@@ -82,6 +131,8 @@ public class AFKManager implements Listener {
     public void setAfk(Player player) {
         if (isAfk(player.getUniqueId()) || player.isDead()) return;
 
+        markAfkPersistent(player.getUniqueId());
+
         Location afkLocation = player.getLocation();
         AFKData afkData = new AFKData(afkLocation);
 
@@ -95,28 +146,39 @@ public class AFKManager implements Listener {
         if (preventBlockBreak) {
             afkProtectedBlocks.add(afkLocation.clone().subtract(0, 1, 0).getBlock().getLocation());
         }
-        if (invulnerabilityEnabled) {
-            player.setInvulnerable(true);
-        }
-        if (sleepIgnoreEnabled) {
-            player.setSleepingIgnored(true);
-        }
+
+        applyAfkAttributes(player);
 
         afkPlayers.put(player.getUniqueId(), afkData);
     }
 
     public void unsetAfk(Player player) {
         AFKData data = afkPlayers.remove(player.getUniqueId());
-        if (data == null) return;
 
-        data.cancel();
+        if (data != null) {
+            data.cancel();
+            if (data.getIndicator() != null && data.getIndicator().isValid()) {
+                data.getIndicator().remove();
+            }
+            if (preventBlockBreak) {
+                afkProtectedBlocks.remove(data.getOriginalLocation().clone().subtract(0, 1, 0).getBlock().getLocation());
+            }
+        }
 
-        if (data.getIndicator() != null && data.getIndicator().isValid()) {
-            data.getIndicator().remove();
+        resetAfkAttributes(player);
+        unmarkAfkPersistent(player.getUniqueId());
+    }
+
+    private void applyAfkAttributes(Player player) {
+        if (invulnerabilityEnabled) {
+            player.setInvulnerable(true);
         }
-        if (preventBlockBreak) {
-            afkProtectedBlocks.remove(data.getOriginalLocation().clone().subtract(0, 1, 0).getBlock().getLocation());
+        if (sleepIgnoreEnabled) {
+            player.setSleepingIgnored(true);
         }
+    }
+
+    private void resetAfkAttributes(Player player) {
         if (invulnerabilityEnabled) {
             if (player.getGameMode() != GameMode.CREATIVE && player.getGameMode() != GameMode.SPECTATOR) {
                 player.setInvulnerable(false);
@@ -124,6 +186,15 @@ public class AFKManager implements Listener {
         }
         if (sleepIgnoreEnabled) {
             player.setSleepingIgnored(false);
+        }
+    }
+
+    private void checkAndRestorePlayer(Player player) {
+        if (persistentAfkPlayers.contains(player.getUniqueId().toString())) {
+            plugin.getLogManager().info("Player " + player.getName() + " was AFK during shutdown/crash. Resetting status.");
+            resetAfkAttributes(player);
+            unmarkAfkPersistent(player.getUniqueId());
+            lastActivity.put(player.getUniqueId(), System.currentTimeMillis());
         }
     }
 
@@ -209,8 +280,8 @@ public class AFKManager implements Listener {
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        unsetAfk(player);
         lastActivity.put(player.getUniqueId(), System.currentTimeMillis());
+        checkAndRestorePlayer(player);
     }
 
     @EventHandler
@@ -272,8 +343,10 @@ public class AFKManager implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
-        if (isAfk(player.getUniqueId()) && immobilityEnabled) {
+        if (isAfk(player.getUniqueId())) {
             if (event.getCause() == PlayerTeleportEvent.TeleportCause.PLUGIN || event.getCause() == PlayerTeleportEvent.TeleportCause.COMMAND) {
+                unsetAfk(player);
+            } else if (immobilityEnabled) {
                 AFKData afkData = afkPlayers.get(player.getUniqueId());
                 if (afkData != null && afkData.getOriginalLocation().distanceSquared(event.getTo()) > 0.01) {
                     event.setCancelled(true);
