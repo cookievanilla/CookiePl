@@ -39,3 +39,8 @@ commands:
     aliases: [res]
     permission: cookiepl.resize
     permission-message: "You do not have permission to use this command."
+  afk:
+    description: Toggle AFK status.
+    usage: /<command>
+    permission: cookiepl.command.afk
+    permission-message: "You do not have permission to use this command."

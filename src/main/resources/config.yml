@@ -177,13 +177,11 @@ modules:
   afk-system:
     enabled: true
     afk-time-seconds: 300
+    freeze-player: false
     indicator:
       enabled: true
       text: "&e⌛"
       y-offset: 0.5
-    immobility:
-      enabled: true
-      prevent-block-break: true
     invulnerability:
       enabled: true
     no-hunger:
@@ -192,6 +190,10 @@ modules:
       enabled: true
     placeholder:
       afk-symbol: " &e[AFK]"
+    messages:
+      afk-enabled: "&7Вы вошли в режим &eAFK&7."
+      afk-disabled: "&7Вы вышли из режима &eAFK&7."
+      only-player: "&cЭту команду может использовать только игрок."
 
   update-server:
     enabled: false

@@ -16,7 +16,7 @@ public class AFKPlaceholder extends PlaceholderExpansion {
     public AFKPlaceholder(CookiePl plugin, AFKManager afkManager) {
         this.plugin = plugin;
         this.afkManager = afkManager;
-        this.afkSymbol = formatColor(plugin.getConfig().getString("modules.afk-system.placeholder.afk-symbol", "&e⌛"));
+        this.afkSymbol = formatColor(plugin.getConfig().getString("modules.afk-system.placeholder.afk-symbol", "&e[AFK]"));
     }
 
     @Override
@@ -48,7 +48,7 @@ public class AFKPlaceholder extends PlaceholderExpansion {
         if (player == null) {
             return "";
         }
-        if (afkManager.isAfk(player.getUniqueId())) {
+        if (afkManager.isAfk(player)) {
             return afkSymbol;
         }
         return "";
