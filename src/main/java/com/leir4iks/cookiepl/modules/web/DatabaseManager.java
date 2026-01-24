@@ -1,3 +1,4 @@
+// File: C:/111/CookiePl/src/main/java/com/leir4iks/cookiepl/modules/web/DatabaseManager.java
 package com.leir4iks.cookiepl.modules.web;
 
 import com.google.gson.JsonArray;
@@ -5,7 +6,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
-import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -19,6 +19,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class DatabaseManager {
 
@@ -30,6 +33,7 @@ public class DatabaseManager {
 
     private volatile String cachedJsonResponse = "{}";
     private final Map<String, String> externalMap = new ConcurrentHashMap<>();
+    private ScheduledExecutorService scheduler;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -47,7 +51,17 @@ public class DatabaseManager {
     }
 
     public void startTask() {
-        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::updateDatabase, 0L, 3 * 60 * 20L);
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.shutdownNow();
+        }
+        scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.scheduleAtFixedRate(this::updateDatabase, 0, 3, TimeUnit.MINUTES);
+    }
+
+    public void stopTask() {
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.shutdownNow();
+        }
     }
 
     public String getCachedJson() {
@@ -55,46 +69,51 @@ public class DatabaseManager {
     }
 
     private void updateDatabase() {
-        syncExternalData();
+        try {
+            syncExternalData();
 
-        Map<String, String> userCacheMap = loadUserCache();
-        JsonObject rootObject = new JsonObject();
-        File accountsFile = new File(discordSrvFolder, "accounts.aof");
+            Map<String, String> userCacheMap = loadUserCache();
+            JsonObject rootObject = new JsonObject();
+            File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
-        if (accountsFile.exists()) {
-            try {
-                List<String> lines = Files.readAllLines(accountsFile.toPath(), StandardCharsets.UTF_8);
-                for (String line : lines) {
-                    if (line.trim().isEmpty()) continue;
+            if (accountsFile.exists()) {
+                try {
+                    List<String> lines = Files.readAllLines(accountsFile.toPath(), StandardCharsets.UTF_8);
+                    for (String line : lines) {
+                        if (line.trim().isEmpty()) continue;
 
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length >= 2) {
-                        String discordId = parts[0];
-                        String minecraftUuid = parts[1];
-                        String minecraftName = "Unknown";
+                        String[] parts = line.trim().split("\\s+");
+                        if (parts.length >= 2) {
+                            String discordId = parts[0];
+                            String minecraftUuid = parts[1];
+                            String minecraftName = "Unknown";
 
-                        if (externalMap.containsKey(discordId)) {
-                            minecraftName = externalMap.get(discordId);
-                        } else if (userCacheMap.containsKey(minecraftUuid)) {
-                            minecraftName = userCacheMap.get(minecraftUuid);
+                            if (externalMap.containsKey(discordId)) {
+                                minecraftName = externalMap.get(discordId);
+                            } else if (userCacheMap.containsKey(minecraftUuid)) {
+                                minecraftName = userCacheMap.get(minecraftUuid);
+                            }
+
+                            JsonObject playerData = new JsonObject();
+                            playerData.addProperty("minecraft_name", minecraftName);
+                            playerData.addProperty("minecraft_uuid", minecraftUuid);
+
+                            rootObject.add(discordId, playerData);
                         }
-
-                        JsonObject playerData = new JsonObject();
-                        playerData.addProperty("minecraft_name", minecraftName);
-                        playerData.addProperty("minecraft_uuid", minecraftUuid);
-
-                        rootObject.add(discordId, playerData);
                     }
+                } catch (IOException e) {
+                    plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+                    rootObject.addProperty("error", "Failed to read database file");
                 }
-            } catch (IOException e) {
-                plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
-                rootObject.addProperty("error", "Failed to read database file");
+            } else {
+                rootObject.addProperty("error", "DiscordSRV accounts.aof not found");
             }
-        } else {
-            rootObject.addProperty("error", "DiscordSRV accounts.aof not found");
-        }
 
-        this.cachedJsonResponse = rootObject.toString();
+            this.cachedJsonResponse = rootObject.toString();
+        } catch (Exception e) {
+            plugin.getLogManager().severe("Error in DatabaseManager update task: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     private void syncExternalData() {

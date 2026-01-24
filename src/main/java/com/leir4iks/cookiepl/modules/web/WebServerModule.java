@@ -21,6 +21,9 @@ public class WebServerModule implements IModule {
         if (this.webServerManager != null) {
             this.webServerManager.stop();
         }
+        if (this.databaseManager != null) {
+            this.databaseManager.stopTask();
+        }
         this.webServerManager = null;
         this.databaseManager = null;
     }
