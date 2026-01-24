@@ -1,3 +1,4 @@
+# File: C:/111/CookiePl/src/main/resources/config.yml
 modules:
   tag-item:
     enabled: true
@@ -203,6 +204,11 @@ modules:
     downloads-dir: "downloads"
     update-json-file: "update.json"
     update-route: "/update/coreprotecttnt"
+
+  web-server:
+    enabled: true
+    port: 8080
+    cors-enabled: true
 
 logging:
   enabled: true

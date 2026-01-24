@@ -1,6 +1,8 @@
+// File: C:/111/CookiePl/src/main/java/com/leir4iks/cookiepl/CookiePl.java
 package com.leir4iks.cookiepl;
 
 import com.leir4iks.cookiepl.commands.MainCommand;
+import com.leir4iks.cookiepl.config.ConfigManager;
 import com.leir4iks.cookiepl.modules.IModule;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.FoliaLib;
@@ -18,11 +20,13 @@ public final class CookiePl extends JavaPlugin {
     private final List<IModule> enabledModules = new ArrayList<>();
     private LogManager logManager;
     private FoliaLib foliaLib;
+    private ConfigManager configManager;
 
     @Override
     public void onEnable() {
         this.foliaLib = new FoliaLib(this);
-        saveDefaultConfig();
+        this.configManager = new ConfigManager(this);
+        this.configManager.load();
         this.logManager = new LogManager(this);
 
         scanAndRegisterModules();
@@ -95,7 +99,9 @@ public final class CookiePl extends JavaPlugin {
     public void reloadAllModules() {
         logManager.info("Reloading all modules...");
         disableAllModules();
-        reloadConfig();
+
+        configManager.load();
+
         this.logManager = new LogManager(this);
         scanAndRegisterModules();
         loadEnabledModules();
