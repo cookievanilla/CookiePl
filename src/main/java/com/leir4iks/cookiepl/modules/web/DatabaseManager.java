@@ -1,4 +1,3 @@
-// File: C:/111/CookiePl/src/main/java/com/leir4iks/cookiepl/modules/web/DatabaseManager.java
 package com.leir4iks.cookiepl.modules.web;
 
 import com.google.gson.JsonArray;
@@ -6,40 +5,65 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
+import org.bukkit.Bukkit;
+import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class DatabaseManager {
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
     private final File userCacheFile;
+    private final File dataFile;
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
+
+    private volatile String cachedJsonResponse = "{}";
+    private final Map<String, String> externalMap = new ConcurrentHashMap<>();
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
         this.discordSrvFolder = new File(plugin.getDataFolder().getParentFile(), "DiscordSRV");
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
+        this.dataFile = new File(plugin.getDataFolder(), "data.yml");
+
+        if (!dataFile.exists()) {
+            try {
+                dataFile.createNewFile();
+            } catch (IOException e) {
+                plugin.getLogManager().severe("Could not create data.yml: " + e.getMessage());
+            }
+        }
     }
 
-    public String getDatabaseJson() {
-        Map<String, String> externalMap = loadExternalDatabase();
-        Map<String, String> userCacheMap = loadUserCache();
+    public void startTask() {
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::updateDatabase, 0L, 3 * 60 * 20L);
+    }
 
+    public String getCachedJson() {
+        return cachedJsonResponse;
+    }
+
+    private void updateDatabase() {
+        syncExternalData();
+
+        Map<String, String> userCacheMap = loadUserCache();
         JsonObject rootObject = new JsonObject();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
         if (accountsFile.exists()) {
             try {
-                List<String> lines = Files.readAllLines(accountsFile.toPath());
+                List<String> lines = Files.readAllLines(accountsFile.toPath(), StandardCharsets.UTF_8);
                 for (String line : lines) {
                     if (line.trim().isEmpty()) continue;
 
@@ -47,7 +71,6 @@ public class DatabaseManager {
                     if (parts.length >= 2) {
                         String discordId = parts[0];
                         String minecraftUuid = parts[1];
-
                         String minecraftName = "Unknown";
 
                         if (externalMap.containsKey(discordId)) {
@@ -71,32 +94,57 @@ public class DatabaseManager {
             rootObject.addProperty("error", "DiscordSRV accounts.aof not found");
         }
 
-        return rootObject.toString();
+        this.cachedJsonResponse = rootObject.toString();
     }
 
-    private Map<String, String> loadExternalDatabase() {
-        Map<String, String> map = new HashMap<>();
+    private void syncExternalData() {
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(dataFile);
+        boolean needsSave = false;
+
+        for (String key : yaml.getKeys(false)) {
+            externalMap.put(key, yaml.getString(key));
+        }
+
         try {
             URL url = new URL(externalDatabaseUrl);
-            try (Scanner scanner = new Scanner(url.openStream())) {
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestMethod("GET");
+
+            try (Scanner scanner = new Scanner(connection.getInputStream(), StandardCharsets.UTF_8.name())) {
                 while (scanner.hasNextLine()) {
                     String line = scanner.nextLine();
                     if (line.trim().isEmpty()) continue;
 
                     String[] parts = line.trim().split("\\s+");
                     if (parts.length >= 2) {
-                        map.put(parts[0], parts[1]);
+                        String discordId = parts[0];
+                        String nickname = parts[1];
+
+                        if (!yaml.contains(discordId) || !nickname.equals(yaml.getString(discordId))) {
+                            yaml.set(discordId, nickname);
+                            externalMap.put(discordId, nickname);
+                            needsSave = true;
+                        }
                     }
                 }
             }
         } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to fetch external database: " + e.getMessage());
+            plugin.getLogManager().warn("Failed to fetch external database (using local cache): " + e.getMessage());
         }
-        return map;
+
+        if (needsSave) {
+            try {
+                yaml.save(dataFile);
+            } catch (IOException e) {
+                plugin.getLogManager().severe("Failed to save data.yml: " + e.getMessage());
+            }
+        }
     }
 
     private Map<String, String> loadUserCache() {
-        Map<String, String> map = new HashMap<>();
+        Map<String, String> map = new ConcurrentHashMap<>();
         if (userCacheFile.exists()) {
             try (FileReader reader = new FileReader(userCacheFile)) {
                 JsonElement element = JsonParser.parseReader(reader);
@@ -113,7 +161,7 @@ public class DatabaseManager {
                         }
                     }
                 }
-            } catch (IOException e) {
+            } catch (Exception e) {
                 plugin.getLogManager().warn("Failed to read usercache.json: " + e.getMessage());
             }
         }
