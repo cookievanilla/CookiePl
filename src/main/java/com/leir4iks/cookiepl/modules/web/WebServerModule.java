@@ -11,7 +11,8 @@ public class WebServerModule implements IModule {
     @Override
     public void enable(CookiePl plugin) {
         this.databaseManager = new DatabaseManager(plugin);
-        this.databaseManager.startTask();
+        this.databaseManager.start();
+
         this.webServerManager = new WebServerManager(plugin, databaseManager);
         this.webServerManager.start();
     }
@@ -22,7 +23,7 @@ public class WebServerModule implements IModule {
             this.webServerManager.stop();
         }
         if (this.databaseManager != null) {
-            this.databaseManager.stopTask();
+            this.databaseManager.stop();
         }
         this.webServerManager = null;
         this.databaseManager = null;

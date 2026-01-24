@@ -27,7 +27,7 @@ public class WebServerManager {
 
     public void start() {
         try {
-            server = HttpServer.create(new InetSocketAddress(port), 50);
+            server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/", this::handleRootRequest);
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
@@ -47,34 +47,25 @@ public class WebServerManager {
     }
 
     private void handleRootRequest(HttpExchange exchange) throws IOException {
-        try {
-            if (corsEnabled) {
-                exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
-                exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-                exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization");
-            }
+        if (corsEnabled) {
+            exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+            exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization");
+        }
 
-            if (exchange.getRequestMethod().equalsIgnoreCase("OPTIONS")) {
-                exchange.sendResponseHeaders(204, -1);
-                return;
-            }
+        if (exchange.getRequestMethod().equalsIgnoreCase("OPTIONS")) {
+            exchange.sendResponseHeaders(204, -1);
+            return;
+        }
 
-            String response = databaseManager.getCachedJson();
-            byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+        String response = databaseManager.getDatabaseJson();
+        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
 
-            exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
-            exchange.sendResponseHeaders(200, bytes.length);
+        exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
+        exchange.sendResponseHeaders(200, bytes.length);
 
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            String error = "{\"error\": \"Internal Server Error\"}";
-            exchange.sendResponseHeaders(500, error.length());
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(error.getBytes(StandardCharsets.UTF_8));
-            }
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
         }
     }
 }
