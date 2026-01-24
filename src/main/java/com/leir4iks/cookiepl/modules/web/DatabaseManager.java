@@ -134,7 +134,7 @@ public class DatabaseManager {
                             minecraftName = userCacheMap.get(minecraftUuid);
                         }
 
-                        String skinUrl = getAvatarUrl(minecraftUuid);
+                        String skinUrl = findSkinUrlByPlayerName(minecraftName, minecraftUuid);
 
                         JsonObject playerData = new JsonObject();
                         playerData.addProperty("minecraft_name", minecraftName);
@@ -155,32 +155,45 @@ public class DatabaseManager {
         return rootObject.toString();
     }
 
-    private String getAvatarUrl(String uuid) {
-        File skinFile = new File(skinsRestorerFolder, uuid + ".playerskin");
+    private String findSkinUrlByPlayerName(String playerName, String fallbackUuid) {
+        if (playerName == null || playerName.equals("Unknown")) {
+            return "https://mc-heads.net/avatar/" + fallbackUuid.replace("-", "") + ".png";
+        }
 
-        if (skinFile.exists()) {
-            try {
-                String content = Files.readString(skinFile.toPath());
-                JsonObject json = JsonParser.parseString(content).getAsJsonObject();
+        File[] files = skinsRestorerFolder.listFiles((dir, name) -> name.endsWith(".playerskin"));
 
-                if (json.has("value")) {
-                    String valueBase64 = json.get("value").getAsString();
-                    String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
-                    JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
+        if (files != null) {
+            for (File file : files) {
+                try {
+                    String content = Files.readString(file.toPath());
+                    JsonObject json = JsonParser.parseString(content).getAsJsonObject();
 
-                    if (textureJson.has("textures")) {
-                        JsonObject textures = textureJson.getAsJsonObject("textures");
-                        if (textures.has("SKIN")) {
-                            String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
-                            String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
-                            return "https://mc-heads.net/avatar/" + textureId + ".png";
+                    if (json.has("lastKnownName")) {
+                        String nameInFile = json.get("lastKnownName").getAsString();
+                        if (nameInFile.equalsIgnoreCase(playerName)) {
+                            if (json.has("value")) {
+                                String valueBase64 = json.get("value").getAsString();
+                                String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
+                                JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
+
+                                if (textureJson.has("textures")) {
+                                    JsonObject textures = textureJson.getAsJsonObject("textures");
+                                    if (textures.has("SKIN")) {
+                                        String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
+                                        String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
+                                        return "https://mc-heads.net/avatar/" + textureId + ".png";
+                                    }
+                                }
+                            }
                         }
                     }
+                } catch (Exception e) {
+                    continue;
                 }
-            } catch (Exception e) {
             }
         }
-        return "https://mc-heads.net/avatar/" + uuid + ".png";
+
+        return "https://mc-heads.net/avatar/" + fallbackUuid.replace("-", "") + ".png";
     }
 
     private Map<String, String> loadUserCache() {
