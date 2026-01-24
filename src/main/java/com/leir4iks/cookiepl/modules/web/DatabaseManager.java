@@ -1,6 +1,7 @@
 // File: C:/111/CookiePl/src/main/java/com/leir4iks/cookiepl/modules/web/DatabaseManager.java
 package com.leir4iks.cookiepl.modules.web;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
