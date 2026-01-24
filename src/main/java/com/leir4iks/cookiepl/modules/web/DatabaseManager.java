@@ -1,5 +1,6 @@
 package com.leir4iks.cookiepl.modules.web;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -27,6 +28,7 @@ public class DatabaseManager {
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinUrlCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
 
     public DatabaseManager(CookiePl plugin) {
@@ -112,7 +114,7 @@ public class DatabaseManager {
 
     public String getDatabaseJson() {
         Map<String, String> userCacheMap = loadUserCache();
-        JsonObject rootObject = new JsonObject();
+        JsonArray rootArray = new JsonArray();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
         if (accountsFile.exists()) {
@@ -134,66 +136,86 @@ public class DatabaseManager {
                             minecraftName = userCacheMap.get(minecraftUuid);
                         }
 
-                        String skinUrl = findSkinUrlByPlayerName(minecraftName, minecraftUuid);
+                        String skinUrl = getSkinUrlForPlayer(minecraftName, minecraftUuid);
 
                         JsonObject playerData = new JsonObject();
+                        playerData.addProperty("id", discordId);
                         playerData.addProperty("minecraft_name", minecraftName);
                         playerData.addProperty("minecraft_uuid", minecraftUuid);
                         playerData.addProperty("skin_url", skinUrl);
 
-                        rootObject.add(discordId, playerData);
+                        rootArray.add(playerData);
                     }
                 }
             } catch (IOException e) {
                 plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
-                rootObject.addProperty("error", "Failed to read database file");
+                JsonObject errorObj = new JsonObject();
+                errorObj.addProperty("error", "Failed to read database file");
+                rootArray.add(errorObj);
             }
         } else {
-            rootObject.addProperty("error", "DiscordSRV accounts.aof not found");
+            JsonObject errorObj = new JsonObject();
+            errorObj.addProperty("error", "DiscordSRV accounts.aof not found");
+            rootArray.add(errorObj);
         }
 
-        return rootObject.toString();
+        return rootArray.toString();
     }
 
-    private String findSkinUrlByPlayerName(String playerName, String fallbackUuid) {
+    private String getSkinUrlForPlayer(String playerName, String fallbackUuid) {
         if (playerName == null || playerName.equals("Unknown")) {
-            return "https://mc-heads.net/avatar/" + fallbackUuid.replace("-", "") + ".png";
+            return "https://mc-heads.net/avatar/MHF_Steve.png";
         }
 
+        String cached = skinUrlCache.get(playerName);
+        if (cached != null) {
+            return cached;
+        }
+
+        String skinUrl = findCustomSkin(playerName);
+        if (skinUrl == null) {
+            skinUrl = "https://mc-heads.net/avatar/" + playerName + ".png";
+        }
+
+        skinUrlCache.put(playerName, skinUrl);
+        return skinUrl;
+    }
+
+    private String findCustomSkin(String playerName) {
         File[] files = skinsRestorerFolder.listFiles((dir, name) -> name.endsWith(".playerskin"));
+        if (files == null) {
+            return null;
+        }
 
-        if (files != null) {
-            for (File file : files) {
-                try {
-                    String content = Files.readString(file.toPath());
-                    JsonObject json = JsonParser.parseString(content).getAsJsonObject();
+        for (File file : files) {
+            try {
+                String content = Files.readString(file.toPath());
+                JsonObject json = JsonParser.parseString(content).getAsJsonObject();
 
-                    if (json.has("lastKnownName")) {
-                        String nameInFile = json.get("lastKnownName").getAsString();
-                        if (nameInFile.equalsIgnoreCase(playerName)) {
-                            if (json.has("value")) {
-                                String valueBase64 = json.get("value").getAsString();
-                                String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
-                                JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
+                if (json.has("lastKnownName")) {
+                    String nameInFile = json.get("lastKnownName").getAsString();
+                    if (nameInFile.equalsIgnoreCase(playerName)) {
+                        if (json.has("value")) {
+                            String valueBase64 = json.get("value").getAsString();
+                            String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
+                            JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
 
-                                if (textureJson.has("textures")) {
-                                    JsonObject textures = textureJson.getAsJsonObject("textures");
-                                    if (textures.has("SKIN")) {
-                                        String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
-                                        String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
-                                        return "https://mc-heads.net/avatar/" + textureId + ".png";
-                                    }
+                            if (textureJson.has("textures")) {
+                                JsonObject textures = textureJson.getAsJsonObject("textures");
+                                if (textures.has("SKIN")) {
+                                    String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
+                                    String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
+                                    return "https://mc-heads.net/avatar/" + textureId + ".png";
                                 }
                             }
                         }
                     }
-                } catch (Exception e) {
-                    continue;
                 }
+            } catch (Exception e) {
+                continue;
             }
         }
-
-        return "https://mc-heads.net/avatar/" + fallbackUuid.replace("-", "") + ".png";
+        return null;
     }
 
     private Map<String, String> loadUserCache() {
