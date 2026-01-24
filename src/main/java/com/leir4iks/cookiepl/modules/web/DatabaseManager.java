@@ -47,7 +47,7 @@ public class DatabaseManager {
             try {
                 dataFile.createNewFile();
             } catch (IOException e) {
-                plugin.getLogManager().severe("Could not create data.yml: " + e.getMessage());
+                e.printStackTrace();
             }
         }
     }
@@ -96,7 +96,7 @@ public class DatabaseManager {
                                 minecraftName = userCacheMap.get(minecraftUuid);
                             }
 
-                            String skinUrl = getSkinUrl(minecraftUuid);
+                            String skinUrl = getSkinUrl(minecraftName, minecraftUuid);
 
                             JsonObject playerData = new JsonObject();
                             playerData.addProperty("minecraft_name", minecraftName);
@@ -107,7 +107,6 @@ public class DatabaseManager {
                         }
                     }
                 } catch (IOException e) {
-                    plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
                     rootObject.addProperty("error", "Failed to read database file");
                 }
             } else {
@@ -116,15 +115,19 @@ public class DatabaseManager {
 
             this.cachedJsonResponse = rootObject.toString();
         } catch (Exception e) {
-            plugin.getLogManager().severe("Error in DatabaseManager update task: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
-    private String getSkinUrl(String uuid) {
-        String defaultUrl = "https://mc-heads.net/avatar/" + uuid + ".png";
+    private String getSkinUrl(String name, String uuid) {
+        String fallbackUrl;
+        if (name == null || name.equalsIgnoreCase("Unknown")) {
+            fallbackUrl = "https://mc-heads.net/avatar/" + uuid + ".png";
+        } else {
+            fallbackUrl = "https://mc-heads.net/avatar/" + name + ".png";
+        }
 
-        File skinFile = new File(skinsRestorerFolder, uuid + ".playerskin");
+        File skinFile = new File(skinsRestorerFolder, uuid.toLowerCase() + ".playerskin");
 
         if (skinFile.exists()) {
             try {
@@ -149,11 +152,12 @@ public class DatabaseManager {
                         }
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         }
 
-        return defaultUrl;
+        return fallbackUrl;
     }
 
     private void syncExternalData() {
@@ -189,15 +193,14 @@ public class DatabaseManager {
                     }
                 }
             }
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to fetch external database (using local cache): " + e.getMessage());
+        } catch (Exception ignored) {
         }
 
         if (needsSave) {
             try {
                 yaml.save(dataFile);
             } catch (IOException e) {
-                plugin.getLogManager().severe("Failed to save data.yml: " + e.getMessage());
+                e.printStackTrace();
             }
         }
     }
@@ -220,8 +223,7 @@ public class DatabaseManager {
                         }
                     }
                 }
-            } catch (Exception e) {
-                plugin.getLogManager().warn("Failed to read usercache.json: " + e.getMessage());
+            } catch (Exception ignored) {
             }
         }
         return map;
