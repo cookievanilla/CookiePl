@@ -1,4 +1,3 @@
-// File: C:/111/CookiePl/src/main/java/com/leir4iks/cookiepl/modules/web/DatabaseManager.java
 package com.leir4iks.cookiepl.modules.web;
 
 import com.google.gson.JsonArray;
@@ -15,6 +14,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
@@ -28,6 +28,7 @@ public class DatabaseManager {
     private final CookiePl plugin;
     private final File discordSrvFolder;
     private final File userCacheFile;
+    private final File skinsRestorerFolder;
     private final File dataFile;
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
@@ -39,6 +40,7 @@ public class DatabaseManager {
         this.plugin = plugin;
         this.discordSrvFolder = new File(plugin.getDataFolder().getParentFile(), "DiscordSRV");
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
+        this.skinsRestorerFolder = new File(plugin.getDataFolder().getParentFile(), "SkinsRestorer/skins");
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
 
         if (!dataFile.exists()) {
@@ -94,9 +96,12 @@ public class DatabaseManager {
                                 minecraftName = userCacheMap.get(minecraftUuid);
                             }
 
+                            String skinUrl = getSkinUrl(minecraftUuid);
+
                             JsonObject playerData = new JsonObject();
                             playerData.addProperty("minecraft_name", minecraftName);
                             playerData.addProperty("minecraft_uuid", minecraftUuid);
+                            playerData.addProperty("skin_url", skinUrl);
 
                             rootObject.add(discordId, playerData);
                         }
@@ -114,6 +119,41 @@ public class DatabaseManager {
             plugin.getLogManager().severe("Error in DatabaseManager update task: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    private String getSkinUrl(String uuid) {
+        String defaultUrl = "https://mc-heads.net/avatar/" + uuid + ".png";
+
+        File skinFile = new File(skinsRestorerFolder, uuid + ".playerskin");
+
+        if (skinFile.exists()) {
+            try {
+                String content = Files.readString(skinFile.toPath(), StandardCharsets.UTF_8).trim();
+                JsonObject jsonObject = JsonParser.parseString(content).getAsJsonObject();
+
+                if (jsonObject.has("value")) {
+                    String base64Value = jsonObject.get("value").getAsString();
+                    byte[] decodedBytes = Base64.getDecoder().decode(base64Value);
+                    String decodedJson = new String(decodedBytes, StandardCharsets.UTF_8);
+
+                    JsonObject textureJson = JsonParser.parseString(decodedJson).getAsJsonObject();
+                    if (textureJson.has("textures")) {
+                        JsonObject textures = textureJson.getAsJsonObject("textures");
+                        if (textures.has("SKIN")) {
+                            JsonObject skin = textures.getAsJsonObject("SKIN");
+                            if (skin.has("url")) {
+                                String textureUrl = skin.get("url").getAsString();
+                                String hash = textureUrl.substring(textureUrl.lastIndexOf('/') + 1);
+                                return "https://mc-heads.net/avatar/" + hash + ".png";
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        return defaultUrl;
     }
 
     private void syncExternalData() {
