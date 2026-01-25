@@ -6,6 +6,10 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
+import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.OfflinePlayer;
+import org.bukkit.Statistic;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -144,6 +148,9 @@ public class DatabaseManager {
                         playerData.addProperty("minecraft_uuid", minecraftUuid);
                         playerData.addProperty("skin_url", skinUrl);
 
+                        JsonObject statsObj = getPlayerStatistics(minecraftUuid);
+                        playerData.add("stats", statsObj);
+
                         rootArray.add(playerData);
                     }
                 }
@@ -160,6 +167,83 @@ public class DatabaseManager {
         }
 
         return rootArray.toString();
+    }
+
+    private JsonObject getPlayerStatistics(String uuidStr) {
+        JsonObject stats = new JsonObject();
+        try {
+            UUID uuid = UUID.fromString(uuidStr);
+            OfflinePlayer player = Bukkit.getOfflinePlayer(uuid);
+
+            boolean isOnline = player.isOnline();
+            stats.addProperty("is_online", isOnline);
+
+            if (player.hasPlayedBefore() || isOnline) {
+                long blocksBroken = 0;
+                long blocksPlaced = 0;
+
+                for (Material m : Material.values()) {
+                    if (!m.isLegacy() && m.isBlock()) {
+                        try {
+                            blocksBroken += player.getStatistic(Statistic.MINE_BLOCK, m);
+                        } catch (Exception ignored) {}
+
+                        try {
+                            blocksPlaced += player.getStatistic(Statistic.USE_ITEM, m);
+                        } catch (Exception ignored) {}
+                    }
+                }
+
+                stats.addProperty("blocks_broken", blocksBroken);
+                stats.addProperty("blocks_placed", blocksPlaced);
+
+                long playTimeTicks = 0;
+                try {
+                    playTimeTicks = player.getStatistic(Statistic.PLAY_ONE_MINUTE);
+                } catch (Exception ignored) {}
+
+                double playTimeHours = playTimeTicks / 20.0 / 3600.0;
+                stats.addProperty("play_time_hours", Math.round(playTimeHours * 10.0) / 10.0);
+
+                long deaths = 0;
+                try { deaths = player.getStatistic(Statistic.DEATHS); } catch (Exception ignored) {}
+                stats.addProperty("deaths", deaths);
+
+                long playerKills = 0;
+                try { playerKills = player.getStatistic(Statistic.PLAYER_KILLS); } catch (Exception ignored) {}
+                stats.addProperty("player_kills", playerKills);
+
+                long mobKills = 0;
+                try { mobKills = player.getStatistic(Statistic.MOB_KILLS); } catch (Exception ignored) {}
+                stats.addProperty("mob_kills", mobKills);
+
+                int leaves = 0;
+                try { leaves = player.getStatistic(Statistic.LEAVE_GAME); } catch (Exception ignored) {}
+
+                int joins = isOnline ? leaves + 1 : leaves;
+                stats.addProperty("joins", joins);
+
+            } else {
+                stats.addProperty("blocks_broken", 0);
+                stats.addProperty("blocks_placed", 0);
+                stats.addProperty("play_time_hours", 0);
+                stats.addProperty("deaths", 0);
+                stats.addProperty("player_kills", 0);
+                stats.addProperty("mob_kills", 0);
+                stats.addProperty("joins", 0);
+            }
+
+        } catch (Exception e) {
+            stats.addProperty("is_online", false);
+            stats.addProperty("blocks_broken", 0);
+            stats.addProperty("blocks_placed", 0);
+            stats.addProperty("play_time_hours", 0);
+            stats.addProperty("deaths", 0);
+            stats.addProperty("player_kills", 0);
+            stats.addProperty("mob_kills", 0);
+            stats.addProperty("joins", 0);
+        }
+        return stats;
     }
 
     private String getSkinUrlForPlayer(String playerName, String fallbackUuid) {
