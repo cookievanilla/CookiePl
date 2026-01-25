@@ -17,7 +17,9 @@ public class AFKModule implements IModule {
 
     @Override
     public void enable(CookiePl plugin) {
-        AFK_INDICATOR_KEY = new NamespacedKey(plugin, "afk_indicator");
+        if (AFK_INDICATOR_KEY == null) {
+            AFK_INDICATOR_KEY = new NamespacedKey(plugin, "afk_indicator");
+        }
 
         this.afkManager = new AFKManager(plugin, this);
         plugin.getServer().getPluginManager().registerEvents(afkManager, plugin);

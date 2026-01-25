@@ -63,7 +63,7 @@ public class AFKManager implements Listener {
         this.msgDisabled = formatColor(plugin.getConfig().getString(configKey + ".messages.afk-disabled", "&7AFK disabled."));
 
         cleanupStaleIndicators();
-        this.afkCheckTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::checkAutoAFK, 100L, 100L);
+        this.afkCheckTask = plugin.getFoliaLib().getScheduler().runTimer(this::checkAutoAFK, 100L, 100L);
     }
 
     public void setAfk(Player player, boolean afk) {
@@ -76,7 +76,6 @@ public class AFKManager implements Listener {
                 player.setMetadata(AFK_META, new FixedMetadataValue(plugin, true));
                 player.sendMessage(msgEnabled);
 
-                if (invulnerabilityEnabled) player.setInvulnerable(true);
                 if (sleepIgnoreEnabled) player.setSleepingIgnored(true);
 
                 if (indicatorEnabled) {
@@ -86,9 +85,6 @@ public class AFKManager implements Listener {
                 player.removeMetadata(AFK_META, plugin);
                 player.sendMessage(msgDisabled);
 
-                if (invulnerabilityEnabled && player.getGameMode() != GameMode.CREATIVE && player.getGameMode() != GameMode.SPECTATOR) {
-                    player.setInvulnerable(false);
-                }
                 if (sleepIgnoreEnabled) player.setSleepingIgnored(false);
 
                 removeIndicator(player);
@@ -109,13 +105,15 @@ public class AFKManager implements Listener {
     private void checkAutoAFK() {
         long now = System.currentTimeMillis();
         for (Player player : plugin.getServer().getOnlinePlayers()) {
-            if (player.getGameMode() == GameMode.SPECTATOR) continue;
-            if (isAfk(player)) continue;
+            plugin.getFoliaLib().getScheduler().runAtEntity(player, (task) -> {
+                if (player.getGameMode() == GameMode.SPECTATOR) return;
+                if (isAfk(player)) return;
 
-            long lastAction = lastActivity.getOrDefault(player.getUniqueId(), now);
-            if (now - lastAction > afkTimeMillis) {
-                setAfk(player, true);
-            }
+                long lastAction = lastActivity.getOrDefault(player.getUniqueId(), now);
+                if (now - lastAction > afkTimeMillis) {
+                    setAfk(player, true);
+                }
+            });
         }
     }
 
@@ -175,10 +173,13 @@ public class AFKManager implements Listener {
         if (afkCheckTask != null) afkCheckTask.cancel();
 
         for (Player player : plugin.getServer().getOnlinePlayers()) {
-            if (isAfk(player)) {
-                player.removeMetadata(AFK_META, plugin);
-                removeIndicator(player);
-            }
+            plugin.getFoliaLib().getScheduler().runAtEntity(player, (task) -> {
+                if (isAfk(player)) {
+                    player.removeMetadata(AFK_META, plugin);
+                    if (sleepIgnoreEnabled) player.setSleepingIgnored(false);
+                    removeIndicator(player);
+                }
+            });
         }
         activeIndicators.clear();
         lastActivity.clear();
@@ -243,10 +244,11 @@ public class AFKManager implements Listener {
 
     @EventHandler
     public void onChat(AsyncPlayerChatEvent event) {
-        if (isAfk(event.getPlayer())) {
-            setAfk(event.getPlayer(), false);
+        Player player = event.getPlayer();
+        if (isAfk(player)) {
+            plugin.getFoliaLib().getScheduler().runAtEntity(player, (task) -> setAfk(player, false));
         }
-        updateActivity(event.getPlayer());
+        updateActivity(player);
     }
 
     @EventHandler
@@ -261,7 +263,18 @@ public class AFKManager implements Listener {
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
-        updateActivity(event.getPlayer());
+        Player player = event.getPlayer();
+        updateActivity(player);
+
+        if (player.hasMetadata(AFK_META)) {
+            player.removeMetadata(AFK_META, plugin);
+        }
+
+        if (player.getGameMode() != GameMode.CREATIVE && player.getGameMode() != GameMode.SPECTATOR) {
+            player.setInvulnerable(false);
+        }
+
+        player.setSleepingIgnored(false);
     }
 
     @EventHandler

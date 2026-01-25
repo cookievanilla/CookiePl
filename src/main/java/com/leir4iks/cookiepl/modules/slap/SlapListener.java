@@ -33,9 +33,9 @@ public class SlapListener implements Listener {
 
     public SlapListener(CookiePl plugin) {
         this.plugin = plugin;
-        this.cooldownMillis = plugin.getConfig().getLong("modules.slap.cooldown-seconds", 3) * 1000;
+        this.cooldownMillis = plugin.getConfig().getLong("modules.slap.cooldown-seconds", 3) * 1000L;
         this.patChance = plugin.getConfig().getDouble("modules.slap.pat-chance", 90.0);
-        this.msgActionBar = formatColor(plugin.getConfig().getString("modules.slap.messages.action-bar", "&6 <- {player} ->"));
+        this.msgActionBar = formatColor(plugin.getConfig().getString("modules.slap.messages.action-bar", "&6 ← {player} →"));
         this.msgPatSender = formatColor(plugin.getConfig().getString("modules.slap.messages.pat-sender", "&6You patted {player} on the shoulder!"));
         this.msgPatReceiver = formatColor(plugin.getConfig().getString("modules.slap.messages.pat-receiver", "&6{player} patted you on the shoulder!"));
         this.msgSlapSender = formatColor(plugin.getConfig().getString("modules.slap.messages.slap-sender", "&6You slapped {player} on the ass!"));
@@ -51,6 +51,10 @@ public class SlapListener implements Listener {
         Player slapper = event.getPlayer();
         Player victim = (Player) event.getRightClicked();
 
+        if (slapper.getUniqueId().equals(victim.getUniqueId())) {
+            return;
+        }
+
         if (isOnCooldown(slapper)) {
             event.setCancelled(true);
             return;
@@ -59,9 +63,8 @@ public class SlapListener implements Listener {
         event.setCancelled(true);
         setCooldown(slapper);
 
-        slapper.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(this.msgActionBar.replace("{player}", victim.getName())));
-
         if (slapper.isSneaking()) {
+            sendTemporaryActionBar(slapper, msgActionBar.replace("{player}", victim.getName()));
             return;
         }
 
@@ -71,19 +74,30 @@ public class SlapListener implements Listener {
         Particle.DustOptions dustOptions = new Particle.DustOptions(Color.fromRGB(255, 153, 0), 1.0f);
         victim.getWorld().spawnParticle(Particle.DUST, victim.getLocation().add(0, 1, 0), 20, 0.4, 0.4, 0.4, 0, dustOptions);
 
-        if (ThreadLocalRandom.current().nextDouble(100.0) < this.patChance) {
-            slapper.sendMessage(this.msgPatSender.replace("{player}", victim.getName()));
-            victim.sendMessage(this.msgPatReceiver.replace("{player}", slapper.getName()));
+        if (ThreadLocalRandom.current().nextDouble(100.0) < patChance) {
+            sendTemporaryActionBar(slapper, msgPatSender.replace("{player}", victim.getName()));
+            sendTemporaryActionBar(victim, msgPatReceiver.replace("{player}", slapper.getName()));
         } else {
-            slapper.sendMessage(this.msgSlapSender.replace("{player}", victim.getName()));
-            victim.sendMessage(this.msgSlapReceiver.replace("{player}", slapper.getName()));
+            sendTemporaryActionBar(slapper, msgSlapSender.replace("{player}", victim.getName()));
+            sendTemporaryActionBar(victim, msgSlapReceiver.replace("{player}", slapper.getName()));
         }
     }
 
+    private void sendTemporaryActionBar(Player player, String message) {
+        player.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(message));
+
+        player.getScheduler().runDelayed(plugin, scheduledTask -> {
+            if (player.isOnline()) {
+                player.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(""));
+            }
+        }, null, 60L);
+    }
+
     private boolean isOnCooldown(Player player) {
-        if (this.cooldownMillis <= 0) return false;
-        long lastUsed = cooldowns.getOrDefault(player.getUniqueId(), 0L);
-        return (System.currentTimeMillis() - lastUsed) < this.cooldownMillis;
+        if (cooldownMillis <= 0) return false;
+        Long lastUsed = cooldowns.get(player.getUniqueId());
+        if (lastUsed == null) return false;
+        return (System.currentTimeMillis() - lastUsed) < cooldownMillis;
     }
 
     private void setCooldown(Player player) {

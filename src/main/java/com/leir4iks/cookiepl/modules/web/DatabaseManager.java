@@ -148,8 +148,18 @@ public class DatabaseManager {
                         playerData.addProperty("minecraft_uuid", minecraftUuid);
                         playerData.addProperty("skin_url", skinUrl);
 
-                        JsonObject statsObj = getPlayerStatistics(minecraftUuid);
-                        playerData.add("stats", statsObj);
+                        OfflinePlayer player = null;
+                        try {
+                            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
+                        } catch (Exception ignored) {}
+
+                        if (player != null) {
+                            playerData.addProperty("is_online", player.isOnline());
+                            playerData.add("stats", getPlayerStatistics(player));
+                        } else {
+                            playerData.addProperty("is_online", false);
+                            playerData.add("stats", getEmptyStats());
+                        }
 
                         rootArray.add(playerData);
                     }
@@ -169,16 +179,12 @@ public class DatabaseManager {
         return rootArray.toString();
     }
 
-    private JsonObject getPlayerStatistics(String uuidStr) {
-        JsonObject stats = new JsonObject();
+    private JsonObject getPlayerStatistics(OfflinePlayer player) {
         try {
-            UUID uuid = UUID.fromString(uuidStr);
-            OfflinePlayer player = Bukkit.getOfflinePlayer(uuid);
-
             boolean isOnline = player.isOnline();
-            stats.addProperty("is_online", isOnline);
 
             if (player.hasPlayedBefore() || isOnline) {
+                JsonObject stats = new JsonObject();
                 long blocksBroken = 0;
                 long blocksPlaced = 0;
 
@@ -223,26 +229,22 @@ public class DatabaseManager {
                 int joins = isOnline ? leaves + 1 : leaves;
                 stats.addProperty("joins", joins);
 
-            } else {
-                stats.addProperty("blocks_broken", 0);
-                stats.addProperty("blocks_placed", 0);
-                stats.addProperty("play_time_hours", 0);
-                stats.addProperty("deaths", 0);
-                stats.addProperty("player_kills", 0);
-                stats.addProperty("mob_kills", 0);
-                stats.addProperty("joins", 0);
+                return stats;
             }
+        } catch (Exception ignored) {}
 
-        } catch (Exception e) {
-            stats.addProperty("is_online", false);
-            stats.addProperty("blocks_broken", 0);
-            stats.addProperty("blocks_placed", 0);
-            stats.addProperty("play_time_hours", 0);
-            stats.addProperty("deaths", 0);
-            stats.addProperty("player_kills", 0);
-            stats.addProperty("mob_kills", 0);
-            stats.addProperty("joins", 0);
-        }
+        return getEmptyStats();
+    }
+
+    private JsonObject getEmptyStats() {
+        JsonObject stats = new JsonObject();
+        stats.addProperty("blocks_broken", 0);
+        stats.addProperty("blocks_placed", 0);
+        stats.addProperty("play_time_hours", 0);
+        stats.addProperty("deaths", 0);
+        stats.addProperty("player_kills", 0);
+        stats.addProperty("mob_kills", 0);
+        stats.addProperty("joins", 0);
         return stats;
     }
 
