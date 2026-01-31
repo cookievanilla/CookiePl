@@ -33,6 +33,7 @@ public class DatabaseManager {
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinUrlCache = new ConcurrentHashMap<>();
+    private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
 
     public DatabaseManager(CookiePl plugin) {
@@ -117,6 +118,7 @@ public class DatabaseManager {
     }
 
     public String getDatabaseJson() {
+        playersCache.clear();
         Map<String, String> userCacheMap = loadUserCache();
         JsonArray rootArray = new JsonArray();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
@@ -132,36 +134,11 @@ public class DatabaseManager {
                         String discordId = parts[0];
                         String minecraftUuid = parts[1];
 
-                        String minecraftName = "Unknown";
-
-                        if (externalCache.containsKey(discordId)) {
-                            minecraftName = externalCache.get(discordId);
-                        } else if (userCacheMap.containsKey(minecraftUuid)) {
-                            minecraftName = userCacheMap.get(minecraftUuid);
+                        JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap);
+                        if (playerData != null) {
+                            rootArray.add(playerData);
+                            playersCache.put(discordId, playerData);
                         }
-
-                        String skinUrl = getSkinUrlForPlayer(minecraftName, minecraftUuid);
-
-                        JsonObject playerData = new JsonObject();
-                        playerData.addProperty("id", discordId);
-                        playerData.addProperty("minecraft_name", minecraftName);
-                        playerData.addProperty("minecraft_uuid", minecraftUuid);
-                        playerData.addProperty("skin_url", skinUrl);
-
-                        OfflinePlayer player = null;
-                        try {
-                            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-                        } catch (Exception ignored) {}
-
-                        if (player != null) {
-                            playerData.addProperty("is_online", player.isOnline());
-                            playerData.add("stats", getPlayerStatistics(player));
-                        } else {
-                            playerData.addProperty("is_online", false);
-                            playerData.add("stats", getEmptyStats());
-                        }
-
-                        rootArray.add(playerData);
                     }
                 }
             } catch (IOException e) {
@@ -177,6 +154,72 @@ public class DatabaseManager {
         }
 
         return rootArray.toString();
+    }
+
+    public String getPlayerJsonById(String discordId) {
+        if (playersCache.containsKey(discordId)) {
+            return playersCache.get(discordId).toString();
+        }
+
+        Map<String, String> userCacheMap = loadUserCache();
+        File accountsFile = new File(discordSrvFolder, "accounts.aof");
+
+        if (accountsFile.exists()) {
+            try {
+                List<String> lines = Files.readAllLines(accountsFile.toPath());
+                for (String line : lines) {
+                    if (line.trim().isEmpty()) continue;
+
+                    String[] parts = line.trim().split("\\s+");
+                    if (parts.length >= 2 && parts[0].equals(discordId)) {
+                        JsonObject playerData = createPlayerData(parts[0], parts[1], userCacheMap);
+                        if (playerData != null) {
+                            playersCache.put(discordId, playerData);
+                            return playerData.toString();
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+            }
+        }
+
+        JsonObject errorObj = new JsonObject();
+        errorObj.addProperty("error", "Player not found");
+        return errorObj.toString();
+    }
+
+    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+        String minecraftName = "Unknown";
+
+        if (externalCache.containsKey(discordId)) {
+            minecraftName = externalCache.get(discordId);
+        } else if (userCacheMap.containsKey(minecraftUuid)) {
+            minecraftName = userCacheMap.get(minecraftUuid);
+        }
+
+        String skinUrl = getSkinUrlForPlayer(minecraftName, minecraftUuid);
+
+        JsonObject playerData = new JsonObject();
+        playerData.addProperty("id", discordId);
+        playerData.addProperty("minecraft_name", minecraftName);
+        playerData.addProperty("minecraft_uuid", minecraftUuid);
+        playerData.addProperty("skin_url", skinUrl);
+
+        OfflinePlayer player = null;
+        try {
+            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
+        } catch (Exception ignored) {}
+
+        if (player != null) {
+            playerData.addProperty("is_online", player.isOnline());
+            playerData.add("stats", getPlayerStatistics(player));
+        } else {
+            playerData.addProperty("is_online", false);
+            playerData.add("stats", getEmptyStats());
+        }
+
+        return playerData;
     }
 
     private JsonObject getPlayerStatistics(OfflinePlayer player) {

@@ -40,7 +40,7 @@ public class WebServerManager {
     public void start() {
         try {
             server = HttpServer.create(new InetSocketAddress(port), 0);
-            server.createContext("/players", this::handlePlayersRequest);
+            server.createContext("/players/", this::handlePlayersRequest);
             server.createContext("/serverinfo", this::handleServerInfoRequest);
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
@@ -100,7 +100,25 @@ public class WebServerManager {
             return;
         }
 
-        sendResponse(exchange, cachedPlayersJson);
+        String path = exchange.getRequestURI().getPath();
+        String[] segments = path.split("/");
+
+        if (segments.length > 2) {
+            String playerId = segments[2];
+            String response = databaseManager.getPlayerJsonById(playerId);
+
+            if (response.contains("\"error\":\"Player not found\"")) {
+                exchange.sendResponseHeaders(404, response.length());
+            } else {
+                exchange.sendResponseHeaders(200, response.length());
+            }
+
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response.getBytes(StandardCharsets.UTF_8));
+            }
+        } else {
+            sendResponse(exchange, cachedPlayersJson);
+        }
     }
 
     private void handleServerInfoRequest(HttpExchange exchange) throws IOException {
