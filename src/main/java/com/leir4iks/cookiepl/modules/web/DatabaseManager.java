@@ -46,7 +46,8 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
-        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 0L, 3600L);
+        updateExternalData();
+        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 3600L, 3600L);
     }
 
     public void stop() {
@@ -117,10 +118,9 @@ public class DatabaseManager {
         }
     }
 
-    public String getDatabaseJson() {
+    public void updatePlayersCache() {
         playersCache.clear();
         Map<String, String> userCacheMap = loadUserCache();
-        JsonArray rootArray = new JsonArray();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
         if (accountsFile.exists()) {
@@ -136,23 +136,22 @@ public class DatabaseManager {
 
                         JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap);
                         if (playerData != null) {
-                            rootArray.add(playerData);
                             playersCache.put(discordId, playerData);
                         }
                     }
                 }
             } catch (IOException e) {
                 plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
-                JsonObject errorObj = new JsonObject();
-                errorObj.addProperty("error", "Failed to read database file");
-                rootArray.add(errorObj);
             }
-        } else {
-            JsonObject errorObj = new JsonObject();
-            errorObj.addProperty("error", "DiscordSRV accounts.aof not found");
-            rootArray.add(errorObj);
         }
+    }
 
+    public String getDatabaseJson() {
+        updatePlayersCache();
+        JsonArray rootArray = new JsonArray();
+        for (JsonObject playerData : playersCache.values()) {
+            rootArray.add(playerData);
+        }
         return rootArray.toString();
     }
 

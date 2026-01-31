@@ -40,12 +40,13 @@ public class WebServerManager {
     public void start() {
         try {
             server = HttpServer.create(new InetSocketAddress(port), 0);
-            server.createContext("/players/", this::handlePlayersRequest);
+            server.createContext("/players", this::handlePlayersRequest);
             server.createContext("/serverinfo", this::handleServerInfoRequest);
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateCache, 0L, 600L);
+            updateCache();
+            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateCache, 600L, 600L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
@@ -101,23 +102,25 @@ public class WebServerManager {
         }
 
         String path = exchange.getRequestURI().getPath();
-        String[] segments = path.split("/");
 
-        if (segments.length > 2) {
-            String playerId = segments[2];
-            String response = databaseManager.getPlayerJsonById(playerId);
+        if (path.equals("/players") || path.equals("/players/")) {
+            sendResponse(exchange, 200, cachedPlayersJson);
+        } else if (path.startsWith("/players/")) {
+            String[] segments = path.split("/");
+            if (segments.length > 2) {
+                String playerId = segments[2];
+                String response = databaseManager.getPlayerJsonById(playerId);
 
-            if (response.contains("\"error\":\"Player not found\"")) {
-                exchange.sendResponseHeaders(404, response.length());
+                if (response.contains("\"error\":\"Player not found\"")) {
+                    sendResponse(exchange, 404, response);
+                } else {
+                    sendResponse(exchange, 200, response);
+                }
             } else {
-                exchange.sendResponseHeaders(200, response.length());
-            }
-
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(response.getBytes(StandardCharsets.UTF_8));
+                sendResponse(exchange, 200, cachedPlayersJson);
             }
         } else {
-            sendResponse(exchange, cachedPlayersJson);
+            sendResponse(exchange, 200, cachedPlayersJson);
         }
     }
 
@@ -129,7 +132,7 @@ public class WebServerManager {
             return;
         }
 
-        sendResponse(exchange, cachedServerInfoJson);
+        sendResponse(exchange, 200, cachedServerInfoJson);
     }
 
     private void handleCors(HttpExchange exchange) {
@@ -140,10 +143,10 @@ public class WebServerManager {
         }
     }
 
-    private void sendResponse(HttpExchange exchange, String response) throws IOException {
+    private void sendResponse(HttpExchange exchange, int statusCode, String response) throws IOException {
         byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
-        exchange.sendResponseHeaders(200, bytes.length);
+        exchange.sendResponseHeaders(statusCode, bytes.length);
 
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
