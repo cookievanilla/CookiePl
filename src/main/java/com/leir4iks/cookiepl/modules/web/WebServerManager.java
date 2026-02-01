@@ -24,17 +24,14 @@ public class WebServerManager {
     private final boolean corsEnabled;
 
     private WrappedTask updateTask;
-    private volatile String cachedPlayersJson;
-    private volatile String cachedServerInfoJson;
+    private volatile String cachedPlayersJson = "[]";
+    private volatile String cachedServerInfoJson = "{}";
 
     public WebServerManager(CookiePl plugin, DatabaseManager databaseManager) {
         this.plugin = plugin;
         this.databaseManager = databaseManager;
         this.port = plugin.getConfig().getInt("modules.web-server.port", 8080);
         this.corsEnabled = plugin.getConfig().getBoolean("modules.web-server.cors-enabled", true);
-
-        this.cachedPlayersJson = "[]";
-        this.cachedServerInfoJson = "{}";
     }
 
     public void start() {
@@ -45,8 +42,9 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            updateCache();
-            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateCache, 600L, 600L);
+            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
+                updateCache();
+            }, 0L, 600L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {

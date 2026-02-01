@@ -46,8 +46,7 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
-        updateExternalData();
-        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 3600L, 3600L);
+        scheduleExternalUpdates();
     }
 
     public void stop() {
@@ -58,24 +57,33 @@ public class DatabaseManager {
 
     private void loadDataYml() {
         if (!dataFile.exists()) return;
-        YamlConfiguration config = YamlConfiguration.loadConfiguration(dataFile);
-        for (String key : config.getKeys(false)) {
-            externalCache.put(key, config.getString(key));
+        try {
+            YamlConfiguration config = YamlConfiguration.loadConfiguration(dataFile);
+            for (String key : config.getKeys(false)) {
+                externalCache.put(key, config.getString(key));
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to load data.yml: " + e.getMessage());
         }
     }
 
+    private void scheduleExternalUpdates() {
+        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
+            updateExternalData();
+        }, 0L, 3600L);
+    }
+
     private void updateExternalData() {
-        HttpURLConnection connection = null;
-        boolean changed = false;
         try {
             URL url = new URL(externalDatabaseUrl);
-            connection = (HttpURLConnection) url.openConnection();
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setConnectTimeout(3000);
             connection.setReadTimeout(3000);
             connection.setRequestMethod("GET");
 
             if (connection.getResponseCode() == 200) {
                 try (Scanner scanner = new Scanner(connection.getInputStream())) {
+                    boolean changed = false;
                     while (scanner.hasNextLine()) {
                         String line = scanner.nextLine();
                         if (line.trim().isEmpty()) continue;
@@ -91,58 +99,62 @@ public class DatabaseManager {
                             }
                         }
                     }
+
+                    if (changed) {
+                        saveDataYml();
+                    }
                 }
+            } else {
+                plugin.getLogManager().warn("External database returned: " + connection.getResponseCode());
             }
+            connection.disconnect();
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update external database: " + e.getMessage());
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
-        }
-
-        if (changed) {
-            saveDataYml();
         }
     }
 
     private void saveDataYml() {
-        YamlConfiguration config = new YamlConfiguration();
-        for (Map.Entry<String, String> entry : externalCache.entrySet()) {
-            config.set(entry.getKey(), entry.getValue());
-        }
         try {
+            YamlConfiguration config = new YamlConfiguration();
+            for (Map.Entry<String, String> entry : externalCache.entrySet()) {
+                config.set(entry.getKey(), entry.getValue());
+            }
             config.save(dataFile);
         } catch (IOException e) {
             plugin.getLogManager().severe("Failed to save data.yml: " + e.getMessage());
         }
     }
 
-    public void updatePlayersCache() {
-        playersCache.clear();
+    private void updatePlayersCache() {
         Map<String, String> userCacheMap = loadUserCache();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
-        if (accountsFile.exists()) {
-            try {
-                List<String> lines = Files.readAllLines(accountsFile.toPath());
-                for (String line : lines) {
-                    if (line.trim().isEmpty()) continue;
+        if (!accountsFile.exists()) {
+            playersCache.clear();
+            return;
+        }
 
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length >= 2) {
-                        String discordId = parts[0];
-                        String minecraftUuid = parts[1];
+        Map<String, JsonObject> newCache = new HashMap<>();
+        try {
+            List<String> lines = Files.readAllLines(accountsFile.toPath());
+            for (String line : lines) {
+                if (line.trim().isEmpty()) continue;
 
-                        JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap);
-                        if (playerData != null) {
-                            playersCache.put(discordId, playerData);
-                        }
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length >= 2) {
+                    String discordId = parts[0];
+                    String minecraftUuid = parts[1];
+
+                    JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap);
+                    if (playerData != null) {
+                        newCache.put(discordId, playerData);
                     }
                 }
-            } catch (IOException e) {
-                plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
             }
+            playersCache.clear();
+            playersCache.putAll(newCache);
+        } catch (IOException e) {
+            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
         }
     }
 
