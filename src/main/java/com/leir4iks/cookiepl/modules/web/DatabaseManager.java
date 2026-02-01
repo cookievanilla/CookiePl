@@ -46,7 +46,14 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
-        scheduleExternalUpdates();
+
+        plugin.getFoliaLib().getScheduler().runAsync(() -> {
+            updateExternalData();
+        });
+
+        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
+            updateExternalData();
+        }, 3600L, 3600L);
     }
 
     public void stop() {
@@ -65,12 +72,6 @@ public class DatabaseManager {
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to load data.yml: " + e.getMessage());
         }
-    }
-
-    private void scheduleExternalUpdates() {
-        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
-            updateExternalData();
-        }, 0L, 3600L);
     }
 
     private void updateExternalData() {

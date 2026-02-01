@@ -26,6 +26,7 @@ public class WebServerManager {
     private WrappedTask updateTask;
     private volatile String cachedPlayersJson = "[]";
     private volatile String cachedServerInfoJson = "{}";
+    private volatile boolean cacheInitialized = false;
 
     public WebServerManager(CookiePl plugin, DatabaseManager databaseManager) {
         this.plugin = plugin;
@@ -42,9 +43,14 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
+            plugin.getFoliaLib().getScheduler().runAsync(() -> {
+                updateCache();
+                cacheInitialized = true;
+            });
+
             this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
                 updateCache();
-            }, 0L, 600L);
+            }, 600L, 600L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
