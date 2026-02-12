@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class WebServerManager {
@@ -24,7 +25,7 @@ public class WebServerManager {
     private final int port;
     private final boolean corsEnabled;
 
-    private WrappedTask serverInfoTask;
+    private final AtomicReference<WrappedTask> serverInfoTaskRef = new AtomicReference<>();
     private volatile String cachedServerInfoJson = "{}";
 
     public WebServerManager(CookiePl plugin, DatabaseManager databaseManager) {
@@ -42,8 +43,12 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runNextTick(() -> updateServerInfoSync());
-            this.serverInfoTask = plugin.getFoliaLib().getScheduler().runTimer(() -> updateServerInfoSync(), 20L * 10L, 20L * 10L);
+            plugin.getFoliaLib().getScheduler().runNextTick(task -> updateServerInfoSync());
+
+            plugin.getFoliaLib().getScheduler().runTimer(task -> {
+                serverInfoTaskRef.compareAndSet(null, task);
+                updateServerInfoSync();
+            }, 20L * 10L, 20L * 10L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
@@ -53,7 +58,8 @@ public class WebServerManager {
     }
 
     public void stop() {
-        if (serverInfoTask != null) serverInfoTask.cancel();
+        WrappedTask t = serverInfoTaskRef.getAndSet(null);
+        if (t != null) t.cancel();
         if (server != null) {
             server.stop(0);
             plugin.getLogManager().info("Web Server stopped.");
