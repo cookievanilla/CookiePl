@@ -4,17 +4,14 @@ import com.google.gson.JsonObject;
 import com.leir4iks.cookiepl.CookiePl;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.entity.Player;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetSocketAddress;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class WebServerManager {
@@ -25,7 +22,6 @@ public class WebServerManager {
     private final int port;
     private final boolean corsEnabled;
 
-    private final AtomicReference<WrappedTask> serverInfoTaskRef = new AtomicReference<>();
     private volatile String cachedServerInfoJson = "{}";
 
     public WebServerManager(CookiePl plugin, DatabaseManager databaseManager) {
@@ -43,12 +39,8 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runNextTick(task -> updateServerInfoSync());
-
-            plugin.getFoliaLib().getScheduler().runTimer(task -> {
-                serverInfoTaskRef.compareAndSet(null, task);
-                updateServerInfoSync();
-            }, 20L * 10L, 20L * 10L);
+            plugin.getFoliaLib().getScheduler().runNextTick(this::updateServerInfoSync);
+            plugin.getFoliaLib().getScheduler().runTimer(this::updateServerInfoSync, 200L, 200L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
@@ -58,8 +50,6 @@ public class WebServerManager {
     }
 
     public void stop() {
-        WrappedTask t = serverInfoTaskRef.getAndSet(null);
-        if (t != null) t.cancel();
         if (server != null) {
             server.stop(0);
             plugin.getLogManager().info("Web Server stopped.");
@@ -79,14 +69,15 @@ public class WebServerManager {
             json.addProperty("max_players", plugin.getServer().getMaxPlayers());
 
             long uptimeMillis = ManagementFactory.getRuntimeMXBean().getUptime();
-            long uptimeHours = uptimeMillis / (1000L * 60L * 60L);
+            long uptimeHours = uptimeMillis / (1000 * 60 * 60);
             json.addProperty("uptime_hours", uptimeHours);
 
             json.addProperty("version", plugin.getServer().getBukkitVersion());
             json.addProperty("server", plugin.getServer().getName());
 
-            this.cachedServerInfoJson = json.toString();
-        } catch (Exception ignored) {
+            cachedServerInfoJson = json.toString();
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update serverinfo cache: " + e.getMessage());
         }
     }
 
@@ -101,25 +92,24 @@ public class WebServerManager {
         String path = exchange.getRequestURI().getPath();
 
         if (path.equals("/players") || path.equals("/players/")) {
-            sendResponse(exchange, 200, databaseManager.getDatabaseJson());
+            sendResponse(exchange, 200, databaseManager.getCachedDatabaseJson());
             return;
         }
 
         if (path.startsWith("/players/")) {
-            String[] segments = path.split("/");
-            if (segments.length > 2) {
-                String slug = URLDecoder.decode(segments[2], StandardCharsets.UTF_8);
-                String response = databaseManager.getPlayerJsonBySlug(slug);
-                if (response.contains("\"error\"")) {
-                    sendResponse(exchange, 404, response);
-                } else {
-                    sendResponse(exchange, 200, response);
-                }
-                return;
+            String slug = path.substring("/players/".length());
+            if (slug.endsWith("/")) slug = slug.substring(0, slug.length() - 1);
+
+            String response = databaseManager.getPlayerJsonBySlug(slug);
+            if (response.contains("\"error\"")) {
+                sendResponse(exchange, 404, response);
+            } else {
+                sendResponse(exchange, 200, response);
             }
+            return;
         }
 
-        sendResponse(exchange, 200, databaseManager.getDatabaseJson());
+        sendResponse(exchange, 200, databaseManager.getCachedDatabaseJson());
     }
 
     private void handleServerInfoRequest(HttpExchange exchange) throws IOException {

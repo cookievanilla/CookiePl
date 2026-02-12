@@ -1,4 +1,3 @@
-// File: C:/111/CookiePl/src/main/java/com/leir4iks/cookiepl/CookiePl.java
 package com.leir4iks.cookiepl;
 
 import com.leir4iks.cookiepl.commands.MainCommand;
@@ -98,6 +97,11 @@ public final class CookiePl extends JavaPlugin {
 
     public void reloadAllModules() {
         logManager.info("Reloading all modules...");
+
+        if (foliaLib != null) {
+            foliaLib.getScheduler().cancelAllTasks();
+        }
+
         disableAllModules();
 
         configManager.load();

@@ -14,7 +14,7 @@
     <properties>
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <skinsrestorer.api.version>15.5.2</skinsrestorer.api.version>
+        <skinsrestorer.version>15.10.0</skinsrestorer.version>
     </properties>
 
     <build>
@@ -28,7 +28,6 @@
                     <target>${java.version}</target>
                 </configuration>
             </plugin>
-
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -55,7 +54,6 @@
                 </executions>
             </plugin>
         </plugins>
-
         <resources>
             <resource>
                 <directory>src/main/resources</directory>
@@ -69,27 +67,22 @@
             <id>papermc-repo</id>
             <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
-
         <repository>
             <id>sonatype</id>
             <url>https://oss.sonatype.org/content/groups/public/</url>
         </repository>
-
         <repository>
             <id>tcoded-releases</id>
             <url>https://repo.tcoded.com/releases</url>
         </repository>
-
         <repository>
             <id>placeholderapi</id>
             <url>https://repo.extendedclip.com/content/repositories/placeholderapi/</url>
         </repository>
-
         <repository>
             <id>dmulloy2-repo</id>
             <url>https://repo.dmulloy2.net/repository/public/</url>
         </repository>
-
         <repository>
             <id>codemc</id>
             <url>https://repo.codemc.org/repository/maven-public/</url>
@@ -97,7 +90,6 @@
     </repositories>
 
     <dependencies>
-
         <dependency>
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
@@ -115,6 +107,7 @@
             <groupId>com.tcoded</groupId>
             <artifactId>FoliaLib</artifactId>
             <version>0.5.1</version>
+            <scope>compile</scope>
         </dependency>
 
         <dependency>
@@ -134,10 +127,8 @@
         <dependency>
             <groupId>net.skinsrestorer</groupId>
             <artifactId>skinsrestorer-api</artifactId>
-            <version>${skinsrestorer.api.version}</version>
+            <version>${skinsrestorer.version}</version>
             <scope>provided</scope>
         </dependency>
-
     </dependencies>
-
 </project>
