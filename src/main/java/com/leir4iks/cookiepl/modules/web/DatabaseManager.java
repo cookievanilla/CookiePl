@@ -51,7 +51,7 @@ public class DatabaseManager {
     public void start() {
         loadDataYml();
 
-        plugin.getFoliaLib().getScheduler().runNextTick(task -> {
+        plugin.getFoliaLib().getScheduler().runNextTick(() -> {
             List<File> wf = new ArrayList<>();
             for (World w : plugin.getServer().getWorlds()) {
                 wf.add(w.getWorldFolder());
@@ -71,7 +71,7 @@ public class DatabaseManager {
             refreshAsyncPipeline();
         });
 
-        this.refreshTask = plugin.getFoliaLib().getScheduler().runTimerAsync(task -> refreshAsyncPipeline(), 20L * 60L, 20L * 60L * 10L);
+        this.refreshTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> refreshAsyncPipeline(), 20L * 60L, 20L * 60L * 10L);
     }
 
     public void stop() {
@@ -110,7 +110,7 @@ public class DatabaseManager {
 
             RefreshData data = new RefreshData(external, discordToUuid, uuidToName, statsByUuid, advancementsByUuid);
 
-            plugin.getFoliaLib().getScheduler().runNextTick(task -> applyRefreshSync(data));
+            plugin.getFoliaLib().getScheduler().runNextTick(() -> applyRefreshSync(data));
         } catch (Throwable t) {
             plugin.getLogManager().warn("Refresh pipeline failed: " + t.getMessage());
         }
@@ -119,7 +119,7 @@ public class DatabaseManager {
     private void applyRefreshSync(RefreshData data) {
         try {
             externalNickByDiscord.set(Collections.unmodifiableMap(data.externalNickByDiscord));
-            plugin.getFoliaLib().getScheduler().runAsync(task -> saveDataYml(data.externalNickByDiscord));
+            plugin.getFoliaLib().getScheduler().runAsync(() -> saveDataYml(data.externalNickByDiscord));
 
             boolean onlineMode = plugin.getServer().getOnlineMode();
 
@@ -538,11 +538,9 @@ public class DatabaseManager {
             Map<String, String> uuidToName,
             Map<String, JsonObject> statsByUuid,
             Map<String, JsonObject> advancementsByUuid
-    ) {
-    }
+    ) {}
 
-    private record SkinInfo(String textureId, String avatarUrl, String source) {
-    }
+    private record SkinInfo(String textureId, String avatarUrl, String source) {}
 
     private record Snapshot(
             Map<String, String> byDiscordId,
