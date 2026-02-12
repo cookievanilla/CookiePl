@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
@@ -23,10 +24,8 @@ public class WebServerManager {
     private final int port;
     private final boolean corsEnabled;
 
-    private WrappedTask updateTask;
-    private volatile String cachedPlayersJson = "[]";
+    private WrappedTask serverInfoTask;
     private volatile String cachedServerInfoJson = "{}";
-    private volatile boolean cacheInitialized = false;
 
     public WebServerManager(CookiePl plugin, DatabaseManager databaseManager) {
         this.plugin = plugin;
@@ -43,14 +42,8 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runAsync(() -> {
-                updateCache();
-                cacheInitialized = true;
-            });
-
-            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
-                updateCache();
-            }, 600L, 600L);
+            plugin.getFoliaLib().getScheduler().runNextTick(this::updateServerInfoSync);
+            this.serverInfoTask = plugin.getFoliaLib().getScheduler().runTimer(this::updateServerInfoSync, 20L * 10L, 20L * 10L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
@@ -60,19 +53,15 @@ public class WebServerManager {
     }
 
     public void stop() {
-        if (updateTask != null) {
-            updateTask.cancel();
-        }
+        if (serverInfoTask != null) serverInfoTask.cancel();
         if (server != null) {
             server.stop(0);
             plugin.getLogManager().info("Web Server stopped.");
         }
     }
 
-    private void updateCache() {
+    private void updateServerInfoSync() {
         try {
-            this.cachedPlayersJson = databaseManager.getDatabaseJson();
-
             JsonObject json = new JsonObject();
             json.addProperty("online", plugin.getServer().getOnlinePlayers().size());
 
@@ -84,16 +73,14 @@ public class WebServerManager {
             json.addProperty("max_players", plugin.getServer().getMaxPlayers());
 
             long uptimeMillis = ManagementFactory.getRuntimeMXBean().getUptime();
-            long uptimeHours = uptimeMillis / (1000 * 60 * 60);
-            json.addProperty("uptime", uptimeHours);
+            long uptimeHours = uptimeMillis / (1000L * 60L * 60L);
+            json.addProperty("uptime_hours", uptimeHours);
 
             json.addProperty("version", plugin.getServer().getBukkitVersion());
             json.addProperty("server", plugin.getServer().getName());
 
             this.cachedServerInfoJson = json.toString();
-
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update web server cache: " + e.getMessage());
+        } catch (Exception ignored) {
         }
     }
 
@@ -108,24 +95,25 @@ public class WebServerManager {
         String path = exchange.getRequestURI().getPath();
 
         if (path.equals("/players") || path.equals("/players/")) {
-            sendResponse(exchange, 200, cachedPlayersJson);
-        } else if (path.startsWith("/players/")) {
+            sendResponse(exchange, 200, databaseManager.getDatabaseJson());
+            return;
+        }
+
+        if (path.startsWith("/players/")) {
             String[] segments = path.split("/");
             if (segments.length > 2) {
-                String playerId = segments[2];
-                String response = databaseManager.getPlayerJsonById(playerId);
-
-                if (response.contains("\"error\":\"Player not found\"")) {
+                String slug = URLDecoder.decode(segments[2], StandardCharsets.UTF_8);
+                String response = databaseManager.getPlayerJsonBySlug(slug);
+                if (response.contains("\"error\"")) {
                     sendResponse(exchange, 404, response);
                 } else {
                     sendResponse(exchange, 200, response);
                 }
-            } else {
-                sendResponse(exchange, 200, cachedPlayersJson);
+                return;
             }
-        } else {
-            sendResponse(exchange, 200, cachedPlayersJson);
         }
+
+        sendResponse(exchange, 200, databaseManager.getDatabaseJson());
     }
 
     private void handleServerInfoRequest(HttpExchange exchange) throws IOException {
@@ -140,18 +128,16 @@ public class WebServerManager {
     }
 
     private void handleCors(HttpExchange exchange) {
-        if (corsEnabled) {
-            exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
-            exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization");
-        }
+        if (!corsEnabled) return;
+        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization");
     }
 
     private void sendResponse(HttpExchange exchange, int statusCode, String response) throws IOException {
         byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
         exchange.sendResponseHeaders(statusCode, bytes.length);
-
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
         }
