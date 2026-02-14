@@ -75,10 +75,13 @@ public class DatabaseManager {
     public void start() {
         loadExternalCacheFromYml();
 
+        plugin.getFoliaLib().getScheduler().runNextTick(t -> {
+            ensureSkinsRestorerHook();
+            rebuildSync();
+        });
+
         plugin.getFoliaLib().getScheduler().runAsync(t -> refreshAsync());
         plugin.getFoliaLib().getScheduler().runTimerAsync(t -> refreshAsync(), 1200L, 1200L);
-
-        plugin.getFoliaLib().getScheduler().runNextTick(t -> rebuildSync());
     }
 
     public void stop() {
@@ -137,6 +140,7 @@ public class DatabaseManager {
         }
 
         try {
+            ensureSkinsRestorerHook();
             rebuildSkinsAsync(latestLinks, latestUuidToName);
         } catch (Throwable ignored) {
         }
@@ -167,25 +171,7 @@ public class DatabaseManager {
 
             SkinInfo si = null;
             if (ps != null) {
-                SkinProperty prop = null;
-
-                try {
-                    prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{link.uuid}).orElse(null);
-                } catch (Throwable ignored) {
-                }
-
-                if (prop == null && name != null && !name.isBlank()) {
-                    try {
-                        Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{link.uuid, name, serverOnlineMode});
-                        if (opt.isEmpty()) {
-                            opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{link.uuid, name});
-                        }
-                        prop = opt.orElse(null);
-                    } catch (Throwable ignored) {
-                    }
-                }
-
-                si = skinInfoFromProperty(prop, "skinsrestorer");
+                si = resolveSkinFromSkinsRestorer(ps, link.uuid, name);
             }
 
             if (si == null) {
@@ -324,16 +310,34 @@ public class DatabaseManager {
 
         PlayerStorage ps = playerStorage;
         if (ps != null) {
-            try {
-                SkinProperty prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{uuid}).orElse(null);
-                SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer");
-                if (si != null) return si;
-            } catch (Throwable ignored) {
-            }
+            SkinInfo si = resolveSkinFromSkinsRestorer(ps, uuid, name);
+            if (si != null) return si;
         }
 
         String fallback = (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) ? "MHF_Steve" : name;
         return new SkinInfo(fallback, mcHeadsAvatarUrl(fallback), "", "fallback");
+    }
+
+    private SkinInfo resolveSkinFromSkinsRestorer(PlayerStorage ps, UUID uuid, String name) {
+        SkinProperty prop = null;
+
+        try {
+            prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{uuid}).orElse(null);
+        } catch (Throwable ignored) {
+        }
+
+        if (prop == null && name != null && !name.isBlank()) {
+            try {
+                Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{uuid, name, serverOnlineMode});
+                if (opt.isEmpty()) {
+                    opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{uuid, name});
+                }
+                prop = opt.orElse(null);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return skinInfoFromProperty(prop, "skinsrestorer");
     }
 
     private static SkinInfo skinInfoFromProperty(SkinProperty prop, String source) {
