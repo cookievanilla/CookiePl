@@ -11,7 +11,6 @@ import net.skinsrestorer.api.SkinsRestorerProvider;
 import net.skinsrestorer.api.property.SkinProperty;
 import net.skinsrestorer.api.storage.PlayerStorage;
 import org.bukkit.Bukkit;
-import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Statistic;
 import org.bukkit.plugin.Plugin;
@@ -61,6 +60,7 @@ public class DatabaseManager {
     private volatile Map<UUID, SkinInfo> latestResolvedSkins = Map.of();
 
     private final boolean serverOnlineMode;
+    private final boolean includeHeavyStats;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -69,6 +69,7 @@ public class DatabaseManager {
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
         this.serverOnlineMode = plugin.getServer().getOnlineMode();
+        this.includeHeavyStats = plugin.getConfig().getBoolean("modules.web-server.include-heavy-stats", false);
     }
 
     public void start() {
@@ -229,14 +230,25 @@ public class DatabaseManager {
 
             if (obj.has("minecraft_name")) {
                 String n = obj.get("minecraft_name").getAsString();
-                if (n != null && !n.isBlank()) newNameToDiscord.put(n.toLowerCase(Locale.ROOT), link.discordId);
+                addNameAlias(newNameToDiscord, n, link.discordId);
             }
+
+            addNameAlias(newNameToDiscord, uuidToName.get(link.uuid.toString()), link.discordId);
+            addNameAlias(newNameToDiscord, Bukkit.getOfflinePlayer(link.uuid).getName(), link.discordId);
+            addNameAlias(newNameToDiscord, externalNickByDiscordId.get(link.discordId), link.discordId);
         }
 
         playersByDiscordId = Collections.unmodifiableMap(newPlayersById);
         uuidToDiscordId = Collections.unmodifiableMap(newUuidToDiscord);
         nameLowerToDiscordId = Collections.unmodifiableMap(newNameToDiscord);
         cachedDatabaseJson = arr.toString();
+    }
+
+    private static void addNameAlias(Map<String, String> aliases, String name, String discordId) {
+        if (name == null) return;
+        String normalized = name.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) return;
+        aliases.putIfAbsent(normalized, discordId);
     }
 
     private JsonObject buildPlayerObject(String discordId, UUID uuid, Map<String, String> uuidToName) {
@@ -276,7 +288,7 @@ public class DatabaseManager {
         obj.addProperty("skin_texture_url", skin.textureUrl);
         obj.addProperty("skin_source", skin.source);
 
-        if (hasPlayed) {
+        if (hasPlayed && online && includeHeavyStats) {
             obj.add("stats", buildInterestingStats(off));
         } else {
             obj.add("stats", emptyStats());
@@ -449,41 +461,15 @@ public class DatabaseManager {
         distance.addProperty("swim_km", Math.round((swim / 100000.0) * 10.0) / 10.0);
         stats.add("distance", distance);
 
-        long minedTotal = 0;
-        long usedTotal = 0;
-
-        TopN minedTop = new TopN(5);
-        TopN usedTop = new TopN(5);
-
-        for (Material m : Material.values()) {
-            if (m == Material.AIR || m.isLegacy()) continue;
-
-            if (m.isBlock()) {
-                long c = stat(p, Statistic.MINE_BLOCK, m);
-                if (c > 0) {
-                    minedTotal += c;
-                    minedTop.offer(m.getKey().toString(), c);
-                }
-            }
-
-            if (m.isItem()) {
-                long u = stat(p, Statistic.USE_ITEM, m);
-                if (u > 0) {
-                    usedTotal += u;
-                    usedTop.offer(m.getKey().toString(), u);
-                }
-            }
-        }
-
         JsonObject blocks = new JsonObject();
-        blocks.addProperty("mined_total", minedTotal);
+        blocks.addProperty("mined_total", 0);
         stats.add("blocks", blocks);
 
         JsonObject items = new JsonObject();
-        items.addProperty("used_total", usedTotal);
-        items.addProperty("crafted_total", sumStatByMaterial(p, Statistic.CRAFT_ITEM));
-        items.addProperty("picked_up_total", sumStatByMaterial(p, Statistic.PICKUP));
-        items.addProperty("dropped_total", sumStatByMaterial(p, Statistic.DROP));
+        items.addProperty("used_total", 0);
+        items.addProperty("crafted_total", 0);
+        items.addProperty("picked_up_total", 0);
+        items.addProperty("dropped_total", 0);
         stats.add("items", items);
 
         JsonObject fun = new JsonObject();
@@ -495,12 +481,12 @@ public class DatabaseManager {
         stats.add("fun", fun);
 
         JsonObject top = new JsonObject();
-        top.add("mined", minedTop.toJsonArray());
-        top.add("used", usedTop.toJsonArray());
+        top.add("mined", new JsonArray());
+        top.add("used", new JsonArray());
         stats.add("top", top);
 
-        if (minedTop.bestKey != null) stats.addProperty("favorite_mined", minedTop.bestKey);
-        if (usedTop.bestKey != null) stats.addProperty("favorite_used", usedTop.bestKey);
+        stats.addProperty("favorite_mined", "");
+        stats.addProperty("favorite_used", "");
 
         return stats;
     }
@@ -720,23 +706,7 @@ public class DatabaseManager {
         }
     }
 
-    private static long stat(OfflinePlayer p, Statistic st, Material m) {
-        try {
-            return p.getStatistic(st, m);
-        } catch (Throwable ignored) {
-            return 0L;
-        }
-    }
 
-    private static long sumStatByMaterial(OfflinePlayer p, Statistic stat) {
-        long total = 0;
-        for (Material m : Material.values()) {
-            if (m == Material.AIR || m.isLegacy() || !m.isItem()) continue;
-            long v = stat(p, stat, m);
-            if (v > 0) total += v;
-        }
-        return total;
-    }
 
     private static String errorJson(String msg) {
         JsonObject o = new JsonObject();
@@ -752,43 +722,6 @@ public class DatabaseManager {
 
     private interface LongSupplierEx {
         long getAsLong();
-    }
-
-    private static final class TopN {
-        private final int n;
-        private final PriorityQueue<Entry> pq;
-        private String bestKey;
-        private long bestVal;
-
-        private TopN(int n) {
-            this.n = n;
-            this.pq = new PriorityQueue<>(Comparator.comparingLong(a -> a.count));
-        }
-
-        private void offer(String key, long count) {
-            if (count > bestVal) {
-                bestVal = count;
-                bestKey = key;
-            }
-            pq.offer(new Entry(key, count));
-            if (pq.size() > n) pq.poll();
-        }
-
-        private JsonArray toJsonArray() {
-            List<Entry> list = new ArrayList<>(pq);
-            list.sort((a, b) -> Long.compare(b.count, a.count));
-            JsonArray arr = new JsonArray();
-            for (Entry e : list) {
-                JsonObject o = new JsonObject();
-                o.addProperty("id", e.key);
-                o.addProperty("count", e.count);
-                arr.add(o);
-            }
-            return arr;
-        }
-
-        private record Entry(String key, long count) {
-        }
     }
 }
 
