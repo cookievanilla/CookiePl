@@ -153,38 +153,45 @@ public class DatabaseManager {
     }
 
     private void rebuildSkinsAsync(List<AccountLink> links, Map<String, String> uuidToName) {
-        PlayerStorage ps = playerStorage;
-        if (ps == null || links == null || links.isEmpty()) {
+        if (links == null || links.isEmpty()) {
             latestResolvedSkins = Map.of();
             return;
         }
 
+        PlayerStorage ps = playerStorage;
         Map<UUID, SkinInfo> map = new HashMap<>();
 
         for (AccountLink link : links) {
             String name = externalNickByDiscordId.get(link.discordId);
             if (name == null) name = uuidToName.get(link.uuid.toString());
-            if (name == null || name.isBlank()) continue;
 
-            SkinProperty prop = null;
+            SkinInfo si = null;
+            if (ps != null) {
+                SkinProperty prop = null;
 
-            try {
-                prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{link.uuid}).orElse(null);
-            } catch (Throwable ignored) {
-            }
-
-            if (prop == null) {
                 try {
-                    Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{link.uuid, name, serverOnlineMode});
-                    if (opt.isEmpty()) {
-                        opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{link.uuid, name});
-                    }
-                    prop = opt.orElse(null);
+                    prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{link.uuid}).orElse(null);
                 } catch (Throwable ignored) {
                 }
+
+                if (prop == null && name != null && !name.isBlank()) {
+                    try {
+                        Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{link.uuid, name, serverOnlineMode});
+                        if (opt.isEmpty()) {
+                            opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{link.uuid, name});
+                        }
+                        prop = opt.orElse(null);
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                si = skinInfoFromProperty(prop, "skinsrestorer");
             }
 
-            SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer");
+            if (si == null) {
+                si = resolveSkinFromMojang(link.uuid);
+            }
+
             if (si != null) map.put(link.uuid, si);
         }
 
@@ -324,9 +331,6 @@ public class DatabaseManager {
             } catch (Throwable ignored) {
             }
         }
-
-        SkinInfo mojangSkin = resolveSkinFromMojang(uuid);
-        if (mojangSkin != null) return mojangSkin;
 
         String fallback = (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) ? "MHF_Steve" : name;
         return new SkinInfo(fallback, mcHeadsAvatarUrl(fallback), "", "fallback");
