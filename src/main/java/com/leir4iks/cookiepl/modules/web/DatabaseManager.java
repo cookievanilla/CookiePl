@@ -61,6 +61,9 @@ public class DatabaseManager {
 
     private final ConcurrentHashMap<UUID, Long> srNameLookupCooldownUntil = new ConcurrentHashMap<>();
     private volatile long srGlobalRateLimitUntil = 0L;
+    private final ConcurrentHashMap<UUID, Long> skinResolveRetryAfter = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> mojangNameLookupCooldownUntil = new ConcurrentHashMap<>();
+    private volatile long mojangNameGlobalRateLimitUntil = 0L;
 
     private final boolean serverOnlineMode;
     private final boolean includeHeavyStats;
@@ -172,16 +175,20 @@ public class DatabaseManager {
         for (AccountLink link : links) {
             if (map.containsKey(link.uuid)) continue;
 
+            long now = System.currentTimeMillis();
+            Long retryAfter = skinResolveRetryAfter.get(link.uuid);
+            if (retryAfter != null && now < retryAfter) continue;
+
             String preferredName = externalNickByDiscordId.get(link.discordId);
             String cacheName = uuidToName.get(link.uuid.toString());
+            String offlineName = null;
+            try {
+                offlineName = Bukkit.getOfflinePlayer(link.uuid).getName();
+            } catch (Throwable ignored) {
+            }
 
             SkinInfo si = null;
             if (ps != null) {
-                String offlineName = null;
-                try {
-                    offlineName = Bukkit.getOfflinePlayer(link.uuid).getName();
-                } catch (Throwable ignored) {
-                }
                 si = resolveSkinFromSkinsRestorer(ps, link.uuid, preferredName, cacheName, offlineName);
             }
 
@@ -189,7 +196,16 @@ public class DatabaseManager {
                 si = resolveSkinFromMojang(link.uuid);
             }
 
-            if (si != null) map.put(link.uuid, si);
+            if (si == null) {
+                si = resolveSkinFromMojangByName(firstValidMinecraftName(preferredName, cacheName, offlineName));
+            }
+
+            if (si != null) {
+                map.put(link.uuid, si);
+                skinResolveRetryAfter.remove(link.uuid);
+            } else {
+                skinResolveRetryAfter.put(link.uuid, now + 300_000L);
+            }
         }
 
         latestResolvedSkins = Collections.unmodifiableMap(map);
@@ -394,10 +410,10 @@ public class DatabaseManager {
 
     private void markSrNameLookupCooldown(UUID uuid, boolean rateLimited) {
         long now = System.currentTimeMillis();
-        long delayMs = rateLimited ? 120_000L : 60_000L;
+        long delayMs = rateLimited ? 900_000L : 300_000L;
         srNameLookupCooldownUntil.put(uuid, now + delayMs);
         if (rateLimited) {
-            srGlobalRateLimitUntil = Math.max(srGlobalRateLimitUntil, now + 60_000L);
+            srGlobalRateLimitUntil = Math.max(srGlobalRateLimitUntil, now + 600_000L);
         }
     }
 
@@ -564,6 +580,80 @@ public class DatabaseManager {
             return url == null ? "" : url;
         } catch (Throwable ignored) {
             return "";
+        }
+    }
+
+    private SkinInfo resolveSkinFromMojangByName(String name) {
+        if (name == null || name.isBlank()) return null;
+
+        String normalizedName = firstValidMinecraftName(name);
+        if (normalizedName == null) return null;
+
+        long now = System.currentTimeMillis();
+        if (now < mojangNameGlobalRateLimitUntil) return null;
+
+        String key = normalizedName.toLowerCase(Locale.ROOT);
+        Long perNameCooldown = mojangNameLookupCooldownUntil.get(key);
+        if (perNameCooldown != null && now < perNameCooldown) return null;
+
+        HttpURLConnection con = null;
+        try {
+            URL url = new URL("https://api.mojang.com/users/profiles/minecraft/" + normalizedName);
+            con = (HttpURLConnection) url.openConnection();
+            con.setConnectTimeout(3000);
+            con.setReadTimeout(3000);
+            con.setRequestMethod("GET");
+
+            int code = con.getResponseCode();
+            if (code == 429) {
+                mojangNameLookupCooldownUntil.put(key, now + 900_000L);
+                mojangNameGlobalRateLimitUntil = Math.max(mojangNameGlobalRateLimitUntil, now + 600_000L);
+                return null;
+            }
+            if (code == 204 || code == 404) {
+                mojangNameLookupCooldownUntil.put(key, now + 3_600_000L);
+                return null;
+            }
+            if (code != 200) {
+                mojangNameLookupCooldownUntil.put(key, now + 600_000L);
+                return null;
+            }
+
+            String body;
+            try (var in = con.getInputStream()) {
+                body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            if (!root.has("id")) {
+                mojangNameLookupCooldownUntil.put(key, now + 600_000L);
+                return null;
+            }
+
+            String uuidStr = normalizeUuid(root.get("id").getAsString());
+            if (uuidStr == null) {
+                mojangNameLookupCooldownUntil.put(key, now + 600_000L);
+                return null;
+            }
+
+            SkinInfo si = resolveSkinFromMojang(UUID.fromString(uuidStr));
+            if (si != null) {
+                mojangNameLookupCooldownUntil.put(key, now + 3_600_000L);
+                return si;
+            }
+
+            mojangNameLookupCooldownUntil.put(key, now + 600_000L);
+            return null;
+        } catch (Throwable t) {
+            if (isRateLimitError(t)) {
+                mojangNameLookupCooldownUntil.put(key, now + 900_000L);
+                mojangNameGlobalRateLimitUntil = Math.max(mojangNameGlobalRateLimitUntil, now + 600_000L);
+            } else {
+                mojangNameLookupCooldownUntil.put(key, now + 600_000L);
+            }
+            return null;
+        } finally {
+            if (con != null) con.disconnect();
         }
     }
 
