@@ -140,7 +140,6 @@ public class DatabaseManager {
         }
 
         try {
-            ensureSkinsRestorerHook();
             rebuildSkinsAsync(latestLinks, latestUuidToName);
         } catch (Throwable ignored) {
         }
@@ -203,6 +202,17 @@ public class DatabaseManager {
 
     private void rebuildSync() {
         ensureSkinsRestorerHook();
+
+        if (playerStorage != null) {
+            List<AccountLink> linksSnapshot = latestLinks;
+            Map<String, String> namesSnapshot = latestUuidToName;
+            plugin.getFoliaLib().getScheduler().runAsync(t -> {
+                try {
+                    rebuildSkinsAsync(linksSnapshot, namesSnapshot);
+                } catch (Throwable ignored) {
+                }
+            });
+        }
 
         List<AccountLink> links = latestLinks;
         Map<String, String> uuidToName = latestUuidToName;
@@ -337,31 +347,78 @@ public class DatabaseManager {
             }
         }
 
-        return skinInfoFromProperty(prop, "skinsrestorer");
+        return skinInfoFromProperty(prop, "skinsrestorer", name);
     }
 
-    private static SkinInfo skinInfoFromProperty(SkinProperty prop, String source) {
+    private static SkinInfo skinInfoFromProperty(SkinProperty prop, String source, String nameFallback) {
         if (prop == null) return null;
-
-        String hash;
-        try {
-            hash = PropertyUtils.getSkinTextureHash(prop);
-        } catch (Throwable t) {
-            return null;
-        }
-        if (hash == null || hash.isBlank()) return null;
 
         String textureUrl = "";
         try {
             textureUrl = PropertyUtils.getSkinTextureUrl(prop);
         } catch (Throwable ignored) {
         }
+
+        String hash = "";
+        try {
+            hash = PropertyUtils.getSkinTextureHash(prop);
+        } catch (Throwable ignored) {
+        }
+
+        if (textureUrl == null || textureUrl.isBlank()) {
+            textureUrl = decodeTextureUrlFromPropertyValue(prop);
+        }
+
+        if ((hash == null || hash.isBlank()) && textureUrl != null && !textureUrl.isBlank()) {
+            String extracted = extractTextureHash(textureUrl);
+            if (extracted != null) hash = extracted;
+        }
+
+        if ((hash == null || hash.isBlank()) && (textureUrl == null || textureUrl.isBlank())) {
+            return null;
+        }
+
+        if (hash == null || hash.isBlank()) {
+            hash = (nameFallback == null || nameFallback.isBlank()) ? "MHF_Steve" : nameFallback;
+        }
+
         if (textureUrl == null || textureUrl.isBlank()) {
             textureUrl = "https://textures.minecraft.net/texture/" + hash;
         }
 
         String avatarUrl = mcHeadsAvatarUrl(hash);
         return new SkinInfo(hash, avatarUrl, textureUrl, source);
+    }
+
+    private static String decodeTextureUrlFromPropertyValue(SkinProperty prop) {
+        String encoded = null;
+        for (String methodName : new String[]{"getValue", "value", "getTextureValue"}) {
+            try {
+                Method m = prop.getClass().getMethod(methodName);
+                Object value = m.invoke(prop);
+                if (value instanceof String str && !str.isBlank()) {
+                    encoded = str;
+                    break;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        if (encoded == null || encoded.isBlank()) return "";
+
+        try {
+            String decoded = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+            JsonObject root = JsonParser.parseString(decoded).getAsJsonObject();
+            if (!root.has("textures") || !root.get("textures").isJsonObject()) return "";
+            JsonObject textures = root.getAsJsonObject("textures");
+            if (!textures.has("SKIN") || !textures.get("SKIN").isJsonObject()) return "";
+            JsonObject skin = textures.getAsJsonObject("SKIN");
+            if (!skin.has("url")) return "";
+            String url = skin.get("url").getAsString();
+            return url == null ? "" : url;
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private SkinInfo resolveSkinFromMojang(UUID uuid) {
