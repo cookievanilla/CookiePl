@@ -1,4 +1,3 @@
-
 package com.leir4iks.cookiepl.modules.web;
 
 import com.google.gson.JsonArray;
@@ -9,21 +8,20 @@ import com.leir4iks.cookiepl.CookiePl;
 import net.skinsrestorer.api.PropertyUtils;
 import net.skinsrestorer.api.SkinsRestorer;
 import net.skinsrestorer.api.SkinsRestorerProvider;
-import net.skinsrestorer.api.event.SkinApplyEvent;
-import net.skinsrestorer.api.exception.DataRequestException;
 import net.skinsrestorer.api.property.SkinProperty;
 import net.skinsrestorer.api.storage.PlayerStorage;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Statistic;
-import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -58,14 +56,9 @@ public class DatabaseManager {
 
     private volatile SkinsRestorer skinsRestorer;
     private volatile PlayerStorage playerStorage;
-    private final AtomicBoolean srSubscribed = new AtomicBoolean(false);
 
-    // Быстрый кеш: что уже применилось (событие)
-    private final ConcurrentHashMap<UUID, SkinInfo> appliedSkinCache = new ConcurrentHashMap<>();
-    // “Тяжёлый” кеш, который пересчитываем async (может ходить в storage / обновлять)
     private volatile Map<UUID, SkinInfo> latestResolvedSkins = Map.of();
 
-    // фиксируем один раз (и не дёргаем Bukkit API из async)
     private final boolean serverOnlineMode;
 
     public DatabaseManager(CookiePl plugin) {
@@ -80,10 +73,10 @@ public class DatabaseManager {
     public void start() {
         loadExternalCacheFromYml();
 
-        plugin.getFoliaLib().getScheduler().runAsync(this::refreshAsync);
-        plugin.getFoliaLib().getScheduler().runTimerAsync(this::refreshAsync, 1200L, 1200L);
+        plugin.getFoliaLib().getScheduler().runAsync(t -> refreshAsync());
+        plugin.getFoliaLib().getScheduler().runTimerAsync(t -> refreshAsync(), 1200L, 1200L);
 
-        plugin.getFoliaLib().getScheduler().runNextTick(this::rebuildSync);
+        plugin.getFoliaLib().getScheduler().runNextTick(t -> rebuildSync());
     }
 
     public void stop() {
@@ -141,14 +134,13 @@ public class DatabaseManager {
             plugin.getLogManager().warn("usercache.json read failed: " + e.getMessage());
         }
 
-        // async пересчёт скинов через SkinsRestorer (без Bukkit API)
         try {
             rebuildSkinsAsync(latestLinks, latestUuidToName);
         } catch (Throwable ignored) {
         }
 
         if (rebuildQueued.compareAndSet(false, true)) {
-            plugin.getFoliaLib().getScheduler().runNextTick(() -> {
+            plugin.getFoliaLib().getScheduler().runNextTick(t -> {
                 try {
                     rebuildSync();
                 } finally {
@@ -172,29 +164,46 @@ public class DatabaseManager {
             if (name == null) name = uuidToName.get(link.uuid.toString());
             if (name == null || name.isBlank()) continue;
 
-            // сначала — быстрый кеш (событие)
-            SkinInfo already = appliedSkinCache.get(link.uuid);
-            if (already != null) {
-                map.put(link.uuid, already);
-                continue;
-            }
+            SkinProperty prop = null;
 
             try {
-                SkinProperty prop = ps.getSkinOfPlayer(link.uuid).orElse(null);
-                if (prop == null) {
-                    // “что будет на join” (может обновить протухший кеш)
-                    prop = ps.getSkinForPlayer(link.uuid, name, serverOnlineMode).orElse(null);
-                }
-
-                SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer_storage");
-                if (si != null) map.put(link.uuid, si);
-            } catch (DataRequestException ignored) {
-                // сеть/провайдеры могут быть недоступны — просто пропускаем
+                prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{link.uuid}).orElse(null);
             } catch (Throwable ignored) {
             }
+
+            if (prop == null) {
+                try {
+                    Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{link.uuid, name, serverOnlineMode});
+                    if (opt.isEmpty()) {
+                        opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{link.uuid, name});
+                    }
+                    prop = opt.orElse(null);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer");
+            if (si != null) map.put(link.uuid, si);
         }
 
         latestResolvedSkins = Collections.unmodifiableMap(map);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Optional<SkinProperty> callOptionalSkinProperty(Object target, String methodName, Class<?>[] paramTypes, Object[] args) {
+        try {
+            Method m = target.getClass().getMethod(methodName, paramTypes);
+            Object res = m.invoke(target, args);
+            if (res instanceof Optional<?> o) {
+                return (Optional<SkinProperty>) o;
+            }
+        } catch (NoSuchMethodException ignored) {
+        } catch (InvocationTargetException e) {
+            Throwable c = e.getCause();
+            if (c instanceof RuntimeException re) throw re;
+        } catch (Throwable ignored) {
+        }
+        return Optional.empty();
     }
 
     private void rebuildSync() {
@@ -285,48 +294,26 @@ public class DatabaseManager {
             SkinsRestorer sr = SkinsRestorerProvider.get();
             skinsRestorer = sr;
             playerStorage = sr.getPlayerStorage();
-
-            if (srSubscribed.compareAndSet(false, true)) {
-                sr.getEventBus().subscribe(plugin, SkinApplyEvent.class, event -> {
-                    try {
-                        Player pl = event.getPlayer(Player.class);
-                        if (pl == null) return;
-
-                        SkinProperty prop = event.getProperty();
-                        SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer_event");
-                        if (si == null) return;
-
-                        appliedSkinCache.put(pl.getUniqueId(), si);
-                    } catch (Throwable ignored) {
-                    }
-                });
-            }
         } catch (Throwable ignored) {
         }
     }
 
     private SkinInfo resolveSkin(UUID uuid, String name) {
-        SkinInfo cached = appliedSkinCache.get(uuid);
-        if (cached != null) return cached;
-
         SkinInfo resolved = latestResolvedSkins.get(uuid);
         if (resolved != null) return resolved;
 
-        // последнее “безопасное” — попытка локально взять привязанный скин (обычно без сети)
         PlayerStorage ps = playerStorage;
         if (ps != null) {
             try {
-                SkinProperty prop = ps.getSkinOfPlayer(uuid).orElse(null);
-                SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer_linked_only");
+                SkinProperty prop = callOptionalSkinProperty(ps, "getSkinOfPlayer", new Class[]{UUID.class}, new Object[]{uuid}).orElse(null);
+                SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer");
                 if (si != null) return si;
             } catch (Throwable ignored) {
             }
         }
 
-        // fallback
         String fallback = (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) ? "MHF_Steve" : name;
-        String avatar = mcHeadsAvatarUrl(fallback);
-        return new SkinInfo(fallback, avatar, "", "fallback");
+        return new SkinInfo(fallback, mcHeadsAvatarUrl(fallback), "", "fallback");
     }
 
     private static SkinInfo skinInfoFromProperty(SkinProperty prop, String source) {
@@ -354,7 +341,6 @@ public class DatabaseManager {
     }
 
     private static String mcHeadsAvatarUrl(String textureOrName) {
-        // mc-heads поддерживает и ник, и textureId. Формат из доки SR: /avatar/%texture_id%/%size%.png
         return "https://mc-heads.net/avatar/" + textureOrName + "/64.png";
     }
 
@@ -439,7 +425,7 @@ public class DatabaseManager {
         fun.addProperty("animals_bred", stat(p, Statistic.ANIMALS_BRED));
         fun.addProperty("fish_caught", stat(p, Statistic.FISH_CAUGHT));
         fun.addProperty("villager_trades", stat(p, Statistic.TRADED_WITH_VILLAGER));
-        fun.addProperty("enchantments", stat(p, Statistic.ENCHANT_ITEM));
+        fun.addProperty("enchantments", statByName(p, "ITEM_ENCHANTED", "ENCHANT_ITEM"));
         stats.add("fun", fun);
 
         JsonObject top = new JsonObject();
@@ -504,6 +490,17 @@ public class DatabaseManager {
         stats.addProperty("favorite_used", "");
 
         return stats;
+    }
+
+    private static long statByName(OfflinePlayer p, String... names) {
+        for (String n : names) {
+            try {
+                Statistic s = Statistic.valueOf(n);
+                return p.getStatistic(s);
+            } catch (Throwable ignored) {
+            }
+        }
+        return 0L;
     }
 
     private boolean updateExternalFromHttp() throws IOException {
