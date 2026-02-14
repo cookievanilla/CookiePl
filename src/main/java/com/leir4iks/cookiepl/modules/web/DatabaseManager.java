@@ -30,7 +30,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Pattern;
 
 public class DatabaseManager {
 
@@ -62,8 +61,6 @@ public class DatabaseManager {
 
     private final boolean serverOnlineMode;
     private final boolean includeHeavyStats;
-
-    private static final Pattern MINECRAFT_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_]{3,16}$");
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -165,9 +162,12 @@ public class DatabaseManager {
         }
 
         PlayerStorage ps = playerStorage;
-        Map<UUID, SkinInfo> map = new HashMap<>();
+        Map<UUID, SkinInfo> previous = latestResolvedSkins;
+        Map<UUID, SkinInfo> map = new HashMap<>(previous);
 
         for (AccountLink link : links) {
+            if (map.containsKey(link.uuid)) continue;
+
             String preferredName = externalNickByDiscordId.get(link.discordId);
             String cacheName = uuidToName.get(link.uuid.toString());
 
@@ -205,17 +205,6 @@ public class DatabaseManager {
 
     private void rebuildSync() {
         ensureSkinsRestorerHook();
-
-        if (playerStorage != null) {
-            List<AccountLink> linksSnapshot = latestLinks;
-            Map<String, String> namesSnapshot = latestUuidToName;
-            plugin.getFoliaLib().getScheduler().runAsync(t -> {
-                try {
-                    rebuildSkinsAsync(linksSnapshot, namesSnapshot);
-                } catch (Throwable ignored) {
-                }
-            });
-        }
 
         List<AccountLink> links = latestLinks;
         Map<String, String> uuidToName = latestUuidToName;
@@ -321,18 +310,6 @@ public class DatabaseManager {
         SkinInfo resolved = latestResolvedSkins.get(uuid);
         if (resolved != null) return resolved;
 
-        PlayerStorage ps = playerStorage;
-        if (ps != null) {
-            String offlineName = null;
-            try {
-                offlineName = Bukkit.getOfflinePlayer(uuid).getName();
-            } catch (Throwable ignored) {
-            }
-
-            SkinInfo si = resolveSkinFromSkinsRestorer(ps, uuid, name, latestUuidToName.get(uuid.toString()), offlineName);
-            if (si != null) return si;
-        }
-
         String fallback = (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) ? "MHF_Steve" : name;
         return new SkinInfo(fallback, mcHeadsAvatarUrl(fallback), "", "fallback");
     }
@@ -340,11 +317,6 @@ public class DatabaseManager {
     private SkinInfo resolveSkinFromSkinsRestorer(PlayerStorage ps, UUID uuid, String... candidateNames) {
         SkinInfo byUuid = skinInfoFromProperty(tryGetSkinByUuid(ps, uuid), "skinsrestorer", firstValidMinecraftName(candidateNames));
         if (byUuid != null) return byUuid;
-
-        for (String candidate : normalizedCandidateNames(candidateNames)) {
-            SkinInfo byName = skinInfoFromProperty(tryGetSkinByName(ps, uuid, candidate), "skinsrestorer", candidate);
-            if (byName != null) return byName;
-        }
 
         SkinInfo byIdentifier = resolveSkinFromSkinsRestorerIdentifier(uuid, firstValidMinecraftName(candidateNames));
         if (byIdentifier != null) return byIdentifier;
@@ -366,25 +338,6 @@ public class DatabaseManager {
         }
     }
 
-    private SkinProperty tryGetSkinByName(PlayerStorage ps, UUID uuid, String name) {
-        if (name == null || name.isBlank()) return null;
-
-        try {
-            Optional<SkinProperty> direct = ps.getSkinForPlayer(uuid, name);
-            if (direct.isPresent()) return direct.get();
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{uuid, name, serverOnlineMode});
-            if (opt.isEmpty()) {
-                opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{uuid, name});
-            }
-            return opt.orElse(null);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
 
     private SkinInfo resolveSkinFromSkinsRestorerIdentifier(UUID uuid, String nameFallback) {
         SkinsRestorer sr = skinsRestorer;
@@ -446,23 +399,15 @@ public class DatabaseManager {
         return null;
     }
 
-    private static List<String> normalizedCandidateNames(String... names) {
-        LinkedHashSet<String> set = new LinkedHashSet<>();
-        if (names != null) {
-            for (String name : names) {
-                if (name == null) continue;
-                String normalized = name.trim();
-                if (normalized.isEmpty()) continue;
-                if (!MINECRAFT_NAME_PATTERN.matcher(normalized).matches()) continue;
-                set.add(normalized);
-            }
-        }
-        return new ArrayList<>(set);
-    }
-
     private static String firstValidMinecraftName(String... names) {
-        List<String> list = normalizedCandidateNames(names);
-        return list.isEmpty() ? null : list.get(0);
+        if (names == null) return null;
+        for (String name : names) {
+            if (name == null) continue;
+            String normalized = name.trim();
+            if (normalized.isEmpty()) continue;
+            return normalized;
+        }
+        return null;
     }
 
     private static SkinInfo skinInfoFromProperty(SkinProperty prop, String source, String nameFallback) {
