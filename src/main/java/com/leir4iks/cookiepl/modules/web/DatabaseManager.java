@@ -59,6 +59,9 @@ public class DatabaseManager {
 
     private volatile Map<UUID, SkinInfo> latestResolvedSkins = Map.of();
 
+    private final ConcurrentHashMap<UUID, Long> srNameLookupCooldownUntil = new ConcurrentHashMap<>();
+    private volatile long srGlobalRateLimitUntil = 0L;
+
     private final boolean serverOnlineMode;
     private final boolean includeHeavyStats;
 
@@ -140,6 +143,7 @@ public class DatabaseManager {
         }
 
         try {
+            ensureSkinsRestorerHook();
             rebuildSkinsAsync(latestLinks, latestUuidToName);
         } catch (Throwable ignored) {
         }
@@ -173,7 +177,12 @@ public class DatabaseManager {
 
             SkinInfo si = null;
             if (ps != null) {
-                si = resolveSkinFromSkinsRestorer(ps, link.uuid, preferredName, cacheName, null);
+                String offlineName = null;
+                try {
+                    offlineName = Bukkit.getOfflinePlayer(link.uuid).getName();
+                } catch (Throwable ignored) {
+                }
+                si = resolveSkinFromSkinsRestorer(ps, link.uuid, preferredName, cacheName, offlineName);
             }
 
             if (si == null) {
@@ -315,11 +324,21 @@ public class DatabaseManager {
     }
 
     private SkinInfo resolveSkinFromSkinsRestorer(PlayerStorage ps, UUID uuid, String... candidateNames) {
-        SkinInfo byUuid = skinInfoFromProperty(tryGetSkinByUuid(ps, uuid), "skinsrestorer", firstValidMinecraftName(candidateNames));
+        String firstName = firstValidMinecraftName(candidateNames);
+
+        SkinInfo byUuid = skinInfoFromProperty(tryGetSkinByUuid(ps, uuid), "skinsrestorer", firstName);
         if (byUuid != null) return byUuid;
 
-        SkinInfo byIdentifier = resolveSkinFromSkinsRestorerIdentifier(uuid, firstValidMinecraftName(candidateNames));
+        SkinInfo byIdentifier = resolveSkinFromSkinsRestorerIdentifier(uuid, firstName);
         if (byIdentifier != null) return byIdentifier;
+
+        if (!canAttemptSrNameLookup(uuid) || firstName == null) return null;
+
+        SkinInfo byName = skinInfoFromProperty(tryGetSkinByName(ps, uuid, firstName), "skinsrestorer-name", firstName);
+        if (byName != null) {
+            srNameLookupCooldownUntil.remove(uuid);
+            return byName;
+        }
 
         return null;
     }
@@ -338,6 +357,64 @@ public class DatabaseManager {
         }
     }
 
+
+
+    private SkinProperty tryGetSkinByName(PlayerStorage ps, UUID uuid, String name) {
+        if (name == null || name.isBlank()) return null;
+
+        try {
+            Optional<SkinProperty> direct = ps.getSkinForPlayer(uuid, name);
+            if (direct.isPresent()) return direct.get();
+            markSrNameLookupCooldown(uuid, false);
+        } catch (Throwable t) {
+            markSrNameLookupCooldown(uuid, isRateLimitError(t));
+            return null;
+        }
+
+        try {
+            Optional<SkinProperty> opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class, boolean.class}, new Object[]{uuid, name, serverOnlineMode});
+            if (opt.isEmpty()) {
+                opt = callOptionalSkinProperty(ps, "getSkinForPlayer", new Class[]{UUID.class, String.class}, new Object[]{uuid, name});
+            }
+            SkinProperty result = opt.orElse(null);
+            markSrNameLookupCooldown(uuid, false);
+            return result;
+        } catch (Throwable t) {
+            markSrNameLookupCooldown(uuid, isRateLimitError(t));
+            return null;
+        }
+    }
+
+    private boolean canAttemptSrNameLookup(UUID uuid) {
+        long now = System.currentTimeMillis();
+        if (now < srGlobalRateLimitUntil) return false;
+        Long next = srNameLookupCooldownUntil.get(uuid);
+        return next == null || now >= next;
+    }
+
+    private void markSrNameLookupCooldown(UUID uuid, boolean rateLimited) {
+        long now = System.currentTimeMillis();
+        long delayMs = rateLimited ? 120_000L : 60_000L;
+        srNameLookupCooldownUntil.put(uuid, now + delayMs);
+        if (rateLimited) {
+            srGlobalRateLimitUntil = Math.max(srGlobalRateLimitUntil, now + 60_000L);
+        }
+    }
+
+    private static boolean isRateLimitError(Throwable t) {
+        Throwable cur = t;
+        while (cur != null) {
+            String msg = cur.getMessage();
+            if (msg != null) {
+                String lower = msg.toLowerCase(Locale.ROOT);
+                if (lower.contains("429") || lower.contains("rate limit") || lower.contains("please wait a minute")) {
+                    return true;
+                }
+            }
+            cur = cur.getCause();
+        }
+        return false;
+    }
 
     private SkinInfo resolveSkinFromSkinsRestorerIdentifier(UUID uuid, String nameFallback) {
         SkinsRestorer sr = skinsRestorer;
@@ -405,7 +482,16 @@ public class DatabaseManager {
             if (name == null) continue;
             String normalized = name.trim();
             if (normalized.isEmpty()) continue;
-            return normalized;
+            if (normalized.length() < 3 || normalized.length() > 16) continue;
+            boolean valid = true;
+            for (int i = 0; i < normalized.length(); i++) {
+                char c = normalized.charAt(i);
+                if (!(c == '_' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) return normalized;
         }
         return null;
     }
