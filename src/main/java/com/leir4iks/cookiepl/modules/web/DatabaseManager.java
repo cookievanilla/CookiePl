@@ -26,6 +26,11 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.nio.file.Files;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -67,6 +72,7 @@ public class DatabaseManager {
 
     private final boolean serverOnlineMode;
     private final boolean includeHeavyStats;
+    private final String skinsRestorerJdbcUrl;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -76,6 +82,7 @@ public class DatabaseManager {
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
         this.serverOnlineMode = plugin.getServer().getOnlineMode();
         this.includeHeavyStats = plugin.getConfig().getBoolean("modules.web-server.include-heavy-stats", false);
+        this.skinsRestorerJdbcUrl = plugin.getConfig().getString("modules.web-server.skinsrestorer-jdbc-url", "").trim();
     }
 
     public void start() {
@@ -172,6 +179,9 @@ public class DatabaseManager {
         Map<UUID, SkinInfo> previous = latestResolvedSkins;
         Map<UUID, SkinInfo> map = new HashMap<>(previous);
 
+        Map<UUID, SkinInfo> dbSkins = resolveSkinsFromSkinsRestorerDatabase(links, uuidToName);
+        map.putAll(dbSkins);
+
         for (AccountLink link : links) {
             if (map.containsKey(link.uuid)) continue;
 
@@ -209,6 +219,144 @@ public class DatabaseManager {
         }
 
         latestResolvedSkins = Collections.unmodifiableMap(map);
+    }
+
+    private Map<UUID, SkinInfo> resolveSkinsFromSkinsRestorerDatabase(List<AccountLink> links, Map<String, String> uuidToName) {
+        if (skinsRestorerJdbcUrl == null || skinsRestorerJdbcUrl.isBlank() || links == null || links.isEmpty()) return Map.of();
+
+        Map<UUID, SkinInfo> out = new HashMap<>();
+
+        try (Connection conn = DriverManager.getConnection(skinsRestorerJdbcUrl)) {
+            DatabaseMetaData meta = conn.getMetaData();
+            Map<String, Set<String>> tableColumns = new HashMap<>();
+
+            try (ResultSet tables = meta.getTables(conn.getCatalog(), null, "%", new String[]{"TABLE"})) {
+                while (tables.next()) {
+                    String table = tables.getString("TABLE_NAME");
+                    Set<String> cols = new HashSet<>();
+                    try (ResultSet colsRs = meta.getColumns(conn.getCatalog(), null, table, "%")) {
+                        while (colsRs.next()) {
+                            cols.add(colsRs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
+                        }
+                    }
+                    tableColumns.put(table, cols);
+                }
+            }
+
+            String playersTable = null;
+            String playersUuidCol = null;
+            String playersSkinIdCol = null;
+
+            String skinsTable = null;
+            String skinsIdCol = null;
+            String skinsValueCol = null;
+            String skinsUrlCol = null;
+            String skinsHashCol = null;
+
+            for (Map.Entry<String, Set<String>> e : tableColumns.entrySet()) {
+                Set<String> c = e.getValue();
+                String uuidCol = pickFirst(c, "uuid", "player_uuid", "unique_id");
+                String skinIdCol = pickFirst(c, "skin_id", "skin_identifier", "skinidentifier", "identifier");
+                if (uuidCol != null && skinIdCol != null) {
+                    playersTable = e.getKey();
+                    playersUuidCol = uuidCol;
+                    playersSkinIdCol = skinIdCol;
+                    break;
+                }
+            }
+
+            for (Map.Entry<String, Set<String>> e : tableColumns.entrySet()) {
+                Set<String> c = e.getValue();
+                String idCol = pickFirst(c, "identifier", "skin_id", "skinidentifier");
+                String valueCol = pickFirst(c, "value", "texture_value", "property_value");
+                String urlCol = pickFirst(c, "url", "texture_url", "skin_url");
+                String hashCol = pickFirst(c, "hash", "texture_hash", "skin_hash", "texture_id");
+                if (idCol != null && (valueCol != null || urlCol != null || hashCol != null)) {
+                    skinsTable = e.getKey();
+                    skinsIdCol = idCol;
+                    skinsValueCol = valueCol;
+                    skinsUrlCol = urlCol;
+                    skinsHashCol = hashCol;
+                    break;
+                }
+            }
+
+            if (playersTable == null || skinsTable == null) return out;
+
+            List<UUID> uuids = new ArrayList<>();
+            for (AccountLink l : links) uuids.add(l.uuid);
+            String placeholders = String.join(",", Collections.nCopies(uuids.size(), "?"));
+
+            String sql = "SELECT p.`" + playersUuidCol + "` AS puuid"
+                    + (skinsValueCol != null ? ", s.`" + skinsValueCol + "` AS sval" : ", NULL AS sval")
+                    + (skinsUrlCol != null ? ", s.`" + skinsUrlCol + "` AS surl" : ", NULL AS surl")
+                    + (skinsHashCol != null ? ", s.`" + skinsHashCol + "` AS shash" : ", NULL AS shash")
+                    + " FROM `" + playersTable + "` p JOIN `" + skinsTable + "` s ON p.`" + playersSkinIdCol + "` = s.`" + skinsIdCol + "`"
+                    + " WHERE p.`" + playersUuidCol + "` IN (" + placeholders + ")";
+
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < uuids.size(); i++) ps.setString(i + 1, uuids.get(i).toString());
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        UUID uuid = normalizeDatabaseUuid(rs.getString("puuid"));
+                        if (uuid == null) continue;
+
+                        SkinInfo info = skinInfoFromDatabaseData(
+                                rs.getString("shash"),
+                                rs.getString("surl"),
+                                rs.getString("sval"),
+                                uuidToName.get(uuid.toString())
+                        );
+                        if (info != null) out.put(uuid, info);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return out;
+    }
+
+    private static String pickFirst(Set<String> cols, String... names) {
+        for (String n : names) if (cols.contains(n)) return n;
+        return null;
+    }
+
+    private static UUID normalizeDatabaseUuid(String raw) {
+        String n = normalizeUuid(raw);
+        if (n == null) return null;
+        try {
+            return UUID.fromString(n);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static SkinInfo skinInfoFromDatabaseData(String hashRaw, String urlRaw, String valueRaw, String nameFallback) {
+        String textureUrl = urlRaw == null ? "" : urlRaw.trim();
+        String hash = hashRaw == null ? "" : hashRaw.trim();
+
+        if ((textureUrl.isBlank()) && valueRaw != null && !valueRaw.isBlank()) {
+            textureUrl = decodeTextureUrlFromEncodedProperty(valueRaw);
+        }
+
+        if ((hash.isBlank()) && textureUrl != null && !textureUrl.isBlank()) {
+            String extracted = extractTextureHash(textureUrl);
+            if (extracted != null) hash = extracted;
+        }
+
+        if (hash.isBlank() && (textureUrl == null || textureUrl.isBlank())) return null;
+
+        if (hash.isBlank()) {
+            hash = (nameFallback == null || nameFallback.isBlank()) ? "MHF_Steve" : nameFallback;
+        }
+
+        if (textureUrl == null || textureUrl.isBlank()) {
+            textureUrl = "https://textures.minecraft.net/texture/" + hash;
+        }
+
+        return new SkinInfo(hash, mcHeadsAvatarUrl(hash), textureUrl, "skinsrestorer-db");
     }
 
     @SuppressWarnings("unchecked")
@@ -552,20 +700,7 @@ public class DatabaseManager {
         return new SkinInfo(hash, avatarUrl, textureUrl, source);
     }
 
-    private static String decodeTextureUrlFromPropertyValue(SkinProperty prop) {
-        String encoded = null;
-        for (String methodName : new String[]{"getValue", "value", "getTextureValue"}) {
-            try {
-                Method m = prop.getClass().getMethod(methodName);
-                Object value = m.invoke(prop);
-                if (value instanceof String str && !str.isBlank()) {
-                    encoded = str;
-                    break;
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-
+    private static String decodeTextureUrlFromEncodedProperty(String encoded) {
         if (encoded == null || encoded.isBlank()) return "";
 
         try {
@@ -581,6 +716,23 @@ public class DatabaseManager {
         } catch (Throwable ignored) {
             return "";
         }
+    }
+
+    private static String decodeTextureUrlFromPropertyValue(SkinProperty prop) {
+        String encoded = null;
+        for (String methodName : new String[]{"getValue", "value", "getTextureValue"}) {
+            try {
+                Method m = prop.getClass().getMethod(methodName);
+                Object value = m.invoke(prop);
+                if (value instanceof String str && !str.isBlank()) {
+                    encoded = str;
+                    break;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return decodeTextureUrlFromEncodedProperty(encoded);
     }
 
     private SkinInfo resolveSkinFromMojangByName(String name) {
