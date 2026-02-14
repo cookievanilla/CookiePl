@@ -25,6 +25,7 @@ import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.nio.file.Files;
 import java.time.Instant;
 import java.util.*;
@@ -312,6 +313,9 @@ public class DatabaseManager {
             }
         }
 
+        SkinInfo mojangSkin = resolveSkinFromMojang(uuid);
+        if (mojangSkin != null) return mojangSkin;
+
         String fallback = (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) ? "MHF_Steve" : name;
         return new SkinInfo(fallback, mcHeadsAvatarUrl(fallback), "", "fallback");
     }
@@ -339,6 +343,68 @@ public class DatabaseManager {
         String avatarUrl = mcHeadsAvatarUrl(hash);
         return new SkinInfo(hash, avatarUrl, textureUrl, source);
     }
+
+    private SkinInfo resolveSkinFromMojang(UUID uuid) {
+        HttpURLConnection con = null;
+        try {
+            URL url = new URL("https://sessionserver.mojang.com/session/minecraft/profile/" + uuid.toString().replace("-", ""));
+            con = (HttpURLConnection) url.openConnection();
+            con.setConnectTimeout(3000);
+            con.setReadTimeout(3000);
+            con.setRequestMethod("GET");
+
+            if (con.getResponseCode() != 200) return null;
+
+            String body;
+            try (var in = con.getInputStream()) {
+                body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            if (!root.has("properties") || !root.get("properties").isJsonArray()) return null;
+
+            for (JsonElement element : root.getAsJsonArray("properties")) {
+                if (!element.isJsonObject()) continue;
+                JsonObject propertyObj = element.getAsJsonObject();
+                if (!propertyObj.has("name") || !"textures".equals(propertyObj.get("name").getAsString())) continue;
+                if (!propertyObj.has("value")) continue;
+
+                String encoded = propertyObj.get("value").getAsString();
+                if (encoded == null || encoded.isBlank()) continue;
+
+                String decoded = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+                JsonObject texturesRoot = JsonParser.parseString(decoded).getAsJsonObject();
+                if (!texturesRoot.has("textures") || !texturesRoot.get("textures").isJsonObject()) continue;
+
+                JsonObject textures = texturesRoot.getAsJsonObject("textures");
+                if (!textures.has("SKIN") || !textures.get("SKIN").isJsonObject()) continue;
+
+                JsonObject skinObject = textures.getAsJsonObject("SKIN");
+                if (!skinObject.has("url")) continue;
+
+                String textureUrl = skinObject.get("url").getAsString();
+                String hash = extractTextureHash(textureUrl);
+                if (hash == null) continue;
+
+                return new SkinInfo(hash, mcHeadsAvatarUrl(hash), textureUrl, "mojang-sessionserver");
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (con != null) con.disconnect();
+        }
+
+        return null;
+    }
+
+    private static String extractTextureHash(String textureUrl) {
+        if (textureUrl == null || textureUrl.isBlank()) return null;
+        String marker = "/texture/";
+        int idx = textureUrl.lastIndexOf(marker);
+        if (idx < 0) return null;
+        String hash = textureUrl.substring(idx + marker.length()).trim();
+        return hash.isEmpty() ? null : hash;
+    }
+
 
     private static String mcHeadsAvatarUrl(String textureOrName) {
         return "https://mc-heads.net/avatar/" + textureOrName + "/64.png";

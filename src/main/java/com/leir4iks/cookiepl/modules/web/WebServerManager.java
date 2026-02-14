@@ -39,8 +39,8 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runNextTick(this::updateServerInfoSync);
-            plugin.getFoliaLib().getScheduler().runTimer(this::updateServerInfoSync, 200L, 200L);
+            plugin.getFoliaLib().getScheduler().runNextTick(task -> updateServerInfoSync());
+            plugin.getFoliaLib().getScheduler().runTimer(task -> updateServerInfoSync(), 200L, 200L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
