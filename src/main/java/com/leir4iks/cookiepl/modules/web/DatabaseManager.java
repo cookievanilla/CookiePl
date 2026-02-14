@@ -1,3 +1,4 @@
+
 package com.leir4iks.cookiepl.modules.web;
 
 import com.google.gson.JsonArray;
@@ -5,14 +6,13 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
+import net.skinsrestorer.api.PropertyUtils;
 import net.skinsrestorer.api.SkinsRestorer;
 import net.skinsrestorer.api.SkinsRestorerProvider;
 import net.skinsrestorer.api.event.SkinApplyEvent;
-import net.skinsrestorer.api.model.SkinIdentifier;
-import net.skinsrestorer.api.property.PropertyUtils;
+import net.skinsrestorer.api.exception.DataRequestException;
 import net.skinsrestorer.api.property.SkinProperty;
 import net.skinsrestorer.api.storage.PlayerStorage;
-import net.skinsrestorer.api.storage.SkinStorage;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -58,10 +58,15 @@ public class DatabaseManager {
 
     private volatile SkinsRestorer skinsRestorer;
     private volatile PlayerStorage playerStorage;
-    private volatile SkinStorage skinStorage;
     private final AtomicBoolean srSubscribed = new AtomicBoolean(false);
 
+    // Быстрый кеш: что уже применилось (событие)
     private final ConcurrentHashMap<UUID, SkinInfo> appliedSkinCache = new ConcurrentHashMap<>();
+    // “Тяжёлый” кеш, который пересчитываем async (может ходить в storage / обновлять)
+    private volatile Map<UUID, SkinInfo> latestResolvedSkins = Map.of();
+
+    // фиксируем один раз (и не дёргаем Bukkit API из async)
+    private final boolean serverOnlineMode;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -69,6 +74,7 @@ public class DatabaseManager {
         this.accountsFile = new File(discordSrvFolder, "accounts.aof");
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
+        this.serverOnlineMode = plugin.getServer().getOnlineMode();
     }
 
     public void start() {
@@ -135,6 +141,12 @@ public class DatabaseManager {
             plugin.getLogManager().warn("usercache.json read failed: " + e.getMessage());
         }
 
+        // async пересчёт скинов через SkinsRestorer (без Bukkit API)
+        try {
+            rebuildSkinsAsync(latestLinks, latestUuidToName);
+        } catch (Throwable ignored) {
+        }
+
         if (rebuildQueued.compareAndSet(false, true)) {
             plugin.getFoliaLib().getScheduler().runNextTick(() -> {
                 try {
@@ -144,6 +156,45 @@ public class DatabaseManager {
                 }
             });
         }
+    }
+
+    private void rebuildSkinsAsync(List<AccountLink> links, Map<String, String> uuidToName) {
+        PlayerStorage ps = playerStorage;
+        if (ps == null || links == null || links.isEmpty()) {
+            latestResolvedSkins = Map.of();
+            return;
+        }
+
+        Map<UUID, SkinInfo> map = new HashMap<>();
+
+        for (AccountLink link : links) {
+            String name = externalNickByDiscordId.get(link.discordId);
+            if (name == null) name = uuidToName.get(link.uuid.toString());
+            if (name == null || name.isBlank()) continue;
+
+            // сначала — быстрый кеш (событие)
+            SkinInfo already = appliedSkinCache.get(link.uuid);
+            if (already != null) {
+                map.put(link.uuid, already);
+                continue;
+            }
+
+            try {
+                SkinProperty prop = ps.getSkinOfPlayer(link.uuid).orElse(null);
+                if (prop == null) {
+                    // “что будет на join” (может обновить протухший кеш)
+                    prop = ps.getSkinForPlayer(link.uuid, name, serverOnlineMode).orElse(null);
+                }
+
+                SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer_storage");
+                if (si != null) map.put(link.uuid, si);
+            } catch (DataRequestException ignored) {
+                // сеть/провайдеры могут быть недоступны — просто пропускаем
+            } catch (Throwable ignored) {
+            }
+        }
+
+        latestResolvedSkins = Collections.unmodifiableMap(map);
     }
 
     private void rebuildSync() {
@@ -186,7 +237,7 @@ public class DatabaseManager {
         if (name == null) name = off.getName();
         if (name == null) name = "Unknown";
 
-        SkinInfo skin = resolveSkin(uuid, name, off.isOnline());
+        SkinInfo skin = resolveSkin(uuid, name);
 
         JsonObject obj = new JsonObject();
         obj.addProperty("id", discordId);
@@ -211,7 +262,8 @@ public class DatabaseManager {
         obj.addProperty("is_whitelisted", off.isWhitelisted());
 
         obj.addProperty("skin_texture_id", skin.textureId);
-        obj.addProperty("skin_url", skin.url);
+        obj.addProperty("skin_url", skin.avatarUrl);
+        obj.addProperty("skin_texture_url", skin.textureUrl);
         obj.addProperty("skin_source", skin.source);
 
         if (hasPlayed) {
@@ -221,6 +273,89 @@ public class DatabaseManager {
         }
 
         return obj;
+    }
+
+    private void ensureSkinsRestorerHook() {
+        if (skinsRestorer != null && playerStorage != null) return;
+
+        Plugin srPlugin = Bukkit.getPluginManager().getPlugin("SkinsRestorer");
+        if (srPlugin == null || !srPlugin.isEnabled()) return;
+
+        try {
+            SkinsRestorer sr = SkinsRestorerProvider.get();
+            skinsRestorer = sr;
+            playerStorage = sr.getPlayerStorage();
+
+            if (srSubscribed.compareAndSet(false, true)) {
+                sr.getEventBus().subscribe(plugin, SkinApplyEvent.class, event -> {
+                    try {
+                        Player pl = event.getPlayer(Player.class);
+                        if (pl == null) return;
+
+                        SkinProperty prop = event.getProperty();
+                        SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer_event");
+                        if (si == null) return;
+
+                        appliedSkinCache.put(pl.getUniqueId(), si);
+                    } catch (Throwable ignored) {
+                    }
+                });
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private SkinInfo resolveSkin(UUID uuid, String name) {
+        SkinInfo cached = appliedSkinCache.get(uuid);
+        if (cached != null) return cached;
+
+        SkinInfo resolved = latestResolvedSkins.get(uuid);
+        if (resolved != null) return resolved;
+
+        // последнее “безопасное” — попытка локально взять привязанный скин (обычно без сети)
+        PlayerStorage ps = playerStorage;
+        if (ps != null) {
+            try {
+                SkinProperty prop = ps.getSkinOfPlayer(uuid).orElse(null);
+                SkinInfo si = skinInfoFromProperty(prop, "skinsrestorer_linked_only");
+                if (si != null) return si;
+            } catch (Throwable ignored) {
+            }
+        }
+
+        // fallback
+        String fallback = (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) ? "MHF_Steve" : name;
+        String avatar = mcHeadsAvatarUrl(fallback);
+        return new SkinInfo(fallback, avatar, "", "fallback");
+    }
+
+    private static SkinInfo skinInfoFromProperty(SkinProperty prop, String source) {
+        if (prop == null) return null;
+
+        String hash;
+        try {
+            hash = PropertyUtils.getSkinTextureHash(prop);
+        } catch (Throwable t) {
+            return null;
+        }
+        if (hash == null || hash.isBlank()) return null;
+
+        String textureUrl = "";
+        try {
+            textureUrl = PropertyUtils.getSkinTextureUrl(prop);
+        } catch (Throwable ignored) {
+        }
+        if (textureUrl == null || textureUrl.isBlank()) {
+            textureUrl = "https://textures.minecraft.net/texture/" + hash;
+        }
+
+        String avatarUrl = mcHeadsAvatarUrl(hash);
+        return new SkinInfo(hash, avatarUrl, textureUrl, source);
+    }
+
+    private static String mcHeadsAvatarUrl(String textureOrName) {
+        // mc-heads поддерживает и ник, и textureId. Формат из доки SR: /avatar/%texture_id%/%size%.png
+        return "https://mc-heads.net/avatar/" + textureOrName + "/64.png";
     }
 
     private JsonObject buildInterestingStats(OfflinePlayer p) {
@@ -369,119 +504,6 @@ public class DatabaseManager {
         stats.addProperty("favorite_used", "");
 
         return stats;
-    }
-
-    private void ensureSkinsRestorerHook() {
-        if (skinsRestorer != null && playerStorage != null && skinStorage != null) return;
-
-        Plugin srPlugin = Bukkit.getPluginManager().getPlugin("SkinsRestorer");
-        if (srPlugin == null || !srPlugin.isEnabled()) return;
-
-        try {
-            SkinsRestorer sr = SkinsRestorerProvider.get();
-            skinsRestorer = sr;
-            playerStorage = sr.getPlayerStorage();
-            skinStorage = sr.getSkinStorage();
-
-            if (srSubscribed.compareAndSet(false, true)) {
-                sr.getEventBus().subscribe(plugin, SkinApplyEvent.class, event -> {
-                    try {
-                        Player pl = event.getPlayer(Player.class);
-                        if (pl == null) return;
-
-                        SkinProperty prop = event.getProperty();
-                        String hash = extractTextureHash(prop);
-                        if (hash == null || hash.isBlank()) return;
-
-                        appliedSkinCache.put(pl.getUniqueId(), new SkinInfo(hash, "https://mc-heads.net/avatar/" + hash + ".png", "skinsrestorer_event"));
-                    } catch (Throwable ignored) {
-                    }
-                });
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private SkinInfo resolveSkin(UUID uuid, String name, boolean online) {
-        SkinInfo cached = appliedSkinCache.get(uuid);
-        if (cached != null) return cached;
-
-        String fallbackSteve = "MHF_Steve";
-
-        PlayerStorage ps = playerStorage;
-        SkinStorage ss = skinStorage;
-
-        if (ps != null && ss != null) {
-            try {
-                Optional<SkinIdentifier> idOpt = ps.getSkinIdOfPlayer(uuid);
-                SkinProperty prop = null;
-
-                if (idOpt.isPresent()) {
-                    prop = ss.getSkinDataByIdentifier(idOpt.get()).orElse(null);
-                    if (prop != null) {
-                        String hash = extractTextureHash(prop);
-                        if (hash != null && !hash.isBlank()) {
-                            SkinInfo si = new SkinInfo(hash, "https://mc-heads.net/avatar/" + hash + ".png", "skinsrestorer_storage");
-                            appliedSkinCache.put(uuid, si);
-                            return si;
-                        }
-                    }
-                }
-
-                boolean serverOnlineMode = plugin.getServer().getOnlineMode();
-                Optional<SkinIdentifier> joinId = ps.getSkinIdForPlayer(uuid, name, serverOnlineMode);
-                if (joinId.isPresent()) {
-                    prop = ss.getSkinDataByIdentifier(joinId.get()).orElse(null);
-                    if (prop != null) {
-                        String hash = extractTextureHash(prop);
-                        if (hash != null && !hash.isBlank()) {
-                            SkinInfo si = new SkinInfo(hash, "https://mc-heads.net/avatar/" + hash + ".png", "skinsrestorer_joincalc");
-                            appliedSkinCache.put(uuid, si);
-                            return si;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-
-        if (name == null || name.isBlank() || name.equalsIgnoreCase("Unknown")) {
-            return new SkinInfo(fallbackSteve, "https://mc-heads.net/avatar/" + fallbackSteve + ".png", "steve");
-        }
-
-        return new SkinInfo(name, "https://mc-heads.net/avatar/" + name + ".png", "name_fallback");
-    }
-
-    private String extractTextureHash(SkinProperty prop) {
-        if (prop == null) return null;
-
-        String hash = null;
-        try {
-            hash = PropertyUtils.getSkinTextureHash(prop);
-        } catch (Throwable ignored) {
-        }
-
-        if (hash != null && !hash.isBlank()) return hash;
-
-        try {
-            String url = PropertyUtils.getSkinTextureUrl(prop);
-            if (url != null && !url.isBlank()) {
-                int idx = url.lastIndexOf('/');
-                if (idx >= 0 && idx + 1 < url.length()) return url.substring(idx + 1);
-            }
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            String url2 = PropertyUtils.getSkinTextureUrl(prop.getValue());
-            if (url2 != null && !url2.isBlank()) {
-                int idx = url2.lastIndexOf('/');
-                if (idx >= 0 && idx + 1 < url2.length()) return url2.substring(idx + 1);
-            }
-        } catch (Throwable ignored) {
-        }
-
-        return null;
     }
 
     private boolean updateExternalFromHttp() throws IOException {
@@ -662,7 +684,7 @@ public class DatabaseManager {
     private record AccountLink(String discordId, UUID uuid) {
     }
 
-    private record SkinInfo(String textureId, String url, String source) {
+    private record SkinInfo(String textureId, String avatarUrl, String textureUrl, String source) {
     }
 
     private interface LongSupplierEx {
@@ -706,3 +728,4 @@ public class DatabaseManager {
         }
     }
 }
+
