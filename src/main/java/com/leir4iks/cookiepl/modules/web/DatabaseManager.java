@@ -177,6 +177,8 @@ public class DatabaseManager {
 
         Map<UUID, SkinInfo> map = new HashMap<>();
 
+        Map<UUID, SkinInfo> fromDatabase = resolveSkinsFromSkinsRestorerDatabase(links);
+
         for (AccountLink link : links) {
             String preferredName = externalNickByDiscordId.get(link.discordId);
             String cacheName = uuidToName.get(link.uuid.toString());
@@ -189,6 +191,19 @@ public class DatabaseManager {
             String skinId = firstValidMinecraftName(preferredName, cacheName, offlineName);
             if (skinId == null || skinId.isBlank()) skinId = "MHF_Steve";
 
+            SkinInfo resolved = fromDatabase.get(link.uuid);
+            if (resolved == null && playerStorage != null) {
+                resolved = skinInfoFromProperty(tryGetSkinByUuid(playerStorage, link.uuid), "skinsrestorer-uuid", skinId);
+                if (resolved == null) {
+                    resolved = resolveSkinFromSkinsRestorerIdentifier(link.uuid, skinId);
+                }
+            }
+
+            if (resolved != null) {
+                map.put(link.uuid, resolved);
+                continue;
+            }
+
             SkinInfo si = new SkinInfo(
                     skinId,
                     mcHeadsAvatarUrl(skinId),
@@ -200,6 +215,166 @@ public class DatabaseManager {
         }
 
         latestResolvedSkins = Collections.unmodifiableMap(map);
+    }
+
+    private Map<UUID, SkinInfo> resolveSkinsFromSkinsRestorerDatabase(List<AccountLink> links) {
+        if (skinsRestorerJdbcUrl == null || skinsRestorerJdbcUrl.isBlank() || links == null || links.isEmpty()) {
+            return Map.of();
+        }
+
+        Set<String> wanted = new HashSet<>();
+        for (AccountLink link : links) {
+            wanted.add(link.uuid.toString().toLowerCase(Locale.ROOT));
+            wanted.add(link.uuid.toString().replace("-", "").toLowerCase(Locale.ROOT));
+        }
+
+        try (Connection connection = DriverManager.getConnection(skinsRestorerJdbcUrl)) {
+            DatabaseMetaData metaData = connection.getMetaData();
+            Map<String, Set<String>> tableColumns = readTableColumns(metaData);
+
+            String playersTable = pickPlayersTable(tableColumns);
+            String skinsTable = pickSkinsTable(tableColumns);
+            if (playersTable == null || skinsTable == null) return Map.of();
+
+            String playerUuidColumn = pickFirst(tableColumns.get(playersTable), "uuid", "player_uuid", "uniqueid", "playeruniqueid");
+            String playerSkinColumn = pickFirst(tableColumns.get(playersTable), "skin_identifier", "skinidentifier", "skin_id", "skinid", "identifier");
+
+            String skinIdentifierColumn = pickFirst(tableColumns.get(skinsTable), "identifier", "skin_identifier", "skinidentifier", "skin_id", "skinid", "name");
+            String skinValueColumn = pickFirst(tableColumns.get(skinsTable), "value", "texture", "property_value", "data");
+            String skinUrlColumn = pickFirst(tableColumns.get(skinsTable), "url", "texture_url", "skin_url");
+            String skinHashColumn = pickFirst(tableColumns.get(skinsTable), "hash", "texture_id", "texture_hash");
+
+            if (playerUuidColumn == null || playerSkinColumn == null || skinIdentifierColumn == null) return Map.of();
+
+            Map<String, String> uuidToIdentifier = new HashMap<>();
+            String playersSql = "SELECT `" + playerUuidColumn + "`, `" + playerSkinColumn + "` FROM `" + playersTable + "`";
+            try (PreparedStatement ps = connection.prepareStatement(playersSql);
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String rawUuid = rs.getString(1);
+                    String rawIdentifier = rs.getString(2);
+                    if (rawUuid == null || rawIdentifier == null || rawIdentifier.isBlank()) continue;
+                    String normalizedUuid = normalizeUuid(rawUuid);
+                    if (normalizedUuid == null) continue;
+                    if (!wanted.contains(normalizedUuid) && !wanted.contains(normalizedUuid.replace("-", ""))) continue;
+                    uuidToIdentifier.put(normalizedUuid, rawIdentifier);
+                }
+            }
+
+            if (uuidToIdentifier.isEmpty()) return Map.of();
+
+            Map<String, SkinInfo> identifierToSkin = new HashMap<>();
+            StringBuilder skinSql = new StringBuilder("SELECT `" + skinIdentifierColumn + "`");
+            if (skinValueColumn != null) skinSql.append(", `").append(skinValueColumn).append("`");
+            if (skinUrlColumn != null) skinSql.append(", `").append(skinUrlColumn).append("`");
+            if (skinHashColumn != null) skinSql.append(", `").append(skinHashColumn).append("`");
+            skinSql.append(" FROM `").append(skinsTable).append("`");
+
+            try (PreparedStatement ps = connection.prepareStatement(skinSql.toString());
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String identifier = rs.getString(1);
+                    if (identifier == null || identifier.isBlank()) continue;
+
+                    String value = skinValueColumn == null ? null : rs.getString(skinValueColumn);
+                    String textureUrl = skinUrlColumn == null ? null : rs.getString(skinUrlColumn);
+                    String hash = skinHashColumn == null ? null : rs.getString(skinHashColumn);
+
+                    SkinInfo skin = skinInfoFromDatabaseData(identifier, value, textureUrl, hash);
+                    if (skin != null) identifierToSkin.put(identifier, skin);
+                }
+            }
+
+            Map<UUID, SkinInfo> output = new HashMap<>();
+            for (AccountLink link : links) {
+                String identifier = uuidToIdentifier.get(link.uuid.toString().toLowerCase(Locale.ROOT));
+                if (identifier == null) continue;
+                SkinInfo skin = identifierToSkin.get(identifier);
+                if (skin != null) output.put(link.uuid, skin);
+            }
+
+            return output;
+        } catch (Throwable ignored) {
+            return Map.of();
+        }
+    }
+
+    private static SkinInfo skinInfoFromDatabaseData(String identifier, String propertyValue, String textureUrl, String hash) {
+        String resolvedTextureUrl = (textureUrl == null) ? "" : textureUrl.trim();
+        String resolvedHash = (hash == null) ? "" : hash.trim();
+
+        if ((resolvedTextureUrl.isEmpty() || !resolvedTextureUrl.contains("/texture/")) && propertyValue != null && !propertyValue.isBlank()) {
+            String decodedUrl = decodeTextureUrlFromEncodedProperty(propertyValue.trim());
+            if (!decodedUrl.isBlank()) resolvedTextureUrl = decodedUrl;
+        }
+
+        if (resolvedHash.isEmpty()) {
+            String extracted = extractTextureHash(resolvedTextureUrl);
+            if (extracted != null && !extracted.isBlank()) resolvedHash = extracted;
+        }
+
+        if (resolvedHash.isEmpty() && identifier != null && !identifier.isBlank()) {
+            String candidate = firstValidMinecraftName(identifier);
+            if (candidate != null) resolvedHash = candidate;
+        }
+
+        if (resolvedHash.isEmpty()) return null;
+
+        if (resolvedTextureUrl.isEmpty()) {
+            resolvedTextureUrl = "https://textures.minecraft.net/texture/" + resolvedHash;
+        }
+
+        return new SkinInfo(resolvedHash, mcHeadsAvatarUrl(resolvedHash), resolvedTextureUrl, "skinsrestorer-db");
+    }
+
+    private static Map<String, Set<String>> readTableColumns(DatabaseMetaData metaData) throws Exception {
+        Map<String, Set<String>> tableColumns = new HashMap<>();
+        try (ResultSet tables = metaData.getTables(null, null, "%", new String[]{"TABLE"})) {
+            while (tables.next()) {
+                String tableName = tables.getString("TABLE_NAME");
+                if (tableName == null || tableName.isBlank()) continue;
+
+                Set<String> cols = new HashSet<>();
+                try (ResultSet columns = metaData.getColumns(null, null, tableName, "%")) {
+                    while (columns.next()) {
+                        String col = columns.getString("COLUMN_NAME");
+                        if (col != null) cols.add(col.toLowerCase(Locale.ROOT));
+                    }
+                }
+                tableColumns.put(tableName, cols);
+            }
+        }
+        return tableColumns;
+    }
+
+    private static String pickPlayersTable(Map<String, Set<String>> tableColumns) {
+        for (Map.Entry<String, Set<String>> entry : tableColumns.entrySet()) {
+            Set<String> cols = entry.getValue();
+            if (cols == null) continue;
+            boolean hasUuid = cols.contains("uuid") || cols.contains("player_uuid") || cols.contains("uniqueid") || cols.contains("playeruniqueid");
+            boolean hasSkinRef = cols.contains("skin_identifier") || cols.contains("skinidentifier") || cols.contains("skin_id") || cols.contains("skinid") || cols.contains("identifier");
+            if (hasUuid && hasSkinRef) return entry.getKey();
+        }
+        return null;
+    }
+
+    private static String pickSkinsTable(Map<String, Set<String>> tableColumns) {
+        for (Map.Entry<String, Set<String>> entry : tableColumns.entrySet()) {
+            Set<String> cols = entry.getValue();
+            if (cols == null) continue;
+            boolean hasIdentifier = cols.contains("identifier") || cols.contains("skin_identifier") || cols.contains("skinidentifier") || cols.contains("skin_id") || cols.contains("skinid") || cols.contains("name");
+            boolean hasTexturePayload = cols.contains("value") || cols.contains("texture") || cols.contains("property_value") || cols.contains("url") || cols.contains("texture_url") || cols.contains("hash") || cols.contains("texture_hash");
+            if (hasIdentifier && hasTexturePayload) return entry.getKey();
+        }
+        return null;
+    }
+
+    private static String pickFirst(Set<String> haystack, String... candidates) {
+        if (haystack == null || haystack.isEmpty()) return null;
+        for (String candidate : candidates) {
+            if (haystack.contains(candidate)) return candidate;
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")
@@ -1020,4 +1195,3 @@ public class DatabaseManager {
         long getAsLong();
     }
 }
-
