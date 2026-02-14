@@ -175,20 +175,9 @@ public class DatabaseManager {
             return;
         }
 
-        PlayerStorage ps = playerStorage;
-        Map<UUID, SkinInfo> previous = latestResolvedSkins;
-        Map<UUID, SkinInfo> map = new HashMap<>(previous);
-
-        Map<UUID, SkinInfo> dbSkins = resolveSkinsFromSkinsRestorerDatabase(links, uuidToName);
-        map.putAll(dbSkins);
+        Map<UUID, SkinInfo> map = new HashMap<>();
 
         for (AccountLink link : links) {
-            if (map.containsKey(link.uuid)) continue;
-
-            long now = System.currentTimeMillis();
-            Long retryAfter = skinResolveRetryAfter.get(link.uuid);
-            if (retryAfter != null && now < retryAfter) continue;
-
             String preferredName = externalNickByDiscordId.get(link.discordId);
             String cacheName = uuidToName.get(link.uuid.toString());
             String offlineName = null;
@@ -197,166 +186,20 @@ public class DatabaseManager {
             } catch (Throwable ignored) {
             }
 
-            SkinInfo si = null;
-            if (ps != null) {
-                si = resolveSkinFromSkinsRestorer(ps, link.uuid, preferredName, cacheName, offlineName);
-            }
+            String skinId = firstValidMinecraftName(preferredName, cacheName, offlineName);
+            if (skinId == null || skinId.isBlank()) skinId = "MHF_Steve";
 
-            if (si == null) {
-                si = resolveSkinFromMojang(link.uuid);
-            }
+            SkinInfo si = new SkinInfo(
+                    skinId,
+                    mcHeadsAvatarUrl(skinId),
+                    "https://mc-heads.net/skin/" + skinId + ".png",
+                    "discordsrv-name"
+            );
 
-            if (si == null) {
-                si = resolveSkinFromMojangByName(firstValidMinecraftName(preferredName, cacheName, offlineName));
-            }
-
-            if (si != null) {
-                map.put(link.uuid, si);
-                skinResolveRetryAfter.remove(link.uuid);
-            } else {
-                skinResolveRetryAfter.put(link.uuid, now + 300_000L);
-            }
+            map.put(link.uuid, si);
         }
 
         latestResolvedSkins = Collections.unmodifiableMap(map);
-    }
-
-    private Map<UUID, SkinInfo> resolveSkinsFromSkinsRestorerDatabase(List<AccountLink> links, Map<String, String> uuidToName) {
-        if (skinsRestorerJdbcUrl == null || skinsRestorerJdbcUrl.isBlank() || links == null || links.isEmpty()) return Map.of();
-
-        Map<UUID, SkinInfo> out = new HashMap<>();
-
-        try (Connection conn = DriverManager.getConnection(skinsRestorerJdbcUrl)) {
-            DatabaseMetaData meta = conn.getMetaData();
-            Map<String, Set<String>> tableColumns = new HashMap<>();
-
-            try (ResultSet tables = meta.getTables(conn.getCatalog(), null, "%", new String[]{"TABLE"})) {
-                while (tables.next()) {
-                    String table = tables.getString("TABLE_NAME");
-                    Set<String> cols = new HashSet<>();
-                    try (ResultSet colsRs = meta.getColumns(conn.getCatalog(), null, table, "%")) {
-                        while (colsRs.next()) {
-                            cols.add(colsRs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
-                        }
-                    }
-                    tableColumns.put(table, cols);
-                }
-            }
-
-            String playersTable = null;
-            String playersUuidCol = null;
-            String playersSkinIdCol = null;
-
-            String skinsTable = null;
-            String skinsIdCol = null;
-            String skinsValueCol = null;
-            String skinsUrlCol = null;
-            String skinsHashCol = null;
-
-            for (Map.Entry<String, Set<String>> e : tableColumns.entrySet()) {
-                Set<String> c = e.getValue();
-                String uuidCol = pickFirst(c, "uuid", "player_uuid", "unique_id");
-                String skinIdCol = pickFirst(c, "skin_id", "skin_identifier", "skinidentifier", "identifier");
-                if (uuidCol != null && skinIdCol != null) {
-                    playersTable = e.getKey();
-                    playersUuidCol = uuidCol;
-                    playersSkinIdCol = skinIdCol;
-                    break;
-                }
-            }
-
-            for (Map.Entry<String, Set<String>> e : tableColumns.entrySet()) {
-                Set<String> c = e.getValue();
-                String idCol = pickFirst(c, "identifier", "skin_id", "skinidentifier");
-                String valueCol = pickFirst(c, "value", "texture_value", "property_value");
-                String urlCol = pickFirst(c, "url", "texture_url", "skin_url");
-                String hashCol = pickFirst(c, "hash", "texture_hash", "skin_hash", "texture_id");
-                if (idCol != null && (valueCol != null || urlCol != null || hashCol != null)) {
-                    skinsTable = e.getKey();
-                    skinsIdCol = idCol;
-                    skinsValueCol = valueCol;
-                    skinsUrlCol = urlCol;
-                    skinsHashCol = hashCol;
-                    break;
-                }
-            }
-
-            if (playersTable == null || skinsTable == null) return out;
-
-            List<UUID> uuids = new ArrayList<>();
-            for (AccountLink l : links) uuids.add(l.uuid);
-            String placeholders = String.join(",", Collections.nCopies(uuids.size(), "?"));
-
-            String sql = "SELECT p.`" + playersUuidCol + "` AS puuid"
-                    + (skinsValueCol != null ? ", s.`" + skinsValueCol + "` AS sval" : ", NULL AS sval")
-                    + (skinsUrlCol != null ? ", s.`" + skinsUrlCol + "` AS surl" : ", NULL AS surl")
-                    + (skinsHashCol != null ? ", s.`" + skinsHashCol + "` AS shash" : ", NULL AS shash")
-                    + " FROM `" + playersTable + "` p JOIN `" + skinsTable + "` s ON p.`" + playersSkinIdCol + "` = s.`" + skinsIdCol + "`"
-                    + " WHERE p.`" + playersUuidCol + "` IN (" + placeholders + ")";
-
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                for (int i = 0; i < uuids.size(); i++) ps.setString(i + 1, uuids.get(i).toString());
-
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        UUID uuid = normalizeDatabaseUuid(rs.getString("puuid"));
-                        if (uuid == null) continue;
-
-                        SkinInfo info = skinInfoFromDatabaseData(
-                                rs.getString("shash"),
-                                rs.getString("surl"),
-                                rs.getString("sval"),
-                                uuidToName.get(uuid.toString())
-                        );
-                        if (info != null) out.put(uuid, info);
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-
-        return out;
-    }
-
-    private static String pickFirst(Set<String> cols, String... names) {
-        for (String n : names) if (cols.contains(n)) return n;
-        return null;
-    }
-
-    private static UUID normalizeDatabaseUuid(String raw) {
-        String n = normalizeUuid(raw);
-        if (n == null) return null;
-        try {
-            return UUID.fromString(n);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static SkinInfo skinInfoFromDatabaseData(String hashRaw, String urlRaw, String valueRaw, String nameFallback) {
-        String textureUrl = urlRaw == null ? "" : urlRaw.trim();
-        String hash = hashRaw == null ? "" : hashRaw.trim();
-
-        if ((textureUrl.isBlank()) && valueRaw != null && !valueRaw.isBlank()) {
-            textureUrl = decodeTextureUrlFromEncodedProperty(valueRaw);
-        }
-
-        if ((hash.isBlank()) && textureUrl != null && !textureUrl.isBlank()) {
-            String extracted = extractTextureHash(textureUrl);
-            if (extracted != null) hash = extracted;
-        }
-
-        if (hash.isBlank() && (textureUrl == null || textureUrl.isBlank())) return null;
-
-        if (hash.isBlank()) {
-            hash = (nameFallback == null || nameFallback.isBlank()) ? "MHF_Steve" : nameFallback;
-        }
-
-        if (textureUrl == null || textureUrl.isBlank()) {
-            textureUrl = "https://textures.minecraft.net/texture/" + hash;
-        }
-
-        return new SkinInfo(hash, mcHeadsAvatarUrl(hash), textureUrl, "skinsrestorer-db");
     }
 
     @SuppressWarnings("unchecked")
