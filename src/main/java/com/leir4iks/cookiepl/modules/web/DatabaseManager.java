@@ -393,11 +393,25 @@ public class DatabaseManager {
     }
 
     private String getSkinUrlForPlayer(String playerName, String minecraftUuid) {
-        String textureId = "%skinsrestorer_texture_id_or_steve%";
-        try {
-            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-            textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, "%skinsrestorer_texture_id_or_steve%");
-        } catch (Exception ignored) {
+        String placeholder = "%skinsrestorer_texture_id_or_steve%";
+        String textureId = placeholder;
+
+        if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
+            try {
+                UUID uuid = UUID.fromString(minecraftUuid);
+                org.bukkit.entity.Player onlinePlayer = Bukkit.getPlayer(uuid);
+                if (onlinePlayer != null) {
+                    textureId = PlaceholderAPI.setPlaceholders(onlinePlayer, placeholder);
+                } else {
+                    OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(uuid);
+                    textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, placeholder);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (textureId == null || textureId.isBlank() || textureId.contains("%")) {
+            textureId = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
         }
 
         return "https://mc-heads.net/avatar/" + textureId + ".png";
