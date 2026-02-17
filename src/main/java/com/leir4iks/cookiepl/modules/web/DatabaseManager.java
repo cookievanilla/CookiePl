@@ -32,6 +32,8 @@ public class DatabaseManager {
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
+    private static final String STEVE_TEXTURE_FALLBACK = "steve";
+
     private final Map<String, String> skinUrlCache = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
@@ -240,23 +242,39 @@ public class DatabaseManager {
 
             if (player.hasPlayedBefore() || isOnline) {
                 JsonObject stats = new JsonObject();
-                long blocksBroken = 0;
-                long blocksPlaced = 0;
+                Map<Material, Integer> minedPerMaterial = new HashMap<>();
+                Map<Material, Integer> usedPerMaterial = new HashMap<>();
+                long blocksMinedTotal = 0;
+                long itemsUsedTotal = 0;
+                long itemsCraftedTotal = 0;
+                long itemsPickedUpTotal = 0;
+                long itemsDroppedTotal = 0;
 
                 for (Material m : Material.values()) {
-                    if (!m.isLegacy() && m.isBlock()) {
-                        try {
-                            blocksBroken += player.getStatistic(Statistic.MINE_BLOCK, m);
-                        } catch (Exception ignored) {}
-
-                        try {
-                            blocksPlaced += player.getStatistic(Statistic.USE_ITEM, m);
-                        } catch (Exception ignored) {}
+                    if (m.isLegacy()) {
+                        continue;
                     }
-                }
 
-                stats.addProperty("blocks_broken", blocksBroken);
-                stats.addProperty("blocks_placed", blocksPlaced);
+                    int mined = getMaterialStatistic(player, Statistic.MINE_BLOCK, m);
+                    int used = getMaterialStatistic(player, Statistic.USE_ITEM, m);
+                    int crafted = getMaterialStatistic(player, Statistic.CRAFT_ITEM, m);
+                    int pickedUp = getMaterialStatistic(player, Statistic.PICKUP, m);
+                    int dropped = getMaterialStatistic(player, Statistic.DROP, m);
+
+                    if (m.isBlock() && mined > 0) {
+                        minedPerMaterial.put(m, mined);
+                        blocksMinedTotal += mined;
+                    }
+
+                    if (used > 0) {
+                        usedPerMaterial.put(m, used);
+                        itemsUsedTotal += used;
+                    }
+
+                    itemsCraftedTotal += crafted;
+                    itemsPickedUpTotal += pickedUp;
+                    itemsDroppedTotal += dropped;
+                }
 
                 long playTimeTicks = 0;
                 try {
@@ -268,21 +286,78 @@ public class DatabaseManager {
 
                 long deaths = 0;
                 try { deaths = player.getStatistic(Statistic.DEATHS); } catch (Exception ignored) {}
-                stats.addProperty("deaths", deaths);
-
                 long playerKills = 0;
                 try { playerKills = player.getStatistic(Statistic.PLAYER_KILLS); } catch (Exception ignored) {}
-                stats.addProperty("player_kills", playerKills);
 
                 long mobKills = 0;
                 try { mobKills = player.getStatistic(Statistic.MOB_KILLS); } catch (Exception ignored) {}
-                stats.addProperty("mob_kills", mobKills);
 
                 int leaves = 0;
                 try { leaves = player.getStatistic(Statistic.LEAVE_GAME); } catch (Exception ignored) {}
 
                 int joins = isOnline ? leaves + 1 : leaves;
                 stats.addProperty("joins", joins);
+
+                stats.addProperty("deaths", deaths);
+
+                JsonObject kills = new JsonObject();
+                kills.addProperty("players", playerKills);
+                kills.addProperty("mobs", mobKills);
+                stats.add("kills", kills);
+
+                JsonObject damage = new JsonObject();
+                damage.addProperty("dealt", getSimpleStatistic(player, Statistic.DAMAGE_DEALT));
+                damage.addProperty("taken", getSimpleStatistic(player, Statistic.DAMAGE_TAKEN));
+                stats.add("damage", damage);
+
+                JsonObject distance = new JsonObject();
+                long walkCm = getSimpleStatistic(player, Statistic.WALK_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.SPRINT_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.CROUCH_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.CLIMB_ONE_CM);
+                long flyCm = getSimpleStatistic(player, Statistic.AVIATE_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.FLY_ONE_CM);
+                long swimCm = getSimpleStatistic(player, Statistic.SWIM_ONE_CM);
+                long totalCm = walkCm + flyCm + swimCm
+                        + getSimpleStatistic(player, Statistic.BOAT_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.MINECART_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.HORSE_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.PIG_ONE_CM)
+                        + getSimpleStatistic(player, Statistic.STRIDER_ONE_CM);
+                distance.addProperty("total_km", roundOne(cmToKm(totalCm)));
+                distance.addProperty("walk_km", roundOne(cmToKm(walkCm)));
+                distance.addProperty("fly_km", roundOne(cmToKm(flyCm)));
+                distance.addProperty("swim_km", roundOne(cmToKm(swimCm)));
+                stats.add("distance", distance);
+
+                JsonObject blocks = new JsonObject();
+                blocks.addProperty("mined_total", blocksMinedTotal);
+                stats.add("blocks", blocks);
+
+                JsonObject items = new JsonObject();
+                items.addProperty("used_total", itemsUsedTotal);
+                items.addProperty("crafted_total", itemsCraftedTotal);
+                items.addProperty("picked_up_total", itemsPickedUpTotal);
+                items.addProperty("dropped_total", itemsDroppedTotal);
+                stats.add("items", items);
+
+                JsonObject fun = new JsonObject();
+                fun.addProperty("jumps", getSimpleStatistic(player, Statistic.JUMP));
+                fun.addProperty("animals_bred", getSimpleStatistic(player, Statistic.ANIMALS_BRED));
+                fun.addProperty("fish_caught", getSimpleStatistic(player, Statistic.FISH_CAUGHT));
+                fun.addProperty("villager_trades", getSimpleStatistic(player, Statistic.TRADED_WITH_VILLAGER));
+                fun.addProperty("enchantments", getSimpleStatistic(player, Statistic.ITEM_ENCHANTED));
+                stats.add("fun", fun);
+
+                JsonObject top = new JsonObject();
+                JsonArray topMined = getTopMaterials(minedPerMaterial);
+                JsonArray topUsed = getTopMaterials(usedPerMaterial);
+                top.add("mined", topMined);
+                top.add("used", topUsed);
+                stats.add("top", top);
+
+                stats.addProperty("favorite_mined", getFavoriteMaterialName(topMined));
+                stats.addProperty("favorite_used", getFavoriteMaterialName(topUsed));
 
                 return stats;
             }
@@ -293,36 +368,76 @@ public class DatabaseManager {
 
     private JsonObject getEmptyStats() {
         JsonObject stats = new JsonObject();
-        stats.addProperty("blocks_broken", 0);
-        stats.addProperty("blocks_placed", 0);
         stats.addProperty("play_time_hours", 0);
-        stats.addProperty("deaths", 0);
-        stats.addProperty("player_kills", 0);
-        stats.addProperty("mob_kills", 0);
         stats.addProperty("joins", 0);
+        stats.addProperty("deaths", 0);
+
+        JsonObject kills = new JsonObject();
+        kills.addProperty("players", 0);
+        kills.addProperty("mobs", 0);
+        stats.add("kills", kills);
+
+        JsonObject damage = new JsonObject();
+        damage.addProperty("dealt", 0);
+        damage.addProperty("taken", 0);
+        stats.add("damage", damage);
+
+        JsonObject distance = new JsonObject();
+        distance.addProperty("total_km", 0);
+        distance.addProperty("walk_km", 0);
+        distance.addProperty("fly_km", 0);
+        distance.addProperty("swim_km", 0);
+        stats.add("distance", distance);
+
+        JsonObject blocks = new JsonObject();
+        blocks.addProperty("mined_total", 0);
+        stats.add("blocks", blocks);
+
+        JsonObject items = new JsonObject();
+        items.addProperty("used_total", 0);
+        items.addProperty("crafted_total", 0);
+        items.addProperty("picked_up_total", 0);
+        items.addProperty("dropped_total", 0);
+        stats.add("items", items);
+
+        JsonObject fun = new JsonObject();
+        fun.addProperty("jumps", 0);
+        fun.addProperty("animals_bred", 0);
+        fun.addProperty("fish_caught", 0);
+        fun.addProperty("villager_trades", 0);
+        fun.addProperty("enchantments", 0);
+        stats.add("fun", fun);
+
+        JsonObject top = new JsonObject();
+        top.add("mined", new JsonArray());
+        top.add("used", new JsonArray());
+        stats.add("top", top);
+
+        stats.addProperty("favorite_mined", "");
+        stats.addProperty("favorite_used", "");
+
         return stats;
     }
 
-    private String getSkinUrlForPlayer(String playerName, String fallbackUuid) {
-        if (playerName == null || playerName.equals("Unknown")) {
-            return "https://mc-heads.net/avatar/MHF_Steve.png";
-        }
-
-        String cached = skinUrlCache.get(playerName);
+    private String getSkinUrlForPlayer(String playerName, String minecraftUuid) {
+        String cacheKey = minecraftUuid == null ? String.valueOf(playerName) : minecraftUuid;
+        String cached = skinUrlCache.get(cacheKey);
         if (cached != null) {
             return cached;
         }
 
-        String skinUrl = findCustomSkin(playerName);
-        if (skinUrl == null) {
-            skinUrl = "https://mc-heads.net/avatar/" + playerName + ".png";
+        String textureId = findCustomSkinTextureId(playerName, minecraftUuid);
+        if (textureId == null || textureId.isBlank()) {
+            textureId = STEVE_TEXTURE_FALLBACK;
         }
 
-        skinUrlCache.put(playerName, skinUrl);
+        String skinUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
+
+        skinUrlCache.put(cacheKey, skinUrl);
         return skinUrl;
     }
 
-    private String findCustomSkin(String playerName) {
+    private String findCustomSkinTextureId(String playerName, String minecraftUuid) {
         File[] files = skinsRestorerFolder.listFiles((dir, name) -> name.endsWith(".playerskin"));
         if (files == null) {
             return null;
@@ -333,22 +448,29 @@ public class DatabaseManager {
                 String content = Files.readString(file.toPath());
                 JsonObject json = JsonParser.parseString(content).getAsJsonObject();
 
-                if (json.has("lastKnownName")) {
+                boolean nameMatches = false;
+                if (json.has("lastKnownName") && playerName != null) {
                     String nameInFile = json.get("lastKnownName").getAsString();
-                    if (nameInFile.equalsIgnoreCase(playerName)) {
-                        if (json.has("value")) {
-                            String valueBase64 = json.get("value").getAsString();
-                            String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
-                            JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
+                    nameMatches = nameInFile.equalsIgnoreCase(playerName);
+                }
 
-                            if (textureJson.has("textures")) {
-                                JsonObject textures = textureJson.getAsJsonObject("textures");
-                                if (textures.has("SKIN")) {
-                                    String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
-                                    String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
-                                    return "https://mc-heads.net/avatar/" + textureId + ".png";
-                                }
-                            }
+                boolean uuidMatches = false;
+                if (json.has("playerUniqueId") && minecraftUuid != null) {
+                    String uuidInFile = json.get("playerUniqueId").getAsString();
+                    uuidMatches = uuidInFile.equalsIgnoreCase(minecraftUuid);
+                }
+
+                if ((nameMatches || uuidMatches) && json.has("value")) {
+                    String valueBase64 = json.get("value").getAsString();
+                    String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
+                    JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
+
+                    if (textureJson.has("textures")) {
+                        JsonObject textures = textureJson.getAsJsonObject("textures");
+                        if (textures.has("SKIN")) {
+                            String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
+                            String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
+                            return textureId;
                         }
                     }
                 }
@@ -357,6 +479,53 @@ public class DatabaseManager {
             }
         }
         return null;
+    }
+
+    private int getSimpleStatistic(OfflinePlayer player, Statistic statistic) {
+        try {
+            return player.getStatistic(statistic);
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private int getMaterialStatistic(OfflinePlayer player, Statistic statistic, Material material) {
+        try {
+            return player.getStatistic(statistic, material);
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private JsonArray getTopMaterials(Map<Material, Integer> source) {
+        JsonArray top = new JsonArray();
+        source.entrySet().stream()
+                .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                .limit(5)
+                .forEach(entry -> {
+                    JsonObject item = new JsonObject();
+                    item.addProperty("material", entry.getKey().name().toLowerCase(Locale.ROOT));
+                    item.addProperty("count", entry.getValue());
+                    top.add(item);
+                });
+        return top;
+    }
+
+    private String getFavoriteMaterialName(JsonArray topMaterials) {
+        if (topMaterials.isEmpty()) {
+            return "";
+        }
+
+        JsonObject favorite = topMaterials.get(0).getAsJsonObject();
+        return favorite.has("material") ? favorite.get("material").getAsString() : "";
+    }
+
+    private double roundOne(double value) {
+        return Math.round(value * 10.0) / 10.0;
+    }
+
+    private double cmToKm(long centimeters) {
+        return centimeters / 100000.0;
     }
 
     private Map<String, String> loadUserCache() {
