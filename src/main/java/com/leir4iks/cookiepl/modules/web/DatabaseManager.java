@@ -32,7 +32,7 @@ public class DatabaseManager {
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
-    private static final String STEVE_TEXTURE_FALLBACK = "steve";
+    private static final String STEVE_TEXTURE_FALLBACK = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
 
     private final Map<String, String> skinUrlCache = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
@@ -48,6 +48,7 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
+        updatePlayersCache();
 
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
             updateExternalData();
@@ -171,8 +172,18 @@ public class DatabaseManager {
     }
 
     public String getPlayerJsonById(String discordId) {
+        updatePlayersCache();
+
         if (playersCache.containsKey(discordId)) {
             return playersCache.get(discordId).toString();
+        }
+
+        for (JsonObject playerData : playersCache.values()) {
+            String minecraftName = playerData.has("minecraft_name") ? playerData.get("minecraft_name").getAsString() : "";
+            String minecraftUuid = playerData.has("minecraft_uuid") ? playerData.get("minecraft_uuid").getAsString() : "";
+            if (discordId.equalsIgnoreCase(minecraftName) || discordId.equalsIgnoreCase(minecraftUuid)) {
+                return playerData.toString();
+            }
         }
 
         Map<String, String> userCacheMap = loadUserCache();
