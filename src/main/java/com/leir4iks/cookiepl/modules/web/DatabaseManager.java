@@ -394,25 +394,11 @@ public class DatabaseManager {
         final String steveTextureId = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
 
         String textureId = resolveTextureIdSync(minecraftUuid);
-        boolean resolvedTextureId = textureId != null
-                && !textureId.isBlank()
-                && !textureId.contains("%")
-                && !"Error".equalsIgnoreCase(textureId)
-                && !steveTextureId.equalsIgnoreCase(textureId);
-
-        if (resolvedTextureId) {
-            return "https://mc-heads.net/avatar/" + textureId + ".png";
+        if (textureId == null || textureId.isBlank() || textureId.contains("%") || "Error".equalsIgnoreCase(textureId)) {
+            textureId = steveTextureId;
         }
 
-        if (minecraftUuid != null && !minecraftUuid.isBlank()) {
-            return "https://mc-heads.net/avatar/" + minecraftUuid + ".png";
-        }
-
-        if (playerName != null && !playerName.isBlank() && !"Unknown".equalsIgnoreCase(playerName)) {
-            return "https://mc-heads.net/avatar/" + playerName + ".png";
-        }
-
-        return "https://mc-heads.net/avatar/" + steveTextureId + ".png";
+        return "https://mc-heads.net/avatar/" + textureId + ".png";
     }
 
     private String resolveTextureIdSync(String minecraftUuid) {
