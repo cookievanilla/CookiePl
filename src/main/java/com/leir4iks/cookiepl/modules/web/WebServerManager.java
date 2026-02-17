@@ -43,7 +43,7 @@ public class WebServerManager {
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runAsync(() -> {
+            plugin.getFoliaLib().getScheduler().runAsync(task -> {
                 updateCache();
                 cacheInitialized = true;
             });
