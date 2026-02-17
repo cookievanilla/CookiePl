@@ -7,9 +7,6 @@ import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.Bukkit;
-import org.bukkit.Material;
-import org.bukkit.OfflinePlayer;
-import org.bukkit.Statistic;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -20,9 +17,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 public class DatabaseManager {
 
@@ -187,7 +182,7 @@ public class DatabaseManager {
         if (playersCache.containsKey(discordId)) {
             JsonObject cachedPlayer = playersCache.get(discordId);
             String minecraftUuid = cachedPlayer.has("minecraft_uuid") ? cachedPlayer.get("minecraft_uuid").getAsString() : "";
-            JsonObject enriched = buildPlayerDataWithStats(discordId, minecraftUuid, userCacheMap);
+            JsonObject enriched = createPlayerData(discordId, minecraftUuid, userCacheMap, true);
             playersCache.put(discordId, enriched);
             return enriched.toString();
         }
@@ -197,7 +192,7 @@ public class DatabaseManager {
             String minecraftName = playerData.has("minecraft_name") ? playerData.get("minecraft_name").getAsString() : "";
             String minecraftUuid = playerData.has("minecraft_uuid") ? playerData.get("minecraft_uuid").getAsString() : "";
             if (discordId.equalsIgnoreCase(minecraftName) || discordId.equalsIgnoreCase(minecraftUuid)) {
-                JsonObject enriched = buildPlayerDataWithStats(entry.getKey(), minecraftUuid, userCacheMap);
+                JsonObject enriched = createPlayerData(entry.getKey(), minecraftUuid, userCacheMap, true);
                 playersCache.put(entry.getKey(), enriched);
                 return enriched.toString();
             }
@@ -213,7 +208,7 @@ public class DatabaseManager {
 
                     String[] parts = line.trim().split("\\s+");
                     if (parts.length >= 2 && parts[0].equals(discordId)) {
-                        JsonObject playerData = buildPlayerDataWithStats(parts[0], parts[1], userCacheMap);
+                        JsonObject playerData = createPlayerData(parts[0], parts[1], userCacheMap, true);
                         if (playerData != null) {
                             playersCache.put(discordId, playerData);
                             return playerData.toString();
@@ -247,155 +242,104 @@ public class DatabaseManager {
         playerData.addProperty("minecraft_uuid", minecraftUuid);
         playerData.addProperty("skin_url", skinUrl);
 
-        if (includeStats) {
-            OfflinePlayer player = null;
-            try {
-                player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-            } catch (Exception ignored) {}
-
-            if (player != null) {
-                playerData.addProperty("is_online", player.isOnline());
-                playerData.add("stats", getPlayerStatistics(player));
-            } else {
-                playerData.addProperty("is_online", false);
-                playerData.add("stats", getEmptyStats());
-            }
-        } else {
+        UUID uuid;
+        try {
+            uuid = UUID.fromString(minecraftUuid);
+        } catch (Exception e) {
             playerData.addProperty("is_online", false);
             playerData.add("stats", getEmptyStats());
+            return playerData;
         }
 
+        playerData.addProperty("is_online", Bukkit.getPlayer(uuid) != null);
+        playerData.add("stats", includeStats ? getPlayerStatistics(minecraftUuid) : getEmptyStats());
         return playerData;
     }
 
-    private JsonObject getPlayerStatistics(OfflinePlayer player) {
+    private JsonObject getPlayerStatistics(String minecraftUuid) {
+        File statsFile = findStatsFile(minecraftUuid);
+        if (statsFile == null || !statsFile.exists()) {
+            return getEmptyStats();
+        }
+
         try {
-            boolean isOnline = player.isOnline();
+            JsonObject root = JsonParser.parseString(Files.readString(statsFile.toPath())).getAsJsonObject();
+            JsonObject statsRoot = root.has("stats") && root.get("stats").isJsonObject()
+                    ? root.getAsJsonObject("stats") : new JsonObject();
+            JsonObject custom = getStatCategory(statsRoot, "minecraft:custom");
+            JsonObject mined = getStatCategory(statsRoot, "minecraft:mined");
+            JsonObject used = getStatCategory(statsRoot, "minecraft:used");
+            JsonObject crafted = getStatCategory(statsRoot, "minecraft:crafted");
+            JsonObject pickedUp = getStatCategory(statsRoot, "minecraft:picked_up");
+            JsonObject dropped = getStatCategory(statsRoot, "minecraft:dropped");
 
-            if (player.hasPlayedBefore() || isOnline) {
-                JsonObject stats = new JsonObject();
-                Map<Material, Integer> minedPerMaterial = new HashMap<>();
-                Map<Material, Integer> usedPerMaterial = new HashMap<>();
-                long blocksMinedTotal = 0;
-                long itemsUsedTotal = 0;
-                long itemsCraftedTotal = 0;
-                long itemsPickedUpTotal = 0;
-                long itemsDroppedTotal = 0;
+            JsonObject stats = new JsonObject();
+            stats.addProperty("play_time_hours", roundOne(getLong(custom, "minecraft:play_time") / 20.0 / 3600.0));
+            stats.addProperty("joins", getLong(custom, "minecraft:leave_game"));
+            stats.addProperty("deaths", getLong(custom, "minecraft:deaths"));
 
-                for (Material m : Material.values()) {
-                    if (m.isLegacy()) {
-                        continue;
-                    }
+            JsonObject kills = new JsonObject();
+            kills.addProperty("players", getLong(custom, "minecraft:player_kills"));
+            kills.addProperty("mobs", getLong(custom, "minecraft:mob_kills"));
+            stats.add("kills", kills);
 
-                    int mined = getMaterialStatistic(player, Statistic.MINE_BLOCK, m);
-                    int used = getMaterialStatistic(player, Statistic.USE_ITEM, m);
-                    int crafted = getMaterialStatistic(player, Statistic.CRAFT_ITEM, m);
-                    int pickedUp = getMaterialStatistic(player, Statistic.PICKUP, m);
-                    int dropped = getMaterialStatistic(player, Statistic.DROP, m);
+            JsonObject damage = new JsonObject();
+            damage.addProperty("dealt", getLong(custom, "minecraft:damage_dealt"));
+            damage.addProperty("taken", getLong(custom, "minecraft:damage_taken"));
+            stats.add("damage", damage);
 
-                    if (m.isBlock() && mined > 0) {
-                        minedPerMaterial.put(m, mined);
-                        blocksMinedTotal += mined;
-                    }
+            long walkCm = getLong(custom, "minecraft:walk_one_cm")
+                    + getLong(custom, "minecraft:sprint_one_cm")
+                    + getLong(custom, "minecraft:crouch_one_cm")
+                    + getLong(custom, "minecraft:climb_one_cm");
+            long flyCm = getLong(custom, "minecraft:aviate_one_cm") + getLong(custom, "minecraft:fly_one_cm");
+            long swimCm = getLong(custom, "minecraft:swim_one_cm");
+            long totalCm = walkCm + flyCm + swimCm
+                    + getLong(custom, "minecraft:boat_one_cm")
+                    + getLong(custom, "minecraft:minecart_one_cm")
+                    + getLong(custom, "minecraft:horse_one_cm")
+                    + getLong(custom, "minecraft:pig_one_cm")
+                    + getLong(custom, "minecraft:strider_one_cm");
 
-                    if (used > 0) {
-                        usedPerMaterial.put(m, used);
-                        itemsUsedTotal += used;
-                    }
+            JsonObject distance = new JsonObject();
+            distance.addProperty("total_km", roundOne(cmToKm(totalCm)));
+            distance.addProperty("walk_km", roundOne(cmToKm(walkCm)));
+            distance.addProperty("fly_km", roundOne(cmToKm(flyCm)));
+            distance.addProperty("swim_km", roundOne(cmToKm(swimCm)));
+            stats.add("distance", distance);
 
-                    itemsCraftedTotal += crafted;
-                    itemsPickedUpTotal += pickedUp;
-                    itemsDroppedTotal += dropped;
-                }
+            JsonObject blocks = new JsonObject();
+            blocks.addProperty("mined_total", sumCategory(mined));
+            stats.add("blocks", blocks);
 
-                long playTimeTicks = 0;
-                try {
-                    playTimeTicks = player.getStatistic(Statistic.PLAY_ONE_MINUTE);
-                } catch (Exception ignored) {}
+            JsonObject items = new JsonObject();
+            items.addProperty("used_total", sumCategory(used));
+            items.addProperty("crafted_total", sumCategory(crafted));
+            items.addProperty("picked_up_total", sumCategory(pickedUp));
+            items.addProperty("dropped_total", sumCategory(dropped));
+            stats.add("items", items);
 
-                double playTimeHours = playTimeTicks / 20.0 / 3600.0;
-                stats.addProperty("play_time_hours", Math.round(playTimeHours * 10.0) / 10.0);
+            JsonObject fun = new JsonObject();
+            fun.addProperty("jumps", getLong(custom, "minecraft:jump"));
+            fun.addProperty("animals_bred", getLong(custom, "minecraft:animals_bred"));
+            fun.addProperty("fish_caught", getLong(custom, "minecraft:fish_caught"));
+            fun.addProperty("villager_trades", getLong(custom, "minecraft:traded_with_villager"));
+            fun.addProperty("enchantments", getLong(custom, "minecraft:item_enchanted"));
+            stats.add("fun", fun);
 
-                long deaths = 0;
-                try { deaths = player.getStatistic(Statistic.DEATHS); } catch (Exception ignored) {}
-                long playerKills = 0;
-                try { playerKills = player.getStatistic(Statistic.PLAYER_KILLS); } catch (Exception ignored) {}
+            JsonArray topMined = getTopStatKeys(mined);
+            JsonArray topUsed = getTopStatKeys(used);
+            JsonObject top = new JsonObject();
+            top.add("mined", topMined);
+            top.add("used", topUsed);
+            stats.add("top", top);
 
-                long mobKills = 0;
-                try { mobKills = player.getStatistic(Statistic.MOB_KILLS); } catch (Exception ignored) {}
-
-                int leaves = 0;
-                try { leaves = player.getStatistic(Statistic.LEAVE_GAME); } catch (Exception ignored) {}
-
-                int joins = isOnline ? leaves + 1 : leaves;
-                stats.addProperty("joins", joins);
-
-                stats.addProperty("deaths", deaths);
-
-                JsonObject kills = new JsonObject();
-                kills.addProperty("players", playerKills);
-                kills.addProperty("mobs", mobKills);
-                stats.add("kills", kills);
-
-                JsonObject damage = new JsonObject();
-                damage.addProperty("dealt", getSimpleStatistic(player, Statistic.DAMAGE_DEALT));
-                damage.addProperty("taken", getSimpleStatistic(player, Statistic.DAMAGE_TAKEN));
-                stats.add("damage", damage);
-
-                JsonObject distance = new JsonObject();
-                long walkCm = getSimpleStatistic(player, Statistic.WALK_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.SPRINT_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.CROUCH_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.CLIMB_ONE_CM);
-                long flyCm = getSimpleStatistic(player, Statistic.AVIATE_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.FLY_ONE_CM);
-                long swimCm = getSimpleStatistic(player, Statistic.SWIM_ONE_CM);
-                long totalCm = walkCm + flyCm + swimCm
-                        + getSimpleStatistic(player, Statistic.BOAT_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.MINECART_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.HORSE_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.PIG_ONE_CM)
-                        + getSimpleStatistic(player, Statistic.STRIDER_ONE_CM);
-                distance.addProperty("total_km", roundOne(cmToKm(totalCm)));
-                distance.addProperty("walk_km", roundOne(cmToKm(walkCm)));
-                distance.addProperty("fly_km", roundOne(cmToKm(flyCm)));
-                distance.addProperty("swim_km", roundOne(cmToKm(swimCm)));
-                stats.add("distance", distance);
-
-                JsonObject blocks = new JsonObject();
-                blocks.addProperty("mined_total", blocksMinedTotal);
-                stats.add("blocks", blocks);
-
-                JsonObject items = new JsonObject();
-                items.addProperty("used_total", itemsUsedTotal);
-                items.addProperty("crafted_total", itemsCraftedTotal);
-                items.addProperty("picked_up_total", itemsPickedUpTotal);
-                items.addProperty("dropped_total", itemsDroppedTotal);
-                stats.add("items", items);
-
-                JsonObject fun = new JsonObject();
-                fun.addProperty("jumps", getSimpleStatistic(player, Statistic.JUMP));
-                fun.addProperty("animals_bred", getSimpleStatistic(player, Statistic.ANIMALS_BRED));
-                fun.addProperty("fish_caught", getSimpleStatistic(player, Statistic.FISH_CAUGHT));
-                fun.addProperty("villager_trades", getSimpleStatistic(player, Statistic.TRADED_WITH_VILLAGER));
-                fun.addProperty("enchantments", getSimpleStatistic(player, Statistic.ITEM_ENCHANTED));
-                stats.add("fun", fun);
-
-                JsonObject top = new JsonObject();
-                JsonArray topMined = getTopMaterials(minedPerMaterial);
-                JsonArray topUsed = getTopMaterials(usedPerMaterial);
-                top.add("mined", topMined);
-                top.add("used", topUsed);
-                stats.add("top", top);
-
-                stats.addProperty("favorite_mined", getFavoriteMaterialName(topMined));
-                stats.addProperty("favorite_used", getFavoriteMaterialName(topUsed));
-
-                return stats;
-            }
-        } catch (Exception ignored) {}
-
-        return getEmptyStats();
+            stats.addProperty("favorite_mined", getFavoriteMaterialName(topMined));
+            stats.addProperty("favorite_used", getFavoriteMaterialName(topUsed));
+            return stats;
+        } catch (Exception e) {
+            return getEmptyStats();
+        }
     }
 
     private JsonObject getEmptyStats() {
@@ -513,36 +457,6 @@ public class DatabaseManager {
         return null;
     }
 
-    private int getSimpleStatistic(OfflinePlayer player, Statistic statistic) {
-        try {
-            return player.getStatistic(statistic);
-        } catch (Exception ignored) {
-            return 0;
-        }
-    }
-
-    private int getMaterialStatistic(OfflinePlayer player, Statistic statistic, Material material) {
-        try {
-            return player.getStatistic(statistic, material);
-        } catch (Exception ignored) {
-            return 0;
-        }
-    }
-
-    private JsonArray getTopMaterials(Map<Material, Integer> source) {
-        JsonArray top = new JsonArray();
-        source.entrySet().stream()
-                .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
-                .limit(5)
-                .forEach(entry -> {
-                    JsonObject item = new JsonObject();
-                    item.addProperty("material", entry.getKey().name().toLowerCase(Locale.ROOT));
-                    item.addProperty("count", entry.getValue());
-                    top.add(item);
-                });
-        return top;
-    }
-
     private String getFavoriteMaterialName(JsonArray topMaterials) {
         if (topMaterials.isEmpty()) {
             return "";
@@ -561,21 +475,79 @@ public class DatabaseManager {
     }
 
 
-    private JsonObject buildPlayerDataWithStats(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
-        CompletableFuture<JsonObject> future = new CompletableFuture<>();
-        Bukkit.getGlobalRegionScheduler().run(plugin, task -> {
-            try {
-                future.complete(createPlayerData(discordId, minecraftUuid, userCacheMap, true));
-            } catch (Exception e) {
-                future.complete(createPlayerData(discordId, minecraftUuid, userCacheMap, false));
-            }
-        });
-
-        try {
-            return future.get(5, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            return createPlayerData(discordId, minecraftUuid, userCacheMap, false);
+    private JsonObject getStatCategory(JsonObject statsRoot, String key) {
+        if (statsRoot.has(key) && statsRoot.get(key).isJsonObject()) {
+            return statsRoot.getAsJsonObject(key);
         }
+        return new JsonObject();
+    }
+
+    private long getLong(JsonObject object, String key) {
+        if (object.has(key) && object.get(key).isJsonPrimitive()) {
+            try {
+                return object.get(key).getAsLong();
+            } catch (Exception ignored) {
+            }
+        }
+        return 0;
+    }
+
+    private long sumCategory(JsonObject category) {
+        long total = 0;
+        for (Map.Entry<String, JsonElement> entry : category.entrySet()) {
+            if (entry.getValue().isJsonPrimitive()) {
+                try {
+                    total += entry.getValue().getAsLong();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return total;
+    }
+
+    private JsonArray getTopStatKeys(JsonObject category) {
+        List<Map.Entry<String, Long>> entries = new ArrayList<>();
+        for (Map.Entry<String, JsonElement> entry : category.entrySet()) {
+            if (entry.getValue().isJsonPrimitive()) {
+                try {
+                    entries.add(Map.entry(stripNamespace(entry.getKey()), entry.getValue().getAsLong()));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        entries.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+        JsonArray result = new JsonArray();
+        for (int i = 0; i < Math.min(5, entries.size()); i++) {
+            JsonObject item = new JsonObject();
+            item.addProperty("material", entries.get(i).getKey());
+            item.addProperty("count", entries.get(i).getValue());
+            result.add(item);
+        }
+        return result;
+    }
+
+    private String stripNamespace(String key) {
+        int idx = key.indexOf(':');
+        return idx >= 0 ? key.substring(idx + 1) : key;
+    }
+
+    private File findStatsFile(String minecraftUuid) {
+        File worldContainer = plugin.getServer().getWorldContainer();
+        File[] worlds = worldContainer.listFiles(File::isDirectory);
+        if (worlds == null) {
+            return null;
+        }
+
+        String uuidFile = minecraftUuid + ".json";
+        for (File worldDir : worlds) {
+            File statsDir = new File(worldDir, "stats");
+            File statsFile = new File(statsDir, uuidFile);
+            if (statsFile.exists()) {
+                return statsFile;
+            }
+        }
+        return null;
     }
 
     private String normalizeUuid(String uuid) {
