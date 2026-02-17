@@ -393,9 +393,10 @@ public class DatabaseManager {
     }
 
     private String getSkinUrlForPlayer(String playerName, String minecraftUuid) {
-        String placeholder = "%skinsrestorer_texture_id_or_steve%";
-        String textureId = placeholder;
+        final String placeholder = "%skinsrestorer_texture_id_or_steve%";
+        final String steveTextureId = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
 
+        String textureId = null;
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             try {
                 UUID uuid = UUID.fromString(minecraftUuid);
@@ -410,11 +411,29 @@ public class DatabaseManager {
             }
         }
 
-        if (textureId == null || textureId.isBlank() || textureId.contains("%")) {
-            textureId = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
+        if (textureId != null) {
+            textureId = textureId.trim();
         }
 
-        return "https://mc-heads.net/avatar/" + textureId + ".png";
+        boolean resolvedTextureId = textureId != null
+                && !textureId.isBlank()
+                && !textureId.contains("%")
+                && !"Error".equalsIgnoreCase(textureId)
+                && !steveTextureId.equalsIgnoreCase(textureId);
+
+        if (resolvedTextureId) {
+            return "https://mc-heads.net/avatar/" + textureId + ".png";
+        }
+
+        if (minecraftUuid != null && !minecraftUuid.isBlank()) {
+            return "https://mc-heads.net/avatar/" + minecraftUuid + ".png";
+        }
+
+        if (playerName != null && !playerName.isBlank() && !"Unknown".equalsIgnoreCase(playerName)) {
+            return "https://mc-heads.net/avatar/" + playerName + ".png";
+        }
+
+        return "https://mc-heads.net/avatar/" + steveTextureId + ".png";
     }
 
     private String getFavoriteMaterialName(JsonArray topMaterials) {
