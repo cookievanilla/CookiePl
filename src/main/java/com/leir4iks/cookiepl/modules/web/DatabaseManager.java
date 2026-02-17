@@ -19,6 +19,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class DatabaseManager {
@@ -393,28 +395,9 @@ public class DatabaseManager {
     }
 
     private String getSkinUrlForPlayer(String playerName, String minecraftUuid) {
-        final String placeholder = "%skinsrestorer_texture_id_or_steve%";
         final String steveTextureId = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
 
-        String textureId = null;
-        if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
-            try {
-                UUID uuid = UUID.fromString(minecraftUuid);
-                org.bukkit.entity.Player onlinePlayer = Bukkit.getPlayer(uuid);
-                if (onlinePlayer != null) {
-                    textureId = PlaceholderAPI.setPlaceholders(onlinePlayer, placeholder);
-                } else {
-                    OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(uuid);
-                    textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, placeholder);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (textureId != null) {
-            textureId = textureId.trim();
-        }
-
+        String textureId = resolveTextureIdSync(minecraftUuid);
         boolean resolvedTextureId = textureId != null
                 && !textureId.isBlank()
                 && !textureId.contains("%")
@@ -434,6 +417,38 @@ public class DatabaseManager {
         }
 
         return "https://mc-heads.net/avatar/" + steveTextureId + ".png";
+    }
+
+    private String resolveTextureIdSync(String minecraftUuid) {
+        if (minecraftUuid == null || minecraftUuid.isBlank()) {
+            return null;
+        }
+
+        CompletableFuture<String> result = new CompletableFuture<>();
+        Bukkit.getGlobalRegionScheduler().run(plugin, task -> {
+            try {
+                String placeholder = "%skinsrestorer_texture_id_or_steve%";
+                UUID uuid = UUID.fromString(minecraftUuid);
+                org.bukkit.entity.Player onlinePlayer = Bukkit.getPlayer(uuid);
+
+                String textureId;
+                if (onlinePlayer != null) {
+                    textureId = PlaceholderAPI.setPlaceholders(onlinePlayer, placeholder);
+                } else {
+                    OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(uuid);
+                    textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, placeholder);
+                }
+                result.complete(textureId == null ? null : textureId.trim());
+            } catch (Exception e) {
+                result.complete(null);
+            }
+        });
+
+        try {
+            return result.get(2, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private String getFavoriteMaterialName(JsonArray topMaterials) {
