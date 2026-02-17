@@ -6,7 +6,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
+import me.clip.placeholderapi.PlaceholderAPI;
 import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -23,7 +25,6 @@ public class DatabaseManager {
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
-    private final File skinsRestorerDataFolder;
     private final File userCacheFile;
     private final File dataFile;
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
@@ -38,7 +39,6 @@ public class DatabaseManager {
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
         this.discordSrvFolder = new File(plugin.getDataFolder().getParentFile(), "DiscordSRV");
-        this.skinsRestorerDataFolder = new File(plugin.getDataFolder().getParentFile(), "SkinsRestorer");
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
     }
@@ -402,80 +402,30 @@ public class DatabaseManager {
             return cached;
         }
 
-        String textureId = findCustomSkinTextureId(playerName, minecraftUuid);
+        String textureId = null;
+        if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI") && minecraftUuid != null) {
+            try {
+                OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
+                textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, "%skinsrestorer_texture_id_or_steve%");
+                if (textureId != null) {
+                    textureId = textureId.trim();
+                }
+                if (textureId == null || textureId.isBlank() || "Error".equalsIgnoreCase(textureId)) {
+                    textureId = null;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
         if (textureId == null || textureId.isBlank()) {
             textureId = STEVE_TEXTURE_FALLBACK;
         }
 
         String skinUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
-
         if (!STEVE_TEXTURE_FALLBACK.equals(textureId)) {
             skinUrlCache.put(cacheKey, skinUrl);
         }
         return skinUrl;
-    }
-
-    private String findCustomSkinTextureId(String playerName, String minecraftUuid) {
-        File skinsFolder = resolveSkinsRestorerSkinsFolder();
-        File[] files = skinsFolder == null ? null : skinsFolder.listFiles((dir, name) -> name.endsWith(".playerskin"));
-        if (files == null) {
-            return null;
-        }
-
-        for (File file : files) {
-            try {
-                String content = Files.readString(file.toPath());
-                JsonObject json = JsonParser.parseString(content).getAsJsonObject();
-
-                String fileName = file.getName();
-                String fileBaseName = fileName.endsWith(".playerskin")
-                        ? fileName.substring(0, fileName.length() - ".playerskin".length())
-                        : fileName;
-
-                boolean nameMatches = false;
-                if (json.has("lastKnownName") && playerName != null) {
-                    String nameInFile = json.get("lastKnownName").getAsString();
-                    nameMatches = nameInFile.equalsIgnoreCase(playerName);
-                }
-                if (!nameMatches && playerName != null) {
-                    nameMatches = fileBaseName.equalsIgnoreCase(playerName);
-                }
-
-                boolean uuidMatches = false;
-                String normalizedTargetUuid = normalizeUuid(minecraftUuid);
-                if (!normalizedTargetUuid.isEmpty()) {
-                    uuidMatches = normalizeUuid(fileBaseName).equals(normalizedTargetUuid);
-
-                    if (!uuidMatches && json.has("playerUniqueId")) {
-                        uuidMatches = normalizeUuid(json.get("playerUniqueId").getAsString()).equals(normalizedTargetUuid);
-                    }
-                    if (!uuidMatches && json.has("uuid")) {
-                        uuidMatches = normalizeUuid(json.get("uuid").getAsString()).equals(normalizedTargetUuid);
-                    }
-                    if (!uuidMatches && json.has("uniqueId")) {
-                        uuidMatches = normalizeUuid(json.get("uniqueId").getAsString()).equals(normalizedTargetUuid);
-                    }
-                }
-
-                if ((nameMatches || uuidMatches) && json.has("value")) {
-                    String valueBase64 = json.get("value").getAsString();
-                    String decodedValue = new String(Base64.getDecoder().decode(valueBase64), StandardCharsets.UTF_8);
-                    JsonObject textureJson = JsonParser.parseString(decodedValue).getAsJsonObject();
-
-                    if (textureJson.has("textures")) {
-                        JsonObject textures = textureJson.getAsJsonObject("textures");
-                        if (textures.has("SKIN")) {
-                            String fullUrl = textures.getAsJsonObject("SKIN").get("url").getAsString();
-                            String textureId = fullUrl.substring(fullUrl.lastIndexOf("/") + 1);
-                            return textureId;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                continue;
-            }
-        }
-        return null;
     }
 
     private String getFavoriteMaterialName(JsonArray topMaterials) {
@@ -569,35 +519,6 @@ public class DatabaseManager {
             }
         }
         return null;
-    }
-
-    private File resolveSkinsRestorerSkinsFolder() {
-        File direct = new File(skinsRestorerDataFolder, "skins");
-        if (direct.isDirectory()) {
-            return direct;
-        }
-
-        File legacy = new File(plugin.getDataFolder().getParentFile(), "SkinsRestorer/skins");
-        if (legacy.isDirectory()) {
-            return legacy;
-        }
-
-        if (skinsRestorerDataFolder.isDirectory()) {
-            File[] nested = skinsRestorerDataFolder.listFiles(File::isDirectory);
-            if (nested != null) {
-                for (File dir : nested) {
-                    if ("skins".equalsIgnoreCase(dir.getName())) {
-                        return dir;
-                    }
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private String normalizeUuid(String uuid) {
-        return uuid == null ? "" : uuid.replace("-", "").toLowerCase(Locale.ROOT);
     }
 
     private Map<String, String> loadUserCache() {
