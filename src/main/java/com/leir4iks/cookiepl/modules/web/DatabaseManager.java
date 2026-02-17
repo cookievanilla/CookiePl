@@ -162,18 +162,25 @@ public class DatabaseManager {
     }
 
     public String getPlayerJsonById(String query) {
-        updatePlayersCache();
+        String normalizedQuery = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
 
         JsonObject direct = playersCache.get(query);
         if (direct != null) {
             return direct.toString();
         }
 
-        String normalizedQuery = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         for (JsonObject playerData : playersCache.values()) {
             if (matchesQuery(playerData, normalizedQuery)) {
                 return playerData.toString();
             }
+        }
+
+        Map<String, String> userCacheMap = loadUserCache();
+        AccountEntry entry = findAccountEntry(normalizedQuery, userCacheMap);
+        if (entry != null) {
+            JsonObject playerData = createPlayerData(entry.discordId(), entry.minecraftUuid(), userCacheMap);
+            playersCache.put(entry.discordId(), playerData);
+            return playerData.toString();
         }
 
         JsonObject errorObj = new JsonObject();
@@ -195,14 +202,55 @@ public class DatabaseManager {
                 || name.equalsIgnoreCase(query);
     }
 
-    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
-        String minecraftName = "Unknown";
 
-        if (externalCache.containsKey(discordId)) {
-            minecraftName = externalCache.get(discordId);
-        } else if (userCacheMap.containsKey(minecraftUuid)) {
-            minecraftName = userCacheMap.get(minecraftUuid);
+    private AccountEntry findAccountEntry(String normalizedQuery, Map<String, String> userCacheMap) {
+        if (normalizedQuery.isBlank()) {
+            return null;
         }
+
+        File accountsFile = new File(discordSrvFolder, "accounts.aof");
+        if (!accountsFile.exists()) {
+            return null;
+        }
+
+        try {
+            List<String> lines = Files.readAllLines(accountsFile.toPath());
+            for (String line : lines) {
+                if (line.trim().isEmpty()) {
+                    continue;
+                }
+
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length < 2) {
+                    continue;
+                }
+
+                String discordId = parts[0];
+                String minecraftUuid = parts[1];
+                String resolvedName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
+
+                if (discordId.equalsIgnoreCase(normalizedQuery)
+                        || minecraftUuid.equalsIgnoreCase(normalizedQuery)
+                        || resolvedName.equalsIgnoreCase(normalizedQuery)) {
+                    return new AccountEntry(discordId, minecraftUuid);
+                }
+            }
+        } catch (IOException e) {
+            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    private String resolveMinecraftName(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+        if (externalCache.containsKey(discordId)) {
+            return externalCache.get(discordId);
+        }
+        return userCacheMap.getOrDefault(minecraftUuid, "Unknown");
+    }
+
+    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+        String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
 
         OfflinePlayer player = null;
         try {
@@ -473,6 +521,10 @@ public class DatabaseManager {
             array.add(obj);
         }
         return array;
+    }
+
+
+    private record AccountEntry(String discordId, String minecraftUuid) {
     }
 
     private Map<String, String> loadUserCache() {
