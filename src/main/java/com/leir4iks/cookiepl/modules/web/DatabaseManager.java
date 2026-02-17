@@ -30,9 +30,6 @@ public class DatabaseManager {
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
-    private static final String STEVE_TEXTURE_FALLBACK = "6d3b06c38504ffc0229b9492147c69fcf59fd2ed7885f78502152f77b4d50de1";
-
-    private final Map<String, String> skinUrlCache = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
 
@@ -396,36 +393,14 @@ public class DatabaseManager {
     }
 
     private String getSkinUrlForPlayer(String playerName, String minecraftUuid) {
-        String cacheKey = minecraftUuid == null ? String.valueOf(playerName) : minecraftUuid;
-        String cached = skinUrlCache.get(cacheKey);
-        if (cached != null && !cached.contains(STEVE_TEXTURE_FALLBACK)) {
-            return cached;
+        String textureId = "%skinsrestorer_texture_id_or_steve%";
+        try {
+            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
+            textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, "%skinsrestorer_texture_id_or_steve%");
+        } catch (Exception ignored) {
         }
 
-        String textureId = null;
-        if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI") && minecraftUuid != null) {
-            try {
-                OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-                textureId = PlaceholderAPI.setPlaceholders(offlinePlayer, "%skinsrestorer_texture_id_or_steve%");
-                if (textureId != null) {
-                    textureId = textureId.trim();
-                }
-                if (textureId == null || textureId.isBlank() || "Error".equalsIgnoreCase(textureId)) {
-                    textureId = null;
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (textureId == null || textureId.isBlank()) {
-            textureId = STEVE_TEXTURE_FALLBACK;
-        }
-
-        String skinUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
-        if (!STEVE_TEXTURE_FALLBACK.equals(textureId)) {
-            skinUrlCache.put(cacheKey, skinUrl);
-        }
-        return skinUrl;
+        return "https://mc-heads.net/avatar/" + textureId + ".png";
     }
 
     private String getFavoriteMaterialName(JsonArray topMaterials) {
