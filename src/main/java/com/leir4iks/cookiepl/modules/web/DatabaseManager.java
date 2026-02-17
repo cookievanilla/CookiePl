@@ -23,7 +23,7 @@ public class DatabaseManager {
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
-    private final File skinsRestorerFolder;
+    private final File skinsRestorerDataFolder;
     private final File userCacheFile;
     private final File dataFile;
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
@@ -38,7 +38,7 @@ public class DatabaseManager {
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
         this.discordSrvFolder = new File(plugin.getDataFolder().getParentFile(), "DiscordSRV");
-        this.skinsRestorerFolder = new File(plugin.getDataFolder().getParentFile(), "SkinsRestorer/skins");
+        this.skinsRestorerDataFolder = new File(plugin.getDataFolder().getParentFile(), "SkinsRestorer");
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
     }
@@ -416,7 +416,8 @@ public class DatabaseManager {
     }
 
     private String findCustomSkinTextureId(String playerName, String minecraftUuid) {
-        File[] files = skinsRestorerFolder.listFiles((dir, name) -> name.endsWith(".playerskin"));
+        File skinsFolder = resolveSkinsRestorerSkinsFolder();
+        File[] files = skinsFolder == null ? null : skinsFolder.listFiles((dir, name) -> name.endsWith(".playerskin"));
         if (files == null) {
             return null;
         }
@@ -567,6 +568,31 @@ public class DatabaseManager {
                 return statsFile;
             }
         }
+        return null;
+    }
+
+    private File resolveSkinsRestorerSkinsFolder() {
+        File direct = new File(skinsRestorerDataFolder, "skins");
+        if (direct.isDirectory()) {
+            return direct;
+        }
+
+        File legacy = new File(plugin.getDataFolder().getParentFile(), "SkinsRestorer/skins");
+        if (legacy.isDirectory()) {
+            return legacy;
+        }
+
+        if (skinsRestorerDataFolder.isDirectory()) {
+            File[] nested = skinsRestorerDataFolder.listFiles(File::isDirectory);
+            if (nested != null) {
+                for (File dir : nested) {
+                    if ("skins".equalsIgnoreCase(dir.getName())) {
+                        return dir;
+                    }
+                }
+            }
+        }
+
         return null;
     }
 
