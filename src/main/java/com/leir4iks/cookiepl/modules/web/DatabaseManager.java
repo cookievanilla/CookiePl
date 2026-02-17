@@ -48,10 +48,11 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
-        updatePlayersCache();
 
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
+            updatePlayersCache(false);
             updateExternalData();
+            updatePlayersCache(true);
         });
 
         this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
@@ -129,7 +130,7 @@ public class DatabaseManager {
         }
     }
 
-    private void updatePlayersCache() {
+    private void updatePlayersCache(boolean includeStats) {
         Map<String, String> userCacheMap = loadUserCache();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
@@ -149,7 +150,7 @@ public class DatabaseManager {
                     String discordId = parts[0];
                     String minecraftUuid = parts[1];
 
-                    JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap);
+                    JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap, includeStats);
                     if (playerData != null) {
                         newCache.put(discordId, playerData);
                     }
@@ -163,7 +164,10 @@ public class DatabaseManager {
     }
 
     public String getDatabaseJson() {
-        updatePlayersCache();
+        if (playersCache.isEmpty()) {
+            updatePlayersCache(false);
+        }
+
         JsonArray rootArray = new JsonArray();
         for (JsonObject playerData : playersCache.values()) {
             rootArray.add(playerData);
@@ -172,7 +176,9 @@ public class DatabaseManager {
     }
 
     public String getPlayerJsonById(String discordId) {
-        updatePlayersCache();
+        if (playersCache.isEmpty()) {
+            updatePlayersCache(false);
+        }
 
         if (playersCache.containsKey(discordId)) {
             return playersCache.get(discordId).toString();
@@ -197,7 +203,7 @@ public class DatabaseManager {
 
                     String[] parts = line.trim().split("\\s+");
                     if (parts.length >= 2 && parts[0].equals(discordId)) {
-                        JsonObject playerData = createPlayerData(parts[0], parts[1], userCacheMap);
+                        JsonObject playerData = createPlayerData(parts[0], parts[1], userCacheMap, false);
                         if (playerData != null) {
                             playersCache.put(discordId, playerData);
                             return playerData.toString();
@@ -214,7 +220,7 @@ public class DatabaseManager {
         return errorObj.toString();
     }
 
-    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap, boolean includeStats) {
         String minecraftName = "Unknown";
 
         if (externalCache.containsKey(discordId)) {
@@ -231,14 +237,19 @@ public class DatabaseManager {
         playerData.addProperty("minecraft_uuid", minecraftUuid);
         playerData.addProperty("skin_url", skinUrl);
 
-        OfflinePlayer player = null;
-        try {
-            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-        } catch (Exception ignored) {}
+        if (includeStats) {
+            OfflinePlayer player = null;
+            try {
+                player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
+            } catch (Exception ignored) {}
 
-        if (player != null) {
-            playerData.addProperty("is_online", player.isOnline());
-            playerData.add("stats", getPlayerStatistics(player));
+            if (player != null) {
+                playerData.addProperty("is_online", player.isOnline());
+                playerData.add("stats", getPlayerStatistics(player));
+            } else {
+                playerData.addProperty("is_online", false);
+                playerData.add("stats", getEmptyStats());
+            }
         } else {
             playerData.addProperty("is_online", false);
             playerData.add("stats", getEmptyStats());
