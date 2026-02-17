@@ -171,47 +171,39 @@ public class DatabaseManager {
         return rootArray.toString();
     }
 
-    public String getPlayerJsonById(String discordId) {
-        if (playersCache.isEmpty()) {
-            updatePlayersCache(false);
-        }
-
+    public String getPlayerJsonById(String query) {
         Map<String, String> userCacheMap = loadUserCache();
 
-        if (playersCache.containsKey(discordId)) {
-            JsonObject cachedPlayer = playersCache.get(discordId);
+        if (playersCache.containsKey(query)) {
+            JsonObject cachedPlayer = playersCache.get(query);
             String minecraftUuid = cachedPlayer.has("minecraft_uuid") ? cachedPlayer.get("minecraft_uuid").getAsString() : "";
-            JsonObject enriched = createPlayerData(discordId, minecraftUuid, userCacheMap, true);
-            playersCache.put(discordId, enriched);
+            JsonObject enriched = createPlayerData(query, minecraftUuid, userCacheMap, true);
+            playersCache.put(query, enriched);
             return enriched.toString();
         }
 
-        for (Map.Entry<String, JsonObject> entry : playersCache.entrySet()) {
-            JsonObject playerData = entry.getValue();
-            String minecraftName = playerData.has("minecraft_name") ? playerData.get("minecraft_name").getAsString() : "";
-            String minecraftUuid = playerData.has("minecraft_uuid") ? playerData.get("minecraft_uuid").getAsString() : "";
-            if (discordId.equalsIgnoreCase(minecraftName) || discordId.equalsIgnoreCase(minecraftUuid)) {
-                JsonObject enriched = createPlayerData(entry.getKey(), minecraftUuid, userCacheMap, true);
-                playersCache.put(entry.getKey(), enriched);
-                return enriched.toString();
-            }
-        }
-
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
-
         if (accountsFile.exists()) {
             try {
                 List<String> lines = Files.readAllLines(accountsFile.toPath());
                 for (String line : lines) {
                     if (line.trim().isEmpty()) continue;
 
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length >= 2 && parts[0].equals(discordId)) {
-                        JsonObject playerData = createPlayerData(parts[0], parts[1], userCacheMap, true);
-                        if (playerData != null) {
-                            playersCache.put(discordId, playerData);
-                            return playerData.toString();
-                        }
+                    String[] parts = line.trim().split("\s+");
+                    if (parts.length < 2) continue;
+
+                    String discordId = parts[0];
+                    String minecraftUuid = parts[1];
+                    String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
+
+                    boolean match = query.equalsIgnoreCase(discordId)
+                            || query.equalsIgnoreCase(minecraftUuid)
+                            || query.equalsIgnoreCase(minecraftName);
+
+                    if (match) {
+                        JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap, true);
+                        playersCache.put(discordId, playerData);
+                        return playerData.toString();
                     }
                 }
             } catch (IOException e) {
@@ -224,14 +216,18 @@ public class DatabaseManager {
         return errorObj.toString();
     }
 
-    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap, boolean includeStats) {
-        String minecraftName = "Unknown";
-
+    private String resolveMinecraftName(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
         if (externalCache.containsKey(discordId)) {
-            minecraftName = externalCache.get(discordId);
-        } else if (userCacheMap.containsKey(minecraftUuid)) {
-            minecraftName = userCacheMap.get(minecraftUuid);
+            return externalCache.get(discordId);
         }
+        if (userCacheMap.containsKey(minecraftUuid)) {
+            return userCacheMap.get(minecraftUuid);
+        }
+        return "Unknown";
+    }
+
+    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap, boolean includeStats) {
+        String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
 
         String skinUrl = getSkinUrlForPlayer(minecraftName, minecraftUuid);
 
