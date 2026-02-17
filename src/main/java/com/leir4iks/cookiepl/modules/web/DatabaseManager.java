@@ -398,7 +398,7 @@ public class DatabaseManager {
     private String getSkinUrlForPlayer(String playerName, String minecraftUuid) {
         String cacheKey = minecraftUuid == null ? String.valueOf(playerName) : minecraftUuid;
         String cached = skinUrlCache.get(cacheKey);
-        if (cached != null) {
+        if (cached != null && !cached.contains(STEVE_TEXTURE_FALLBACK)) {
             return cached;
         }
 
@@ -409,7 +409,9 @@ public class DatabaseManager {
 
         String skinUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
 
-        skinUrlCache.put(cacheKey, skinUrl);
+        if (!STEVE_TEXTURE_FALLBACK.equals(textureId)) {
+            skinUrlCache.put(cacheKey, skinUrl);
+        }
         return skinUrl;
     }
 
@@ -424,16 +426,34 @@ public class DatabaseManager {
                 String content = Files.readString(file.toPath());
                 JsonObject json = JsonParser.parseString(content).getAsJsonObject();
 
+                String fileName = file.getName();
+                String fileBaseName = fileName.endsWith(".playerskin")
+                        ? fileName.substring(0, fileName.length() - ".playerskin".length())
+                        : fileName;
+
                 boolean nameMatches = false;
                 if (json.has("lastKnownName") && playerName != null) {
                     String nameInFile = json.get("lastKnownName").getAsString();
                     nameMatches = nameInFile.equalsIgnoreCase(playerName);
                 }
+                if (!nameMatches && playerName != null) {
+                    nameMatches = fileBaseName.equalsIgnoreCase(playerName);
+                }
 
                 boolean uuidMatches = false;
-                if (json.has("playerUniqueId") && minecraftUuid != null) {
-                    String uuidInFile = json.get("playerUniqueId").getAsString();
-                    uuidMatches = normalizeUuid(uuidInFile).equals(normalizeUuid(minecraftUuid));
+                String normalizedTargetUuid = normalizeUuid(minecraftUuid);
+                if (!normalizedTargetUuid.isEmpty()) {
+                    uuidMatches = normalizeUuid(fileBaseName).equals(normalizedTargetUuid);
+
+                    if (!uuidMatches && json.has("playerUniqueId")) {
+                        uuidMatches = normalizeUuid(json.get("playerUniqueId").getAsString()).equals(normalizedTargetUuid);
+                    }
+                    if (!uuidMatches && json.has("uuid")) {
+                        uuidMatches = normalizeUuid(json.get("uuid").getAsString()).equals(normalizedTargetUuid);
+                    }
+                    if (!uuidMatches && json.has("uniqueId")) {
+                        uuidMatches = normalizeUuid(json.get("uniqueId").getAsString()).equals(normalizedTargetUuid);
+                    }
                 }
 
                 if ((nameMatches || uuidMatches) && json.has("value")) {
