@@ -49,7 +49,7 @@ public class DatabaseManager {
     public void start() {
         loadDataYml();
 
-        plugin.getFoliaLib().getScheduler().runAsync(() -> {
+        plugin.getFoliaLib().getScheduler().runAsync(task -> {
             updateExternalData();
         });
 
