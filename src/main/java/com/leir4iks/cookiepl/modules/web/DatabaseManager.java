@@ -20,7 +20,9 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 public class DatabaseManager {
 
@@ -180,19 +182,27 @@ public class DatabaseManager {
             updatePlayersCache(false);
         }
 
+        Map<String, String> userCacheMap = loadUserCache();
+
         if (playersCache.containsKey(discordId)) {
-            return playersCache.get(discordId).toString();
+            JsonObject cachedPlayer = playersCache.get(discordId);
+            String minecraftUuid = cachedPlayer.has("minecraft_uuid") ? cachedPlayer.get("minecraft_uuid").getAsString() : "";
+            JsonObject enriched = buildPlayerDataWithStats(discordId, minecraftUuid, userCacheMap);
+            playersCache.put(discordId, enriched);
+            return enriched.toString();
         }
 
-        for (JsonObject playerData : playersCache.values()) {
+        for (Map.Entry<String, JsonObject> entry : playersCache.entrySet()) {
+            JsonObject playerData = entry.getValue();
             String minecraftName = playerData.has("minecraft_name") ? playerData.get("minecraft_name").getAsString() : "";
             String minecraftUuid = playerData.has("minecraft_uuid") ? playerData.get("minecraft_uuid").getAsString() : "";
             if (discordId.equalsIgnoreCase(minecraftName) || discordId.equalsIgnoreCase(minecraftUuid)) {
-                return playerData.toString();
+                JsonObject enriched = buildPlayerDataWithStats(entry.getKey(), minecraftUuid, userCacheMap);
+                playersCache.put(entry.getKey(), enriched);
+                return enriched.toString();
             }
         }
 
-        Map<String, String> userCacheMap = loadUserCache();
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
 
         if (accountsFile.exists()) {
@@ -203,7 +213,7 @@ public class DatabaseManager {
 
                     String[] parts = line.trim().split("\\s+");
                     if (parts.length >= 2 && parts[0].equals(discordId)) {
-                        JsonObject playerData = createPlayerData(parts[0], parts[1], userCacheMap, false);
+                        JsonObject playerData = buildPlayerDataWithStats(parts[0], parts[1], userCacheMap);
                         if (playerData != null) {
                             playersCache.put(discordId, playerData);
                             return playerData.toString();
@@ -479,7 +489,7 @@ public class DatabaseManager {
                 boolean uuidMatches = false;
                 if (json.has("playerUniqueId") && minecraftUuid != null) {
                     String uuidInFile = json.get("playerUniqueId").getAsString();
-                    uuidMatches = uuidInFile.equalsIgnoreCase(minecraftUuid);
+                    uuidMatches = normalizeUuid(uuidInFile).equals(normalizeUuid(minecraftUuid));
                 }
 
                 if ((nameMatches || uuidMatches) && json.has("value")) {
@@ -548,6 +558,28 @@ public class DatabaseManager {
 
     private double cmToKm(long centimeters) {
         return centimeters / 100000.0;
+    }
+
+
+    private JsonObject buildPlayerDataWithStats(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+        CompletableFuture<JsonObject> future = new CompletableFuture<>();
+        Bukkit.getGlobalRegionScheduler().run(plugin, task -> {
+            try {
+                future.complete(createPlayerData(discordId, minecraftUuid, userCacheMap, true));
+            } catch (Exception e) {
+                future.complete(createPlayerData(discordId, minecraftUuid, userCacheMap, false));
+            }
+        });
+
+        try {
+            return future.get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return createPlayerData(discordId, minecraftUuid, userCacheMap, false);
+        }
+    }
+
+    private String normalizeUuid(String uuid) {
+        return uuid == null ? "" : uuid.replace("-", "").toLowerCase(Locale.ROOT);
     }
 
     private Map<String, String> loadUserCache() {
