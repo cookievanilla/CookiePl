@@ -475,10 +475,10 @@ public class DatabaseManager {
         }
 
         if (skinUrl == null || skinUrl.isBlank()) {
-            skinUrl = buildFallbackSkinUrl(minecraftUuid);
+            skinUrl = buildFallbackSkinUrl(minecraftUuid, minecraftName);
         }
         if (headUrl == null || headUrl.isBlank()) {
-            headUrl = buildFallbackHeadUrl(minecraftUuid);
+            headUrl = buildFallbackHeadUrl(minecraftUuid, minecraftName);
         }
 
         return new SkinLinks(skinUrl, headUrl);
@@ -525,7 +525,7 @@ public class DatabaseManager {
                         freshHeadCache.put(uuidKey, links.headUrl());
                         freshSkinCache.put(uuidKey, links.skinUrl());
 
-                        if (entry.has("lastKnownName")) {
+                        if (entry.has("lastKnownName") && !entry.get("lastKnownName").isJsonNull()) {
                             String name = entry.get("lastKnownName").getAsString();
                             if (!name.isBlank()) {
                                 String nameKey = name.toLowerCase(Locale.ROOT);
@@ -568,10 +568,10 @@ public class DatabaseManager {
         }
 
         if (skinUrl == null || skinUrl.isBlank()) {
-            skinUrl = buildFallbackSkinUrl(playerUuid);
+            skinUrl = buildFallbackSkinUrl(playerUuid, getStringOrNull(entry, "lastKnownName"));
         }
         if (headUrl == null || headUrl.isBlank()) {
-            headUrl = buildFallbackHeadUrl(playerUuid);
+            headUrl = buildFallbackHeadUrl(playerUuid, getStringOrNull(entry, "lastKnownName"));
         }
 
         return new SkinLinks(skinUrl, headUrl);
@@ -628,12 +628,24 @@ public class DatabaseManager {
         return json.get(key).getAsString();
     }
 
-    private String buildFallbackSkinUrl(String minecraftUuid) {
-        return "https://mc-heads.net/skin/" + minecraftUuid;
+    private String buildFallbackSkinUrl(String minecraftUuid, String minecraftName) {
+        String identifier = resolveFallbackIdentifier(minecraftUuid, minecraftName);
+        return "https://mc-heads.net/skin/" + identifier;
     }
 
-    private String buildFallbackHeadUrl(String minecraftUuid) {
-        return "https://mc-heads.net/avatar/" + minecraftUuid;
+    private String buildFallbackHeadUrl(String minecraftUuid, String minecraftName) {
+        String identifier = resolveFallbackIdentifier(minecraftUuid, minecraftName);
+        return "https://mc-heads.net/avatar/" + identifier;
+    }
+
+    private String resolveFallbackIdentifier(String minecraftUuid, String minecraftName) {
+        if (minecraftName != null && !minecraftName.isBlank() && !minecraftName.equalsIgnoreCase("Unknown")) {
+            return minecraftName;
+        }
+        if (minecraftUuid != null && !minecraftUuid.isBlank()) {
+            return minecraftUuid;
+        }
+        return "Steve";
     }
 
     private String normalizeUuidKey(String uuid) {
