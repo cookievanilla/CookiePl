@@ -555,6 +555,13 @@ public class DatabaseManager {
         String skinUrl = getStringOrNull(entry, "skinUrl");
         String headUrl = getStringOrNull(entry, "headUrl");
 
+        if ((skinUrl == null || skinUrl.isBlank())) {
+            String sourceUrl = getStringOrNull(entry, "sourceUrl");
+            if (sourceUrl != null && !sourceUrl.isBlank()) {
+                skinUrl = sourceUrl;
+            }
+        }
+
         if ((skinUrl == null || skinUrl.isBlank()) || (headUrl == null || headUrl.isBlank())) {
             String textureId = resolveTextureIdFromSkinEntry(entry);
             if (textureId != null && !textureId.isBlank()) {
