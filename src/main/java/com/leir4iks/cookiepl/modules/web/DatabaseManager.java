@@ -462,7 +462,13 @@ public class DatabaseManager {
             textureId = skinsNameTextureCache.get(minecraftName.toLowerCase(Locale.ROOT));
         }
         if (textureId == null || textureId.isBlank()) {
-            return "";
+            if (minecraftUuid != null && !minecraftUuid.isBlank()) {
+                return "https://mc-heads.net/avatar/" + minecraftUuid + ".png";
+            }
+            if (minecraftName != null && !minecraftName.isBlank() && !minecraftName.equalsIgnoreCase("Unknown")) {
+                return "https://mc-heads.net/avatar/" + minecraftName + ".png";
+            }
+            return "https://mc-heads.net/avatar/Steve.png";
         }
 
         return "https://mc-heads.net/avatar/" + textureId + ".png";
