@@ -71,7 +71,8 @@ public class WebServerManager {
 
     private void updateCache() {
         try {
-            this.cachedPlayersJson = databaseManager.getDatabaseJson();
+            // /players -> только краткие данные
+            this.cachedPlayersJson = databaseManager.getPlayersSummaryJson();
 
             JsonObject json = new JsonObject();
             json.addProperty("online", plugin.getServer().getOnlinePlayers().size());
@@ -108,11 +109,13 @@ public class WebServerManager {
         String path = exchange.getRequestURI().getPath();
 
         if (path.equals("/players") || path.equals("/players/")) {
+            // summary
             sendResponse(exchange, 200, cachedPlayersJson);
         } else if (path.startsWith("/players/")) {
             String[] segments = path.split("/");
             if (segments.length > 2) {
                 String playerId = segments[2];
+                // full
                 String response = databaseManager.getPlayerJsonById(playerId);
 
                 if (response.contains("\"error\":\"Player not found\"")) {
