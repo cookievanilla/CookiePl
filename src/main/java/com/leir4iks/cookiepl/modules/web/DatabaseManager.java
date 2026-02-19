@@ -17,6 +17,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,7 @@ public class DatabaseManager {
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsTextureCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinsNameTextureCache = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
     private WrappedTask skinsUpdateTask;
@@ -266,7 +268,7 @@ public class DatabaseManager {
         } catch (Exception ignored) {
         }
 
-        String skinUrl = getSkinUrlForPlayer(player, minecraftUuid);
+        String skinUrl = getSkinUrlForPlayer(player, minecraftUuid, minecraftName);
 
         JsonObject playerData = new JsonObject();
         playerData.addProperty("id", discordId);
@@ -454,12 +456,11 @@ public class DatabaseManager {
         return stats;
     }
 
-    private String getSkinUrlForPlayer(OfflinePlayer player, String minecraftUuid) {
-        if (minecraftUuid == null || minecraftUuid.isBlank()) {
-            return "";
+    private String getSkinUrlForPlayer(OfflinePlayer player, String minecraftUuid, String minecraftName) {
+        String textureId = skinsTextureCache.get(normalizeUuidKey(minecraftUuid));
+        if ((textureId == null || textureId.isBlank()) && minecraftName != null && !minecraftName.isBlank()) {
+            textureId = skinsNameTextureCache.get(minecraftName.toLowerCase(Locale.ROOT));
         }
-
-        String textureId = skinsTextureCache.get(minecraftUuid.toLowerCase(Locale.ROOT));
         if (textureId == null || textureId.isBlank()) {
             return "";
         }
@@ -482,6 +483,7 @@ public class DatabaseManager {
             }
 
             Map<String, String> freshCache = new HashMap<>();
+            Map<String, String> freshNameCache = new HashMap<>();
             try (Scanner scanner = new Scanner(connection.getInputStream())) {
                 scanner.useDelimiter("\\A");
                 String response = scanner.hasNext() ? scanner.next() : "[]";
@@ -495,26 +497,64 @@ public class DatabaseManager {
                         }
 
                         JsonObject entry = element.getAsJsonObject();
-                        if (!entry.has("playerUuid") || !entry.has("decoded")) {
+                        if (!entry.has("playerUuid")) {
                             continue;
                         }
 
                         String playerUuid = entry.get("playerUuid").getAsString();
-                        String decoded = entry.get("decoded").getAsString();
-                        String textureId = extractTextureIdFromDecoded(decoded);
+                        String textureId = resolveTextureIdFromSkinEntry(entry);
                         if (textureId != null && !textureId.isBlank()) {
-                            freshCache.put(playerUuid.toLowerCase(Locale.ROOT), textureId);
+                            freshCache.put(normalizeUuidKey(playerUuid), textureId);
+                            if (entry.has("lastKnownName")) {
+                                String name = entry.get("lastKnownName").getAsString();
+                                if (!name.isBlank()) {
+                                    freshNameCache.put(name.toLowerCase(Locale.ROOT), textureId);
+                                }
+                            }
                         }
                     }
                 }
             }
 
             skinsTextureCache.clear();
+            skinsNameTextureCache.clear();
             skinsTextureCache.putAll(freshCache);
+            skinsNameTextureCache.putAll(freshNameCache);
             connection.disconnect();
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update skins database: " + e.getMessage());
         }
+    }
+
+    private String resolveTextureIdFromSkinEntry(JsonObject entry) {
+        if (entry.has("decoded")) {
+            String decoded = entry.get("decoded").getAsString();
+            String fromDecoded = extractTextureIdFromDecoded(decoded);
+            if (fromDecoded != null && !fromDecoded.isBlank()) {
+                return fromDecoded;
+            }
+        }
+
+        if (entry.has("value")) {
+            try {
+                String value = entry.get("value").getAsString();
+                String decodedValue = new String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8);
+                String fromValue = extractTextureIdFromDecoded(decodedValue);
+                if (fromValue != null && !fromValue.isBlank()) {
+                    return fromValue;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private String normalizeUuidKey(String uuid) {
+        if (uuid == null) {
+            return "";
+        }
+        return uuid.replace("-", "").toLowerCase(Locale.ROOT);
     }
 
     private String extractTextureIdFromDecoded(String decodedJson) {
