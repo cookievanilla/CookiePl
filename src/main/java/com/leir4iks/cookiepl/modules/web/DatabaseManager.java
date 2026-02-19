@@ -37,7 +37,13 @@ public class DatabaseManager {
     private final Map<String, String> skinsNameHeadUrlCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsSkinUrlCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsNameSkinUrlCache = new ConcurrentHashMap<>();
+
+    // FULL cache (используется getDatabaseJson, если нужно)
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
+
+    // SUMMARY cache (для /players)
+    private final Map<String, JsonObject> playersSummaryCache = new ConcurrentHashMap<>();
+
     private WrappedTask updateTask;
     private WrappedTask skinsUpdateTask;
 
@@ -164,6 +170,42 @@ public class DatabaseManager {
         }
     }
 
+    private void updatePlayersSummaryCache() {
+        Map<String, String> userCacheMap = loadUserCache();
+        File accountsFile = new File(discordSrvFolder, "accounts.aof");
+
+        if (!accountsFile.exists()) {
+            playersSummaryCache.clear();
+            return;
+        }
+
+        Map<String, JsonObject> newCache = new HashMap<>();
+        try {
+            List<String> lines = Files.readAllLines(accountsFile.toPath());
+            for (String line : lines) {
+                if (line.trim().isEmpty()) continue;
+
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length >= 2) {
+                    String discordId = parts[0];
+                    String minecraftUuid = parts[1];
+
+                    JsonObject playerData = createPlayerSummaryData(discordId, minecraftUuid, userCacheMap);
+                    if (playerData != null) {
+                        newCache.put(discordId, playerData);
+                    }
+                }
+            }
+            playersSummaryCache.clear();
+            playersSummaryCache.putAll(newCache);
+        } catch (IOException e) {
+            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+        }
+    }
+
+    /**
+     * FULL (как было раньше) — может быть полезно для других модулей.
+     */
     public String getDatabaseJson() {
         updatePlayersCache();
         JsonArray rootArray = new JsonArray();
@@ -173,26 +215,32 @@ public class DatabaseManager {
         return rootArray.toString();
     }
 
+    /**
+     * SUMMARY для /players:
+     * id discord, name, uuid, skin(full), head, online, play_time_hours
+     */
+    public String getPlayersSummaryJson() {
+        updatePlayersSummaryCache();
+        JsonArray rootArray = new JsonArray();
+        for (JsonObject playerData : playersSummaryCache.values()) {
+            rootArray.add(playerData);
+        }
+        return rootArray.toString();
+    }
+
+    /**
+     * Для /players/<nickname|id|uuid> — всегда FULL.
+     */
     public String getPlayerJsonById(String query) {
         String normalizedQuery = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-
-        JsonObject direct = playersCache.get(query);
-        if (direct != null) {
-            return direct.toString();
-        }
-
-        for (JsonObject playerData : playersCache.values()) {
-            if (matchesQuery(playerData, normalizedQuery)) {
-                return playerData.toString();
-            }
-        }
-
         Map<String, String> userCacheMap = loadUserCache();
+
         AccountEntry entry = findAccountEntry(normalizedQuery, userCacheMap);
         if (entry != null) {
             JsonObject playerData = createPlayerData(entry.discordId(), entry.minecraftUuid(), userCacheMap);
-            playersCache.put(entry.discordId(), playerData);
-            return playerData.toString();
+            if (playerData != null) {
+                return playerData.toString();
+            }
         }
 
         JsonObject errorObj = new JsonObject();
@@ -213,7 +261,6 @@ public class DatabaseManager {
                 || uuid.equalsIgnoreCase(query)
                 || name.equalsIgnoreCase(query);
     }
-
 
     private AccountEntry findAccountEntry(String normalizedQuery, Map<String, String> userCacheMap) {
         if (normalizedQuery.isBlank()) {
@@ -259,6 +306,38 @@ public class DatabaseManager {
             return externalCache.get(discordId);
         }
         return userCacheMap.getOrDefault(minecraftUuid, "Unknown");
+    }
+
+    private JsonObject createPlayerSummaryData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+        String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
+
+        OfflinePlayer player = null;
+        try {
+            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
+        } catch (Exception ignored) {
+        }
+
+        SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
+
+        boolean isOnline = player != null && player.isOnline();
+        double playTimeHours = 0.0;
+
+        if (player != null && (player.hasPlayedBefore() || isOnline)) {
+            long playTimeTicks = getStatistic(player, Statistic.PLAY_ONE_MINUTE);
+            playTimeHours = playTimeTicks / 20.0 / 3600.0;
+            playTimeHours = Math.round(playTimeHours * 10.0) / 10.0;
+        }
+
+        JsonObject playerData = new JsonObject();
+        playerData.addProperty("id", discordId);
+        playerData.addProperty("minecraft_name", minecraftName);
+        playerData.addProperty("minecraft_uuid", minecraftUuid);
+        playerData.addProperty("skinUrl", skinLinks.skinUrl());
+        playerData.addProperty("headUrl", skinLinks.headUrl());
+        playerData.addProperty("is_online", isOnline);
+        playerData.addProperty("play_time_hours", playTimeHours);
+
+        return playerData;
     }
 
     private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
@@ -730,7 +809,6 @@ public class DatabaseManager {
         }
         return array;
     }
-
 
     private record AccountEntry(String discordId, String minecraftUuid) {
     }
