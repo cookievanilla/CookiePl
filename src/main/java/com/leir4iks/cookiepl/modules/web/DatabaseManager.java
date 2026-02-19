@@ -33,8 +33,10 @@ public class DatabaseManager {
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
-    private final Map<String, String> skinsTextureCache = new ConcurrentHashMap<>();
-    private final Map<String, String> skinsNameTextureCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinsHeadUrlCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinsNameHeadUrlCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinsSkinUrlCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinsNameSkinUrlCache = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
     private WrappedTask skinsUpdateTask;
@@ -268,13 +270,15 @@ public class DatabaseManager {
         } catch (Exception ignored) {
         }
 
-        String skinUrl = getSkinUrlForPlayer(player, minecraftUuid, minecraftName);
+        SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
 
         JsonObject playerData = new JsonObject();
         playerData.addProperty("id", discordId);
         playerData.addProperty("minecraft_name", minecraftName);
         playerData.addProperty("minecraft_uuid", minecraftUuid);
-        playerData.addProperty("skin_url", skinUrl);
+        playerData.addProperty("skin_url", skinLinks.headUrl());
+        playerData.addProperty("skinUrl", skinLinks.skinUrl());
+        playerData.addProperty("headUrl", skinLinks.headUrl());
 
         if (player != null) {
             playerData.addProperty("is_online", player.isOnline());
@@ -456,22 +460,28 @@ public class DatabaseManager {
         return stats;
     }
 
-    private String getSkinUrlForPlayer(OfflinePlayer player, String minecraftUuid, String minecraftName) {
-        String textureId = skinsTextureCache.get(normalizeUuidKey(minecraftUuid));
-        if ((textureId == null || textureId.isBlank()) && minecraftName != null && !minecraftName.isBlank()) {
-            textureId = skinsNameTextureCache.get(minecraftName.toLowerCase(Locale.ROOT));
+    private SkinLinks getSkinLinksForPlayer(String minecraftUuid, String minecraftName) {
+        String uuidKey = normalizeUuidKey(minecraftUuid);
+        String nameKey = minecraftName == null ? "" : minecraftName.toLowerCase(Locale.ROOT);
+
+        String skinUrl = skinsSkinUrlCache.get(uuidKey);
+        String headUrl = skinsHeadUrlCache.get(uuidKey);
+
+        if ((skinUrl == null || skinUrl.isBlank()) && !nameKey.isBlank()) {
+            skinUrl = skinsNameSkinUrlCache.get(nameKey);
         }
-        if (textureId == null || textureId.isBlank()) {
-            if (minecraftUuid != null && !minecraftUuid.isBlank()) {
-                return "https://mc-heads.net/avatar/" + minecraftUuid + ".png";
-            }
-            if (minecraftName != null && !minecraftName.isBlank() && !minecraftName.equalsIgnoreCase("Unknown")) {
-                return "https://mc-heads.net/avatar/" + minecraftName + ".png";
-            }
-            return "https://mc-heads.net/avatar/Steve.png";
+        if ((headUrl == null || headUrl.isBlank()) && !nameKey.isBlank()) {
+            headUrl = skinsNameHeadUrlCache.get(nameKey);
         }
 
-        return "https://mc-heads.net/avatar/" + textureId + ".png";
+        if (skinUrl == null || skinUrl.isBlank()) {
+            skinUrl = buildFallbackSkinUrl(minecraftUuid);
+        }
+        if (headUrl == null || headUrl.isBlank()) {
+            headUrl = buildFallbackHeadUrl(minecraftUuid);
+        }
+
+        return new SkinLinks(skinUrl, headUrl);
     }
 
     private void updateSkinsData() {
@@ -488,8 +498,10 @@ public class DatabaseManager {
                 return;
             }
 
-            Map<String, String> freshCache = new HashMap<>();
-            Map<String, String> freshNameCache = new HashMap<>();
+            Map<String, String> freshHeadCache = new HashMap<>();
+            Map<String, String> freshNameHeadCache = new HashMap<>();
+            Map<String, String> freshSkinCache = new HashMap<>();
+            Map<String, String> freshNameSkinCache = new HashMap<>();
             try (Scanner scanner = new Scanner(connection.getInputStream())) {
                 scanner.useDelimiter("\\A");
                 String response = scanner.hasNext() ? scanner.next() : "[]";
@@ -508,36 +520,82 @@ public class DatabaseManager {
                         }
 
                         String playerUuid = entry.get("playerUuid").getAsString();
-                        String textureId = resolveTextureIdFromSkinEntry(entry);
-                        if (textureId != null && !textureId.isBlank()) {
-                            freshCache.put(normalizeUuidKey(playerUuid), textureId);
-                            if (entry.has("lastKnownName")) {
-                                String name = entry.get("lastKnownName").getAsString();
-                                if (!name.isBlank()) {
-                                    freshNameCache.put(name.toLowerCase(Locale.ROOT), textureId);
-                                }
+                        SkinLinks links = resolveSkinLinksFromEntry(entry, playerUuid);
+                        String uuidKey = normalizeUuidKey(playerUuid);
+                        freshHeadCache.put(uuidKey, links.headUrl());
+                        freshSkinCache.put(uuidKey, links.skinUrl());
+
+                        if (entry.has("lastKnownName")) {
+                            String name = entry.get("lastKnownName").getAsString();
+                            if (!name.isBlank()) {
+                                String nameKey = name.toLowerCase(Locale.ROOT);
+                                freshNameHeadCache.put(nameKey, links.headUrl());
+                                freshNameSkinCache.put(nameKey, links.skinUrl());
                             }
                         }
                     }
                 }
             }
 
-            skinsTextureCache.clear();
-            skinsNameTextureCache.clear();
-            skinsTextureCache.putAll(freshCache);
-            skinsNameTextureCache.putAll(freshNameCache);
+            skinsHeadUrlCache.clear();
+            skinsNameHeadUrlCache.clear();
+            skinsSkinUrlCache.clear();
+            skinsNameSkinUrlCache.clear();
+            skinsHeadUrlCache.putAll(freshHeadCache);
+            skinsNameHeadUrlCache.putAll(freshNameHeadCache);
+            skinsSkinUrlCache.putAll(freshSkinCache);
+            skinsNameSkinUrlCache.putAll(freshNameSkinCache);
             connection.disconnect();
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update skins database: " + e.getMessage());
         }
     }
 
+    private SkinLinks resolveSkinLinksFromEntry(JsonObject entry, String playerUuid) {
+        String skinUrl = getStringOrNull(entry, "skinUrl");
+        String headUrl = getStringOrNull(entry, "headUrl");
+
+        if ((skinUrl == null || skinUrl.isBlank()) || (headUrl == null || headUrl.isBlank())) {
+            String textureId = resolveTextureIdFromSkinEntry(entry);
+            if (textureId != null && !textureId.isBlank()) {
+                if (skinUrl == null || skinUrl.isBlank()) {
+                    skinUrl = "https://textures.minecraft.net/texture/" + textureId;
+                }
+                if (headUrl == null || headUrl.isBlank()) {
+                    headUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
+                }
+            }
+        }
+
+        if (skinUrl == null || skinUrl.isBlank()) {
+            skinUrl = buildFallbackSkinUrl(playerUuid);
+        }
+        if (headUrl == null || headUrl.isBlank()) {
+            headUrl = buildFallbackHeadUrl(playerUuid);
+        }
+
+        return new SkinLinks(skinUrl, headUrl);
+    }
+
     private String resolveTextureIdFromSkinEntry(JsonObject entry) {
+        if (entry.has("skinHash")) {
+            String skinHash = entry.get("skinHash").getAsString();
+            if (!skinHash.isBlank()) {
+                return skinHash;
+            }
+        }
+
         if (entry.has("decoded")) {
-            String decoded = entry.get("decoded").getAsString();
-            String fromDecoded = extractTextureIdFromDecoded(decoded);
-            if (fromDecoded != null && !fromDecoded.isBlank()) {
-                return fromDecoded;
+            try {
+                JsonElement decodedElement = entry.get("decoded");
+                JsonObject decodedObj = decodedElement.isJsonObject()
+                        ? decodedElement.getAsJsonObject()
+                        : JsonParser.parseString(decodedElement.getAsString()).getAsJsonObject();
+                String fromDecoded = extractTextureIdFromDecodedObject(decodedObj);
+                if (fromDecoded != null && !fromDecoded.isBlank()) {
+                    return fromDecoded;
+                }
+            } catch (Exception ignored) {
             }
         }
 
@@ -553,7 +611,29 @@ public class DatabaseManager {
             }
         }
 
-        return null;
+        String skinUrlRaw = getStringOrNull(entry, "skinUrlRaw");
+        String fromSkinUrlRaw = extractTextureIdFromUrl(skinUrlRaw);
+        if (fromSkinUrlRaw != null) {
+            return fromSkinUrlRaw;
+        }
+
+        String skinUrl = getStringOrNull(entry, "skinUrl");
+        return extractTextureIdFromUrl(skinUrl);
+    }
+
+    private String getStringOrNull(JsonObject json, String key) {
+        if (!json.has(key) || json.get(key).isJsonNull()) {
+            return null;
+        }
+        return json.get(key).getAsString();
+    }
+
+    private String buildFallbackSkinUrl(String minecraftUuid) {
+        return "https://mc-heads.net/skin/" + minecraftUuid;
+    }
+
+    private String buildFallbackHeadUrl(String minecraftUuid) {
+        return "https://mc-heads.net/avatar/" + minecraftUuid;
     }
 
     private String normalizeUuidKey(String uuid) {
@@ -566,26 +646,37 @@ public class DatabaseManager {
     private String extractTextureIdFromDecoded(String decodedJson) {
         try {
             JsonObject decoded = JsonParser.parseString(decodedJson).getAsJsonObject();
-            if (!decoded.has("textures")) {
-                return null;
-            }
-
-            JsonObject textures = decoded.getAsJsonObject("textures");
-            if (!textures.has("SKIN")) {
-                return null;
-            }
-
-            JsonObject skin = textures.getAsJsonObject("SKIN");
-            if (!skin.has("url")) {
-                return null;
-            }
-
-            String textureUrl = skin.get("url").getAsString();
-            int index = textureUrl.lastIndexOf('/');
-            return index >= 0 ? textureUrl.substring(index + 1) : textureUrl;
+            return extractTextureIdFromDecodedObject(decoded);
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private String extractTextureIdFromDecodedObject(JsonObject decoded) {
+        if (!decoded.has("textures")) {
+            return null;
+        }
+
+        JsonObject textures = decoded.getAsJsonObject("textures");
+        if (!textures.has("SKIN")) {
+            return null;
+        }
+
+        JsonObject skin = textures.getAsJsonObject("SKIN");
+        if (!skin.has("url")) {
+            return null;
+        }
+
+        String textureUrl = skin.get("url").getAsString();
+        return extractTextureIdFromUrl(textureUrl);
+    }
+
+    private String extractTextureIdFromUrl(String textureUrl) {
+        if (textureUrl == null || textureUrl.isBlank()) {
+            return null;
+        }
+        int index = textureUrl.lastIndexOf('/');
+        return index >= 0 ? textureUrl.substring(index + 1) : textureUrl;
     }
 
     private int getStatistic(OfflinePlayer player, Statistic statistic) {
@@ -624,6 +715,9 @@ public class DatabaseManager {
 
 
     private record AccountEntry(String discordId, String minecraftUuid) {
+    }
+
+    private record SkinLinks(String skinUrl, String headUrl) {
     }
 
     private Map<String, String> loadUserCache() {
