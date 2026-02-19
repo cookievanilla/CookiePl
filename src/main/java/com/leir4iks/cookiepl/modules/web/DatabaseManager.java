@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class DatabaseManager {
 
-    private static final String SKIN_TEXTURE_PLACEHOLDER = "%skinsrestorer_texture_id_or_steve%";
+    private static final String SKINS_DATABASE_URL = "http://212.80.7.214:20945/skins";
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
@@ -32,9 +32,10 @@ public class DatabaseManager {
     private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
-    private final Map<String, String> skinUrlCache = new ConcurrentHashMap<>();
+    private final Map<String, String> skinsTextureCache = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
     private WrappedTask updateTask;
+    private WrappedTask skinsUpdateTask;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -45,13 +46,20 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
-        plugin.getFoliaLib().getScheduler().runAsync(task -> updateExternalData());
+        plugin.getFoliaLib().getScheduler().runAsync(task -> {
+            updateExternalData();
+            updateSkinsData();
+        });
         this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 3600L, 3600L);
+        this.skinsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateSkinsData, 300L, 300L);
     }
 
     public void stop() {
         if (updateTask != null) {
             updateTask.cancel();
+        }
+        if (skinsUpdateTask != null) {
+            skinsUpdateTask.cancel();
         }
     }
 
@@ -447,44 +455,89 @@ public class DatabaseManager {
     }
 
     private String getSkinUrlForPlayer(OfflinePlayer player, String minecraftUuid) {
-        String cacheKey = minecraftUuid == null ? "" : minecraftUuid;
-        String cached = skinUrlCache.get(cacheKey);
-        if (cached != null) {
-            return cached;
+        if (minecraftUuid == null || minecraftUuid.isBlank()) {
+            return "";
         }
 
-        String textureId = resolveTextureIdFromPlaceholder(player);
+        String textureId = skinsTextureCache.get(minecraftUuid.toLowerCase(Locale.ROOT));
         if (textureId == null || textureId.isBlank()) {
             return "";
         }
 
-        String skinUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
-        skinUrlCache.put(cacheKey, skinUrl);
-        return skinUrl;
+        return "https://mc-heads.net/avatar/" + textureId + ".png";
     }
 
-    private String resolveTextureIdFromPlaceholder(OfflinePlayer player) {
-        if (player == null || !Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
-            return null;
-        }
-
+    private void updateSkinsData() {
         try {
-            Class<?> placeholderApiClass = Class.forName("me.clip.placeholderapi.PlaceholderAPI");
-            Object value = placeholderApiClass
-                    .getMethod("setPlaceholders", OfflinePlayer.class, String.class)
-                    .invoke(null, player, SKIN_TEXTURE_PLACEHOLDER);
+            URL url = new URL(SKINS_DATABASE_URL);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestMethod("GET");
 
-            if (value == null) {
-                return null;
+            if (connection.getResponseCode() != 200) {
+                plugin.getLogManager().warn("Skins database returned: " + connection.getResponseCode());
+                connection.disconnect();
+                return;
             }
 
-            String textureId = String.valueOf(value).trim();
-            if (textureId.isEmpty() || textureId.equalsIgnoreCase("Error") || textureId.equalsIgnoreCase(SKIN_TEXTURE_PLACEHOLDER)) {
-                return null;
+            Map<String, String> freshCache = new HashMap<>();
+            try (Scanner scanner = new Scanner(connection.getInputStream())) {
+                scanner.useDelimiter("\\A");
+                String response = scanner.hasNext() ? scanner.next() : "[]";
+                JsonElement parsed = JsonParser.parseString(response);
+
+                if (parsed.isJsonArray()) {
+                    JsonArray array = parsed.getAsJsonArray();
+                    for (JsonElement element : array) {
+                        if (!element.isJsonObject()) {
+                            continue;
+                        }
+
+                        JsonObject entry = element.getAsJsonObject();
+                        if (!entry.has("playerUuid") || !entry.has("decoded")) {
+                            continue;
+                        }
+
+                        String playerUuid = entry.get("playerUuid").getAsString();
+                        String decoded = entry.get("decoded").getAsString();
+                        String textureId = extractTextureIdFromDecoded(decoded);
+                        if (textureId != null && !textureId.isBlank()) {
+                            freshCache.put(playerUuid.toLowerCase(Locale.ROOT), textureId);
+                        }
+                    }
+                }
             }
-            return textureId;
+
+            skinsTextureCache.clear();
+            skinsTextureCache.putAll(freshCache);
+            connection.disconnect();
         } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to parse skin texture placeholder for " + player.getUniqueId() + ": " + e.getMessage());
+            plugin.getLogManager().warn("Failed to update skins database: " + e.getMessage());
+        }
+    }
+
+    private String extractTextureIdFromDecoded(String decodedJson) {
+        try {
+            JsonObject decoded = JsonParser.parseString(decodedJson).getAsJsonObject();
+            if (!decoded.has("textures")) {
+                return null;
+            }
+
+            JsonObject textures = decoded.getAsJsonObject("textures");
+            if (!textures.has("SKIN")) {
+                return null;
+            }
+
+            JsonObject skin = textures.getAsJsonObject("SKIN");
+            if (!skin.has("url")) {
+                return null;
+            }
+
+            String textureUrl = skin.get("url").getAsString();
+            int index = textureUrl.lastIndexOf('/');
+            return index >= 0 ? textureUrl.substring(index + 1) : textureUrl;
+        } catch (Exception ignored) {
             return null;
         }
     }
