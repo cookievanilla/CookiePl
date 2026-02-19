@@ -276,7 +276,6 @@ public class DatabaseManager {
         playerData.addProperty("id", discordId);
         playerData.addProperty("minecraft_name", minecraftName);
         playerData.addProperty("minecraft_uuid", minecraftUuid);
-        playerData.addProperty("skin_url", skinLinks.headUrl());
         playerData.addProperty("skinUrl", skinLinks.skinUrl());
         playerData.addProperty("headUrl", skinLinks.headUrl());
 
