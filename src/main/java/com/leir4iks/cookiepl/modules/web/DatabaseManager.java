@@ -30,7 +30,6 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -50,12 +49,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class DatabaseManager {
 
     private static final String SKINS_DATABASE_URL = "http://212.80.7.214:20945/skins";
+    private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
+    private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
+    private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
     private final File userCacheFile;
     private final File dataFile;
-    private final String externalDatabaseUrl = "http://212.80.7.211:20081/";
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsHeadUrlCache = new ConcurrentHashMap<>();
@@ -79,12 +80,18 @@ public class DatabaseManager {
     private volatile String playersSummaryListCache = "[]";
 
     private final Set<String> onlineUuids = ConcurrentHashMap.newKeySet();
-
     private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
+
+    private volatile List<IpRule> whitelistRules = List.of();
+    private volatile String ticketsJsonCache = "{}";
+    private final AtomicBoolean ticketsRefreshRunning = new AtomicBoolean(false);
+    private final AtomicBoolean whitelistRefreshRunning = new AtomicBoolean(false);
 
     private WrappedTask updateTask;
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
+    private WrappedTask whitelistUpdateTask;
+    private WrappedTask ticketsUpdateTask;
 
     private final OnlineListener onlineListener = new OnlineListener();
 
@@ -117,21 +124,30 @@ public class DatabaseManager {
             initMysql();
             updateExternalData();
             updateSkinsData();
+            updateWhitelistData();
+            updateTicketsData();
             refreshPlayersData();
         });
 
         this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 3600L, 3600L);
         this.skinsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateSkinsData, 300L, 300L);
         this.playersStatsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::refreshPlayersData, 6000L, 6000L);
+        this.whitelistUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateWhitelistData, 1200L, 1200L);
+        this.ticketsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateTicketsData, 1200L, 1200L);
     }
 
     public void stop() {
         if (updateTask != null) updateTask.cancel();
         if (skinsUpdateTask != null) skinsUpdateTask.cancel();
         if (playersStatsUpdateTask != null) playersStatsUpdateTask.cancel();
+        if (whitelistUpdateTask != null) whitelistUpdateTask.cancel();
+        if (ticketsUpdateTask != null) ticketsUpdateTask.cancel();
+
         updateTask = null;
         skinsUpdateTask = null;
         playersStatsUpdateTask = null;
+        whitelistUpdateTask = null;
+        ticketsUpdateTask = null;
 
         try {
             HandlerList.unregisterAll(onlineListener);
@@ -220,8 +236,13 @@ public class DatabaseManager {
             }
 
             dbReady = true;
-            String cached = readMeta("players_summary_json");
-            if (cached != null && !cached.isBlank()) playersSummaryListCache = cached;
+
+            String cachedPlayers = readMeta("players_summary_json");
+            if (cachedPlayers != null && !cachedPlayers.isBlank()) playersSummaryListCache = cachedPlayers;
+
+            String cachedTickets = readMeta("tickets_json");
+            if (cachedTickets != null && !cachedTickets.isBlank()) ticketsJsonCache = cachedTickets;
+
         } catch (Exception e) {
             dbReady = false;
             pool = null;
@@ -255,8 +276,9 @@ public class DatabaseManager {
     }
 
     private void updateExternalData() {
+        String urlStr = plugin.getConfig().getString("modules.web-server.external-name-url", EXTERNAL_NAME_URL_DEFAULT);
         try {
-            URL url = new URL(externalDatabaseUrl);
+            URL url = new URL(urlStr);
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setConnectTimeout(3000);
             connection.setReadTimeout(3000);
@@ -286,12 +308,186 @@ public class DatabaseManager {
                     if (changed) saveDataYml();
                 }
             } else {
-                plugin.getLogManager().warn("External database returned: " + connection.getResponseCode());
+                plugin.getLogManager().warn("External name db returned: " + connection.getResponseCode());
             }
             connection.disconnect();
         } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update external database: " + e.getMessage());
+            plugin.getLogManager().warn("Failed to update external name db: " + e.getMessage());
         }
+    }
+
+    private void updateWhitelistData() {
+        if (!whitelistRefreshRunning.compareAndSet(false, true)) return;
+        try {
+            String urlPrimary = plugin.getConfig().getString("modules.web-server.tickets.whitelist-url", EXTERNAL_WHITELIST_URL_DEFAULT);
+            String urlFallback = plugin.getConfig().getString("modules.web-server.external-name-url", EXTERNAL_NAME_URL_DEFAULT);
+
+            String text = fetchText(urlPrimary, 3000, 3000);
+            List<IpRule> rules = parseWhitelistRules(text);
+
+            if (rules == null || rules.isEmpty()) {
+                String text2 = fetchText(urlFallback, 3000, 3000);
+                List<IpRule> rules2 = parseWhitelistRules(text2);
+                if (rules2 != null && !rules2.isEmpty()) rules = rules2;
+            }
+
+            if (rules != null && !rules.isEmpty()) {
+                whitelistRules = rules;
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update whitelist: " + e.getMessage());
+        } finally {
+            whitelistRefreshRunning.set(false);
+        }
+    }
+
+    private void updateTicketsData() {
+        if (!ticketsRefreshRunning.compareAndSet(false, true)) return;
+        try {
+            String urlStr = plugin.getConfig().getString("modules.web-server.tickets.stats-url", EXTERNAL_STATS_URL_DEFAULT);
+            String text = fetchText(urlStr, 5000, 5000);
+            if (text == null || text.isBlank()) return;
+
+            JsonElement el;
+            try {
+                el = JsonParser.parseString(text);
+            } catch (Exception ignored) {
+                return;
+            }
+
+            if (!el.isJsonObject()) return;
+
+            String normalized = el.getAsJsonObject().toString();
+            if (normalized == null || normalized.isBlank()) return;
+
+            if (!normalized.equals(ticketsJsonCache)) {
+                ticketsJsonCache = normalized;
+                if (dbReady) writeMeta("tickets_json", normalized, System.currentTimeMillis());
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update tickets stats: " + e.getMessage());
+        } finally {
+            ticketsRefreshRunning.set(false);
+        }
+    }
+
+    private String fetchText(String urlStr, int ct, int rt) {
+        if (urlStr == null || urlStr.isBlank()) return null;
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(urlStr);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(ct);
+            connection.setReadTimeout(rt);
+            connection.setRequestMethod("GET");
+
+            if (connection.getResponseCode() != 200) return null;
+
+            try (Scanner scanner = new Scanner(connection.getInputStream(), StandardCharsets.UTF_8)) {
+                scanner.useDelimiter("\\A");
+                return scanner.hasNext() ? scanner.next() : null;
+            }
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (connection != null) {
+                try {
+                    connection.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private List<IpRule> parseWhitelistRules(String text) {
+        if (text == null || text.isBlank()) return null;
+
+        boolean inIps = false;
+        List<IpRule> rules = new ArrayList<>();
+
+        String[] lines = text.split("\n");
+        for (String raw : lines) {
+            if (raw == null) continue;
+            String line = raw.trim();
+            if (line.isEmpty()) continue;
+
+            if (line.equalsIgnoreCase("ips:") || line.toLowerCase(Locale.ROOT).startsWith("ips:")) {
+                inIps = true;
+                continue;
+            }
+
+            String token = null;
+
+            if (inIps) {
+                if (line.startsWith("-")) {
+                    token = stripQuotes(line.substring(1).trim());
+                } else {
+                    token = stripQuotes(line);
+                }
+            } else {
+                if (line.startsWith("-")) {
+                    token = stripQuotes(line.substring(1).trim());
+                } else if (looksLikeIpToken(line)) {
+                    token = stripQuotes(line);
+                }
+            }
+
+            if (token == null || token.isBlank()) continue;
+            IpRule r = IpRule.parse(token);
+            if (r != null) rules.add(r);
+        }
+
+        return rules.isEmpty() ? null : List.copyOf(rules);
+    }
+
+    private boolean looksLikeIpToken(String s) {
+        String t = stripQuotes(s.trim());
+        if (t.isEmpty()) return false;
+        int slash = t.indexOf('/');
+        String base = slash >= 0 ? t.substring(0, slash) : t;
+        if (base.contains("*")) return true;
+        String[] parts = base.split("\\.");
+        if (parts.length != 4) return false;
+        for (String p : parts) {
+            if (p.isEmpty()) return false;
+            if (!p.chars().allMatch(Character::isDigit)) return false;
+        }
+        return true;
+    }
+
+    private String stripQuotes(String s) {
+        String t = s == null ? "" : s.trim();
+        if (t.length() >= 2) {
+            if ((t.startsWith("\"") && t.endsWith("\"")) || (t.startsWith("'") && t.endsWith("'"))) {
+                return t.substring(1, t.length() - 1).trim();
+            }
+        }
+        return t;
+    }
+
+    public String getDatabaseWithTicketsJson(String remoteIp) {
+        boolean allowed = isIpAllowed(remoteIp);
+        String players = getPlayersSummaryJson();
+        String tickets = ticketsJsonCache == null || ticketsJsonCache.isBlank() ? "{}" : ticketsJsonCache;
+
+        StringBuilder sb = new StringBuilder(players.length() + tickets.length() + 64);
+        sb.append("{\"players\":").append(players).append(",\"tickets\":");
+        if (allowed) sb.append(tickets);
+        else sb.append("\"not allowed\"");
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private boolean isIpAllowed(String ip) {
+        if (ip == null || ip.isBlank()) return false;
+        int v = IpRule.ipv4ToInt(ip.trim());
+        if (v == -1) return false;
+        List<IpRule> rules = whitelistRules;
+        if (rules == null || rules.isEmpty()) return false;
+        for (IpRule r : rules) {
+            if (r.matches(v)) return true;
+        }
+        return false;
     }
 
     private void refreshPlayersData() {
@@ -423,6 +619,15 @@ public class DatabaseManager {
                     if (obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull()) {
                         String uuid = obj.get("minecraft_uuid").getAsString();
                         obj.addProperty("is_online", onlineUuids.contains(uuid));
+                    }
+                    if (obj.has("stats") && obj.get("stats").isJsonObject()) {
+                        JsonObject st = obj.getAsJsonObject("stats");
+                        if (st.has("joins") && !st.get("joins").isJsonNull()) {
+                            long leaveGame = st.get("joins").getAsLong();
+                            if (obj.has("is_online") && obj.get("is_online").getAsBoolean()) {
+                                if (leaveGame > 0) st.addProperty("joins", leaveGame);
+                            }
+                        }
                     }
                     return obj.toString();
                 } catch (Exception ignored) {
@@ -1327,6 +1532,98 @@ public class DatabaseManager {
         @EventHandler
         public void onQuit(PlayerQuitEvent e) {
             handleOnlineChange(e.getPlayer().getUniqueId().toString(), false);
+        }
+    }
+
+    private record IpRule(int network, int maskBits, int mask) {
+
+        static IpRule parse(String s) {
+            if (s == null) return null;
+            String t = s.trim();
+            if (t.isEmpty()) return null;
+
+            if (t.contains("/")) {
+                String[] parts = t.split("/", 2);
+                if (parts.length != 2) return null;
+                int base = ipv4ToInt(parts[0].trim());
+                if (base == -1) return null;
+                int bits;
+                try {
+                    bits = Integer.parseInt(parts[1].trim());
+                } catch (Exception ignored) {
+                    return null;
+                }
+                if (bits < 0) bits = 0;
+                if (bits > 32) bits = 32;
+                int m = mask(bits);
+                return new IpRule(base, bits, m);
+            }
+
+            if (t.contains("*")) {
+                String[] parts = t.split("\\.");
+                if (parts.length != 4) return null;
+                int bits = 0;
+                int[] oct = new int[4];
+                for (int i = 0; i < 4; i++) {
+                    String p = parts[i].trim();
+                    if (p.equals("*")) {
+                        oct[i] = 0;
+                    } else {
+                        if (!p.chars().allMatch(Character::isDigit)) return null;
+                        int v = Integer.parseInt(p);
+                        if (v < 0 || v > 255) return null;
+                        oct[i] = v;
+                        bits += 8;
+                    }
+                }
+                int base = (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
+                int m = mask(bits);
+                return new IpRule(base, bits, m);
+            }
+
+            int base = ipv4ToInt(t);
+            if (base == -1) return null;
+
+            int bits = 32;
+            if (t.endsWith(".0.0.0")) bits = 8;
+            else if (t.endsWith(".0.0")) bits = 16;
+            else if (t.endsWith(".0")) bits = 24;
+
+            int m = mask(bits);
+            return new IpRule(base, bits, m);
+        }
+
+        boolean matches(int ip) {
+            return (ip & mask) == (network & mask);
+        }
+
+        static int mask(int bits) {
+            if (bits <= 0) return 0;
+            if (bits >= 32) return -1;
+            long m = 0xFFFFFFFFL << (32 - bits);
+            return (int) m;
+        }
+
+        static int ipv4ToInt(String ip) {
+            if (ip == null) return -1;
+            String t = ip.trim();
+            String[] parts = t.split("\\.");
+            if (parts.length != 4) return -1;
+            int[] oct = new int[4];
+            for (int i = 0; i < 4; i++) {
+                String p = parts[i].trim();
+                if (p.isEmpty()) return -1;
+                if (!p.chars().allMatch(Character::isDigit)) return -1;
+                int v;
+                try {
+                    v = Integer.parseInt(p);
+                } catch (Exception ignored) {
+                    return -1;
+                }
+                if (v < 0 || v > 255) return -1;
+                oct[i] = v;
+            }
+            return (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
         }
     }
 

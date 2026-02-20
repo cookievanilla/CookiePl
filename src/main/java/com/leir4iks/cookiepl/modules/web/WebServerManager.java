@@ -38,6 +38,7 @@ public class WebServerManager {
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/players", this::handlePlayersRequest);
             server.createContext("/serverinfo", this::handleServerInfoRequest);
+            server.createContext("/database", this::handleDatabaseRequest);
 
             int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
             server.setExecutor(Executors.newFixedThreadPool(threads));
@@ -117,6 +118,25 @@ public class WebServerManager {
         } else {
             sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
         }
+    }
+
+    private void handleDatabaseRequest(HttpExchange exchange) throws IOException {
+        handleCors(exchange);
+
+        if (exchange.getRequestMethod().equalsIgnoreCase("OPTIONS")) {
+            exchange.sendResponseHeaders(204, -1);
+            return;
+        }
+
+        String ip = null;
+        try {
+            if (exchange.getRemoteAddress() != null && exchange.getRemoteAddress().getAddress() != null) {
+                ip = exchange.getRemoteAddress().getAddress().getHostAddress();
+            }
+        } catch (Exception ignored) {
+        }
+
+        sendResponse(exchange, 200, databaseManager.getDatabaseWithTicketsJson(ip));
     }
 
     private void handleServerInfoRequest(HttpExchange exchange) throws IOException {
