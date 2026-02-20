@@ -37,7 +37,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.Scanner;
 import java.util.Set;
@@ -51,6 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class DatabaseManager {
 
     private static final String SKINS_DATABASE_URL = "http://212.80.7.214:20945/skins";
+    private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
 
@@ -60,6 +60,8 @@ public class DatabaseManager {
     private final File dataFile;
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
+    private final Map<String, String> ticketNameCache = new ConcurrentHashMap<>();
+
     private final Map<String, String> skinsHeadUrlCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsNameHeadUrlCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsSkinUrlCache = new ConcurrentHashMap<>();
@@ -87,12 +89,14 @@ public class DatabaseManager {
     private final AtomicBoolean whitelistRefreshRunning = new AtomicBoolean(false);
 
     private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
-    private volatile Map<String, TicketBundle> ticketsByUserId = Map.of();
+    private volatile Map<String, List<TicketInfo>> ticketsByUserId = Map.of();
+    private volatile int lastStatsHash = 0;
 
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
     private WrappedTask whitelistUpdateTask;
     private WrappedTask statsUpdateTask;
+    private WrappedTask nameUpdateTask;
 
     private final OnlineListener onlineListener = new OnlineListener();
 
@@ -123,12 +127,14 @@ public class DatabaseManager {
 
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
             initMysql();
-            updateSkinsData();
+            updateExternalNameData();
             updateWhitelistData();
             updateExternalStatsData();
+            updateSkinsData();
             refreshPlayersData();
         });
 
+        this.nameUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalNameData, 3600L, 3600L);
         this.skinsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateSkinsData, 300L, 300L);
         this.playersStatsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::refreshPlayersData, 6000L, 6000L);
         this.whitelistUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateWhitelistData, 1200L, 1200L);
@@ -136,11 +142,13 @@ public class DatabaseManager {
     }
 
     public void stop() {
+        if (nameUpdateTask != null) nameUpdateTask.cancel();
         if (skinsUpdateTask != null) skinsUpdateTask.cancel();
         if (playersStatsUpdateTask != null) playersStatsUpdateTask.cancel();
         if (whitelistUpdateTask != null) whitelistUpdateTask.cancel();
         if (statsUpdateTask != null) statsUpdateTask.cancel();
 
+        nameUpdateTask = null;
         skinsUpdateTask = null;
         playersStatsUpdateTask = null;
         whitelistUpdateTask = null;
@@ -164,7 +172,7 @@ public class DatabaseManager {
                 if (wf != null) folders.add(new File(wf, "stats"));
             });
             this.statsFolders = folders;
-        } catch (Exception e) {
+        } catch (Exception ignored) {
             this.statsFolders = List.of();
         }
     }
@@ -256,6 +264,68 @@ public class DatabaseManager {
         }
     }
 
+    private void saveDataYml() {
+        try {
+            YamlConfiguration config = new YamlConfiguration();
+            for (Map.Entry<String, String> entry : externalCache.entrySet()) {
+                config.set(entry.getKey(), entry.getValue());
+            }
+            config.save(dataFile);
+        } catch (IOException e) {
+            plugin.getLogManager().severe("Failed to save data.yml: " + e.getMessage());
+        }
+    }
+
+    private void updateExternalNameData() {
+        String urlStr = plugin.getConfig().getString("modules.web-server.external-name-url", EXTERNAL_NAME_URL_DEFAULT);
+        HttpURLConnection connection = null;
+
+        try {
+            URL url = new URL(urlStr);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(4000);
+            connection.setReadTimeout(4000);
+            connection.setRequestMethod("GET");
+
+            if (connection.getResponseCode() != 200) {
+                return;
+            }
+
+            boolean changed = false;
+            Map<String, String> fresh = new HashMap<>();
+
+            try (BufferedReader br = new BufferedReader(new java.io.InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+                    String[] parts = line.split("\\s+");
+                    if (parts.length < 2) continue;
+                    String discordId = parts[0].trim();
+                    String nick = parts[1].trim();
+                    if (discordId.isEmpty() || nick.isEmpty()) continue;
+                    fresh.put(discordId, nick);
+                }
+            }
+
+            if (!fresh.isEmpty()) {
+                for (Map.Entry<String, String> e : fresh.entrySet()) {
+                    String old = externalCache.put(e.getKey(), e.getValue());
+                    if (old == null || !old.equals(e.getValue())) changed = true;
+                }
+                if (changed) saveDataYml();
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (connection != null) {
+                try {
+                    connection.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
     private void updateWhitelistData() {
         if (!whitelistRefreshRunning.compareAndSet(false, true)) return;
         try {
@@ -279,6 +349,10 @@ public class DatabaseManager {
             String text = fetchText(urlStr, 8000, 8000);
             if (text == null || text.isBlank()) return;
 
+            int h = text.hashCode();
+            if (h == lastStatsHash) return;
+            lastStatsHash = h;
+
             JsonObject root = parseLenientObject(text);
             if (root == null) return;
 
@@ -293,13 +367,15 @@ public class DatabaseManager {
                 }
             }
 
-            Map<String, TicketBundle> bundles = new HashMap<>();
+            Map<String, List<TicketInfo>> byUser = new HashMap<>();
             Map<String, String> names = new HashMap<>();
 
             if (root.has("tickets") && root.get("tickets").isJsonObject()) {
                 JsonObject tickets = root.getAsJsonObject("tickets");
                 for (Map.Entry<String, JsonElement> e : tickets.entrySet()) {
+                    if (e.getKey() == null) continue;
                     if (e.getValue() == null || !e.getValue().isJsonObject()) continue;
+                    String ticketId = e.getKey();
                     JsonObject t = e.getValue().getAsJsonObject();
                     String userId = getStringOrNull(t, "userId");
                     if (userId == null || userId.isBlank()) continue;
@@ -310,16 +386,19 @@ public class DatabaseManager {
                     String modId = userToModerator.get(userId);
                     if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "processedByID");
                     if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "closed_by");
+                    if (modId == null || modId.isBlank()) modId = "unknown";
 
                     String tk = timeKey(t);
-                    upsertTicketBundle(bundles, userId, modId, t, tk);
+                    byUser.computeIfAbsent(userId, k -> new ArrayList<>()).add(new TicketInfo(modId, ticketId, t, tk));
                 }
             }
 
             if (root.has("closed") && root.get("closed").isJsonObject()) {
                 JsonObject closed = root.getAsJsonObject("closed");
                 for (Map.Entry<String, JsonElement> e : closed.entrySet()) {
+                    if (e.getKey() == null) continue;
                     if (e.getValue() == null || !e.getValue().isJsonObject()) continue;
+                    String ticketId = e.getKey();
                     JsonObject t = e.getValue().getAsJsonObject();
                     String userId = getStringOrNull(t, "userId");
                     if (userId == null || userId.isBlank()) continue;
@@ -330,46 +409,34 @@ public class DatabaseManager {
                     String modId = userToModerator.get(userId);
                     if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "processedByID");
                     if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "closed_by");
+                    if (modId == null || modId.isBlank()) modId = "unknown";
 
                     String tk = timeKey(t);
-                    upsertTicketBundle(bundles, userId, modId, t, tk);
+                    byUser.computeIfAbsent(userId, k -> new ArrayList<>()).add(new TicketInfo(modId, ticketId, t, tk));
                 }
             }
 
             if (!names.isEmpty()) {
                 for (Map.Entry<String, String> e : names.entrySet()) {
-                    externalCache.put(e.getKey(), e.getValue());
+                    if (e.getKey() != null && e.getValue() != null) ticketNameCache.put(e.getKey(), e.getValue());
                 }
             }
 
-            ticketsByUserId = Map.copyOf(bundles);
+            Map<String, List<TicketInfo>> compact = new HashMap<>(byUser.size());
+            for (Map.Entry<String, List<TicketInfo>> e : byUser.entrySet()) {
+                List<TicketInfo> list = e.getValue();
+                if (list == null || list.isEmpty()) continue;
+                list.sort(Comparator.comparing(t -> t.timeKey() == null ? "" : t.timeKey()));
+                compact.put(e.getKey(), List.copyOf(list));
+            }
+
+            ticketsByUserId = Map.copyOf(compact);
 
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update external stats: " + e.getMessage());
         } finally {
             statsRefreshRunning.set(false);
         }
-    }
-
-    private void upsertTicketBundle(Map<String, TicketBundle> map, String userId, String modId, JsonObject ticket, String tk) {
-        if (userId == null || userId.isBlank() || ticket == null) return;
-        String time = tk == null ? "" : tk;
-
-        TicketBundle prev = map.get(userId);
-        if (prev == null) {
-            map.put(userId, new TicketBundle(normalizeModId(modId), ticket, time));
-            return;
-        }
-
-        String prevTime = prev.timeKey() == null ? "" : prev.timeKey();
-        if (time.compareTo(prevTime) > 0) {
-            map.put(userId, new TicketBundle(normalizeModId(modId), ticket, time));
-        }
-    }
-
-    private String normalizeModId(String modId) {
-        if (modId == null || modId.isBlank()) return "unknown";
-        return modId;
     }
 
     private String timeKey(JsonObject t) {
@@ -666,9 +733,23 @@ public class DatabaseManager {
             } else {
                 JsonObject ticketsOut = new JsonObject();
                 if (discordId != null && !discordId.isBlank()) {
-                    TicketBundle b = ticketsByUserId.get(discordId);
-                    if (b != null && b.ticket() != null) {
-                        ticketsOut.add(b.moderatorId(), b.ticket());
+                    List<TicketInfo> list = ticketsByUserId.get(discordId);
+                    if (list != null && !list.isEmpty()) {
+                        for (TicketInfo ti : list) {
+                            String modId = ti.moderatorId() == null || ti.moderatorId().isBlank() ? "unknown" : ti.moderatorId();
+                            String ticketId = ti.ticketId() == null || ti.ticketId().isBlank() ? "unknown" : ti.ticketId();
+                            JsonObject ticket = ti.ticket();
+                            if (ticket == null) continue;
+
+                            JsonObject modObj;
+                            if (ticketsOut.has(modId) && ticketsOut.get(modId).isJsonObject()) {
+                                modObj = ticketsOut.getAsJsonObject(modId);
+                            } else {
+                                modObj = new JsonObject();
+                                ticketsOut.add(modId, modObj);
+                            }
+                            modObj.add(ticketId, ticket);
+                        }
                     }
                 }
                 obj.add("tickets", ticketsOut);
@@ -961,8 +1042,23 @@ public class DatabaseManager {
     private String resolveMinecraftName(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
         String fromExternal = externalCache.get(discordId);
         if (fromExternal != null && !fromExternal.isBlank()) return fromExternal;
+
         String fromUsercache = userCacheMap.get(minecraftUuid);
         if (fromUsercache != null && !fromUsercache.isBlank()) return fromUsercache;
+
+        String fromTickets = ticketNameCache.get(discordId);
+        if (fromTickets != null && !fromTickets.isBlank()) return fromTickets;
+
+        List<TicketInfo> list = ticketsByUserId.get(discordId);
+        if (list != null && !list.isEmpty()) {
+            for (int i = list.size() - 1; i >= 0; i--) {
+                JsonObject t = list.get(i).ticket();
+                if (t == null) continue;
+                String name = getStringOrNull(t, "name");
+                if (name != null && !name.isBlank()) return name;
+            }
+        }
+
         return "Unknown";
     }
 
@@ -1574,7 +1670,7 @@ public class DatabaseManager {
         }
     }
 
-    private record TicketBundle(String moderatorId, JsonObject ticket, String timeKey) {
+    private record TicketInfo(String moderatorId, String ticketId, JsonObject ticket, String timeKey) {
     }
 
     private record IpRule(int network, int maskBits, int mask) {
