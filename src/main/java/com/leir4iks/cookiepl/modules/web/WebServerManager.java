@@ -38,7 +38,6 @@ public class WebServerManager {
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/players", this::handlePlayersRequest);
             server.createContext("/serverinfo", this::handleServerInfoRequest);
-            server.createContext("/database", this::handleDatabaseRequest);
 
             int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
             server.setExecutor(Executors.newFixedThreadPool(threads));
@@ -101,42 +100,49 @@ public class WebServerManager {
 
         if (path.equals("/players") || path.equals("/players/")) {
             sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
-        } else if (path.startsWith("/players/")) {
+            return;
+        }
+
+        if (path.startsWith("/players/")) {
             String[] segments = path.split("/");
             if (segments.length > 2) {
                 String playerId = segments[2];
-                String response = databaseManager.getPlayerJsonById(playerId);
+                String ip = getClientIp(exchange);
+
+                String response = databaseManager.getPlayerJsonById(playerId, ip);
 
                 if (response.contains("\"error\":\"Player not found\"")) {
                     sendResponse(exchange, 404, response);
                 } else {
                     sendResponse(exchange, 200, response);
                 }
-            } else {
-                sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
+                return;
             }
-        } else {
-            sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
         }
+
+        sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
     }
 
-    private void handleDatabaseRequest(HttpExchange exchange) throws IOException {
-        handleCors(exchange);
-
-        if (exchange.getRequestMethod().equalsIgnoreCase("OPTIONS")) {
-            exchange.sendResponseHeaders(204, -1);
-            return;
-        }
-
-        String ip = null;
+    private String getClientIp(HttpExchange exchange) {
         try {
+            String xff = exchange.getRequestHeaders().getFirst("X-Forwarded-For");
+            if (xff != null && !xff.isBlank()) {
+                String[] parts = xff.split(",");
+                if (parts.length > 0) {
+                    String ip = parts[0].trim();
+                    if (!ip.isBlank()) return ip;
+                }
+            }
+
+            String xri = exchange.getRequestHeaders().getFirst("X-Real-IP");
+            if (xri != null && !xri.isBlank()) return xri.trim();
+
             if (exchange.getRemoteAddress() != null && exchange.getRemoteAddress().getAddress() != null) {
-                ip = exchange.getRemoteAddress().getAddress().getHostAddress();
+                return exchange.getRemoteAddress().getAddress().getHostAddress();
             }
         } catch (Exception ignored) {
         }
-
-        sendResponse(exchange, 200, databaseManager.getDatabaseWithTicketsJson(ip));
+        return null;
     }
 
     private void handleServerInfoRequest(HttpExchange exchange) throws IOException {

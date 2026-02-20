@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.stream.JsonReader;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.Bukkit;
@@ -18,6 +19,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.StringReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -49,9 +51,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class DatabaseManager {
 
     private static final String SKINS_DATABASE_URL = "http://212.80.7.214:20945/skins";
-    private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
-    private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
+    private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
@@ -80,18 +81,18 @@ public class DatabaseManager {
     private volatile String playersSummaryListCache = "[]";
 
     private final Set<String> onlineUuids = ConcurrentHashMap.newKeySet();
-    private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
+    private final AtomicBoolean playersRefreshRunning = new AtomicBoolean(false);
 
     private volatile List<IpRule> whitelistRules = List.of();
-    private volatile String ticketsJsonCache = "{}";
-    private final AtomicBoolean ticketsRefreshRunning = new AtomicBoolean(false);
     private final AtomicBoolean whitelistRefreshRunning = new AtomicBoolean(false);
 
-    private WrappedTask updateTask;
+    private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
+    private volatile Map<String, TicketBundle> ticketsByUserId = Map.of();
+
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
     private WrappedTask whitelistUpdateTask;
-    private WrappedTask ticketsUpdateTask;
+    private WrappedTask statsUpdateTask;
 
     private final OnlineListener onlineListener = new OnlineListener();
 
@@ -122,32 +123,28 @@ public class DatabaseManager {
 
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
             initMysql();
-            updateExternalData();
             updateSkinsData();
             updateWhitelistData();
-            updateTicketsData();
+            updateExternalStatsData();
             refreshPlayersData();
         });
 
-        this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 3600L, 3600L);
         this.skinsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateSkinsData, 300L, 300L);
         this.playersStatsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::refreshPlayersData, 6000L, 6000L);
         this.whitelistUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateWhitelistData, 1200L, 1200L);
-        this.ticketsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateTicketsData, 1200L, 1200L);
+        this.statsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalStatsData, 300L, 300L);
     }
 
     public void stop() {
-        if (updateTask != null) updateTask.cancel();
         if (skinsUpdateTask != null) skinsUpdateTask.cancel();
         if (playersStatsUpdateTask != null) playersStatsUpdateTask.cancel();
         if (whitelistUpdateTask != null) whitelistUpdateTask.cancel();
-        if (ticketsUpdateTask != null) ticketsUpdateTask.cancel();
+        if (statsUpdateTask != null) statsUpdateTask.cancel();
 
-        updateTask = null;
         skinsUpdateTask = null;
         playersStatsUpdateTask = null;
         whitelistUpdateTask = null;
-        ticketsUpdateTask = null;
+        statsUpdateTask = null;
 
         try {
             HandlerList.unregisterAll(onlineListener);
@@ -236,12 +233,8 @@ public class DatabaseManager {
             }
 
             dbReady = true;
-
             String cachedPlayers = readMeta("players_summary_json");
             if (cachedPlayers != null && !cachedPlayers.isBlank()) playersSummaryListCache = cachedPlayers;
-
-            String cachedTickets = readMeta("tickets_json");
-            if (cachedTickets != null && !cachedTickets.isBlank()) ticketsJsonCache = cachedTickets;
 
         } catch (Exception e) {
             dbReady = false;
@@ -263,74 +256,12 @@ public class DatabaseManager {
         }
     }
 
-    private void saveDataYml() {
-        try {
-            YamlConfiguration config = new YamlConfiguration();
-            for (Map.Entry<String, String> entry : externalCache.entrySet()) {
-                config.set(entry.getKey(), entry.getValue());
-            }
-            config.save(dataFile);
-        } catch (IOException e) {
-            plugin.getLogManager().severe("Failed to save data.yml: " + e.getMessage());
-        }
-    }
-
-    private void updateExternalData() {
-        String urlStr = plugin.getConfig().getString("modules.web-server.external-name-url", EXTERNAL_NAME_URL_DEFAULT);
-        try {
-            URL url = new URL(urlStr);
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(3000);
-            connection.setReadTimeout(3000);
-            connection.setRequestMethod("GET");
-
-            if (connection.getResponseCode() == 200) {
-                try (Scanner scanner = new Scanner(connection.getInputStream(), StandardCharsets.UTF_8)) {
-                    boolean changed = false;
-                    while (scanner.hasNextLine()) {
-                        String line = scanner.nextLine();
-                        if (line == null) continue;
-                        line = line.trim();
-                        if (line.isEmpty()) continue;
-
-                        String[] parts = line.split("\\s+");
-                        if (parts.length >= 2) {
-                            String discordId = parts[0];
-                            String nick = parts[1];
-
-                            String prev = externalCache.get(discordId);
-                            if (!Objects.equals(prev, nick)) {
-                                externalCache.put(discordId, nick);
-                                changed = true;
-                            }
-                        }
-                    }
-                    if (changed) saveDataYml();
-                }
-            } else {
-                plugin.getLogManager().warn("External name db returned: " + connection.getResponseCode());
-            }
-            connection.disconnect();
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update external name db: " + e.getMessage());
-        }
-    }
-
     private void updateWhitelistData() {
         if (!whitelistRefreshRunning.compareAndSet(false, true)) return;
         try {
             String urlPrimary = plugin.getConfig().getString("modules.web-server.tickets.whitelist-url", EXTERNAL_WHITELIST_URL_DEFAULT);
-            String urlFallback = plugin.getConfig().getString("modules.web-server.external-name-url", EXTERNAL_NAME_URL_DEFAULT);
-
             String text = fetchText(urlPrimary, 3000, 3000);
             List<IpRule> rules = parseWhitelistRules(text);
-
-            if (rules == null || rules.isEmpty()) {
-                String text2 = fetchText(urlFallback, 3000, 3000);
-                List<IpRule> rules2 = parseWhitelistRules(text2);
-                if (rules2 != null && !rules2.isEmpty()) rules = rules2;
-            }
-
             if (rules != null && !rules.isEmpty()) {
                 whitelistRules = rules;
             }
@@ -341,33 +272,137 @@ public class DatabaseManager {
         }
     }
 
-    private void updateTicketsData() {
-        if (!ticketsRefreshRunning.compareAndSet(false, true)) return;
+    private void updateExternalStatsData() {
+        if (!statsRefreshRunning.compareAndSet(false, true)) return;
         try {
-            String urlStr = plugin.getConfig().getString("modules.web-server.tickets.stats-url", EXTERNAL_STATS_URL_DEFAULT);
-            String text = fetchText(urlStr, 5000, 5000);
+            String urlStr = plugin.getConfig().getString("modules.web-server.external-stats-url", EXTERNAL_STATS_URL_DEFAULT);
+            String text = fetchText(urlStr, 8000, 8000);
             if (text == null || text.isBlank()) return;
 
-            JsonElement el;
-            try {
-                el = JsonParser.parseString(text);
-            } catch (Exception ignored) {
-                return;
+            JsonObject root = parseLenientObject(text);
+            if (root == null) return;
+
+            Map<String, String> userToModerator = new HashMap<>();
+            if (root.has("user_tickets") && root.get("user_tickets").isJsonObject()) {
+                JsonObject ut = root.getAsJsonObject("user_tickets");
+                for (Map.Entry<String, JsonElement> e : ut.entrySet()) {
+                    if (e.getKey() == null) continue;
+                    if (e.getValue() == null || e.getValue().isJsonNull()) continue;
+                    String mod = safeString(e.getValue());
+                    if (mod != null && !mod.isBlank()) userToModerator.put(e.getKey(), mod);
+                }
             }
 
-            if (!el.isJsonObject()) return;
+            Map<String, TicketBundle> bundles = new HashMap<>();
+            Map<String, String> names = new HashMap<>();
 
-            String normalized = el.getAsJsonObject().toString();
-            if (normalized == null || normalized.isBlank()) return;
+            if (root.has("tickets") && root.get("tickets").isJsonObject()) {
+                JsonObject tickets = root.getAsJsonObject("tickets");
+                for (Map.Entry<String, JsonElement> e : tickets.entrySet()) {
+                    if (e.getValue() == null || !e.getValue().isJsonObject()) continue;
+                    JsonObject t = e.getValue().getAsJsonObject();
+                    String userId = getStringOrNull(t, "userId");
+                    if (userId == null || userId.isBlank()) continue;
 
-            if (!normalized.equals(ticketsJsonCache)) {
-                ticketsJsonCache = normalized;
-                if (dbReady) writeMeta("tickets_json", normalized, System.currentTimeMillis());
+                    String name = getStringOrNull(t, "name");
+                    if (name != null && !name.isBlank()) names.put(userId, name);
+
+                    String modId = userToModerator.get(userId);
+                    if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "processedByID");
+                    if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "closed_by");
+
+                    String tk = timeKey(t);
+                    upsertTicketBundle(bundles, userId, modId, t, tk);
+                }
             }
+
+            if (root.has("closed") && root.get("closed").isJsonObject()) {
+                JsonObject closed = root.getAsJsonObject("closed");
+                for (Map.Entry<String, JsonElement> e : closed.entrySet()) {
+                    if (e.getValue() == null || !e.getValue().isJsonObject()) continue;
+                    JsonObject t = e.getValue().getAsJsonObject();
+                    String userId = getStringOrNull(t, "userId");
+                    if (userId == null || userId.isBlank()) continue;
+
+                    String name = getStringOrNull(t, "name");
+                    if (name != null && !name.isBlank()) names.put(userId, name);
+
+                    String modId = userToModerator.get(userId);
+                    if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "processedByID");
+                    if (modId == null || modId.isBlank()) modId = getStringOrNull(t, "closed_by");
+
+                    String tk = timeKey(t);
+                    upsertTicketBundle(bundles, userId, modId, t, tk);
+                }
+            }
+
+            if (!names.isEmpty()) {
+                for (Map.Entry<String, String> e : names.entrySet()) {
+                    externalCache.put(e.getKey(), e.getValue());
+                }
+            }
+
+            ticketsByUserId = Map.copyOf(bundles);
+
         } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update tickets stats: " + e.getMessage());
+            plugin.getLogManager().warn("Failed to update external stats: " + e.getMessage());
         } finally {
-            ticketsRefreshRunning.set(false);
+            statsRefreshRunning.set(false);
+        }
+    }
+
+    private void upsertTicketBundle(Map<String, TicketBundle> map, String userId, String modId, JsonObject ticket, String tk) {
+        if (userId == null || userId.isBlank() || ticket == null) return;
+        String time = tk == null ? "" : tk;
+
+        TicketBundle prev = map.get(userId);
+        if (prev == null) {
+            map.put(userId, new TicketBundle(normalizeModId(modId), ticket, time));
+            return;
+        }
+
+        String prevTime = prev.timeKey() == null ? "" : prev.timeKey();
+        if (time.compareTo(prevTime) > 0) {
+            map.put(userId, new TicketBundle(normalizeModId(modId), ticket, time));
+        }
+    }
+
+    private String normalizeModId(String modId) {
+        if (modId == null || modId.isBlank()) return "unknown";
+        return modId;
+    }
+
+    private String timeKey(JsonObject t) {
+        String best = "";
+        best = maxIso(best, getStringOrNull(t, "processedAt"));
+        best = maxIso(best, getStringOrNull(t, "closed_at"));
+        best = maxIso(best, getStringOrNull(t, "createdAt"));
+        best = maxIso(best, getStringOrNull(t, "created_at"));
+        return best;
+    }
+
+    private String maxIso(String a, String b) {
+        if (b == null || b.isBlank()) return a;
+        if (a == null || a.isBlank()) return b;
+        return b.compareTo(a) > 0 ? b : a;
+    }
+
+    private JsonObject parseLenientObject(String text) {
+        try {
+            JsonReader jr = new JsonReader(new StringReader(text));
+            jr.setLenient(true);
+            JsonElement el = JsonParser.parseReader(jr);
+            if (el != null && el.isJsonObject()) return el.getAsJsonObject();
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private String safeString(JsonElement el) {
+        try {
+            return el.getAsString();
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -465,19 +500,6 @@ public class DatabaseManager {
         return t;
     }
 
-    public String getDatabaseWithTicketsJson(String remoteIp) {
-        boolean allowed = isIpAllowed(remoteIp);
-        String players = getPlayersSummaryJson();
-        String tickets = ticketsJsonCache == null || ticketsJsonCache.isBlank() ? "{}" : ticketsJsonCache;
-
-        StringBuilder sb = new StringBuilder(players.length() + tickets.length() + 64);
-        sb.append("{\"players\":").append(players).append(",\"tickets\":");
-        if (allowed) sb.append(tickets);
-        else sb.append("\"not allowed\"");
-        sb.append('}');
-        return sb.toString();
-    }
-
     private boolean isIpAllowed(String ip) {
         if (ip == null || ip.isBlank()) return false;
         int v = IpRule.ipv4ToInt(ip.trim());
@@ -491,7 +513,7 @@ public class DatabaseManager {
     }
 
     private void refreshPlayersData() {
-        if (!statsRefreshRunning.compareAndSet(false, true)) return;
+        if (!playersRefreshRunning.compareAndSet(false, true)) return;
         try {
             List<AccountEntry> accounts = loadAccountsIfChanged();
             Map<String, String> userCache = loadUserCacheIfChanged();
@@ -589,7 +611,7 @@ public class DatabaseManager {
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to refresh players data: " + e.getMessage());
         } finally {
-            statsRefreshRunning.set(false);
+            playersRefreshRunning.set(false);
         }
     }
 
@@ -604,6 +626,10 @@ public class DatabaseManager {
     }
 
     public String getPlayerJsonById(String query) {
+        return getPlayerJsonById(query, null);
+    }
+
+    public String getPlayerJsonById(String query, String remoteIp) {
         String q = query == null ? "" : query.trim();
         if (q.isEmpty()) {
             JsonObject errorObj = new JsonObject();
@@ -611,37 +637,47 @@ public class DatabaseManager {
             return errorObj.toString();
         }
 
+        boolean allowed = isIpAllowed(remoteIp);
+
+        String baseJson = null;
         if (dbReady) {
-            String fromDb = findFullJsonInDb(q);
-            if (fromDb != null) {
-                try {
-                    JsonObject obj = JsonParser.parseString(fromDb).getAsJsonObject();
-                    if (obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull()) {
-                        String uuid = obj.get("minecraft_uuid").getAsString();
-                        obj.addProperty("is_online", onlineUuids.contains(uuid));
-                    }
-                    if (obj.has("stats") && obj.get("stats").isJsonObject()) {
-                        JsonObject st = obj.getAsJsonObject("stats");
-                        if (st.has("joins") && !st.get("joins").isJsonNull()) {
-                            long leaveGame = st.get("joins").getAsLong();
-                            if (obj.has("is_online") && obj.get("is_online").getAsBoolean()) {
-                                if (leaveGame > 0) st.addProperty("joins", leaveGame);
-                            }
-                        }
-                    }
-                    return obj.toString();
-                } catch (Exception ignored) {
-                    return fromDb;
-                }
-            }
+            baseJson = findFullJsonInDb(q);
+        }
+        if (baseJson == null) {
+            baseJson = findFullJsonFallback(q);
+        }
+        if (baseJson == null) {
+            JsonObject errorObj = new JsonObject();
+            errorObj.addProperty("error", "Player not found");
+            return errorObj.toString();
         }
 
-        String fallback = findFullJsonFallback(q);
-        if (fallback != null) return fallback;
+        try {
+            JsonObject obj = JsonParser.parseString(baseJson).getAsJsonObject();
+            if (obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull()) {
+                String uuid = obj.get("minecraft_uuid").getAsString();
+                obj.addProperty("is_online", onlineUuids.contains(uuid));
+            }
 
-        JsonObject errorObj = new JsonObject();
-        errorObj.addProperty("error", "Player not found");
-        return errorObj.toString();
+            String discordId = obj.has("id") && !obj.get("id").isJsonNull() ? obj.get("id").getAsString() : null;
+
+            if (!allowed) {
+                obj.addProperty("tickets", "not allowed");
+            } else {
+                JsonObject ticketsOut = new JsonObject();
+                if (discordId != null && !discordId.isBlank()) {
+                    TicketBundle b = ticketsByUserId.get(discordId);
+                    if (b != null && b.ticket() != null) {
+                        ticketsOut.add(b.moderatorId(), b.ticket());
+                    }
+                }
+                obj.add("tickets", ticketsOut);
+            }
+
+            return obj.toString();
+        } catch (Exception e) {
+            return baseJson;
+        }
     }
 
     private void handleOnlineChange(String uuid, boolean isOnline) {
@@ -654,7 +690,6 @@ public class DatabaseManager {
         if (discordId == null || discordId.isBlank()) return;
 
         boolean changed = false;
-        String newSummary = null;
 
         synchronized (summaryLock) {
             JsonObject obj = summaryByDiscordId.get(discordId);
@@ -672,8 +707,7 @@ public class DatabaseManager {
                     JsonObject o = summaryByDiscordId.get(id);
                     if (o != null) arr.add(o);
                 }
-                newSummary = arr.toString();
-                playersSummaryListCache = newSummary;
+                playersSummaryListCache = arr.toString();
             }
         }
 
@@ -1075,8 +1109,13 @@ public class DatabaseManager {
     }
 
     private String getStringOrNull(JsonObject json, String key) {
+        if (json == null || key == null) return null;
         if (!json.has(key) || json.get(key).isJsonNull()) return null;
-        return json.get(key).getAsString();
+        try {
+            return json.get(key).getAsString();
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private String buildFallbackSkinUrl(String minecraftUuid, String minecraftName) {
@@ -1533,6 +1572,9 @@ public class DatabaseManager {
         public void onQuit(PlayerQuitEvent e) {
             handleOnlineChange(e.getPlayer().getUniqueId().toString(), false);
         }
+    }
+
+    private record TicketBundle(String moderatorId, JsonObject ticket, String timeKey) {
     }
 
     private record IpRule(int network, int maskBits, int mask) {
