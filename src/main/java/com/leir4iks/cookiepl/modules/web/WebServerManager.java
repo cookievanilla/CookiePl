@@ -24,9 +24,7 @@ public class WebServerManager {
     private final boolean corsEnabled;
 
     private WrappedTask updateTask;
-    private volatile String cachedPlayersJson = "[]";
     private volatile String cachedServerInfoJson = "{}";
-    private volatile boolean cacheInitialized = false;
 
     public WebServerManager(CookiePl plugin, DatabaseManager databaseManager) {
         this.plugin = plugin;
@@ -40,17 +38,13 @@ public class WebServerManager {
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/players", this::handlePlayersRequest);
             server.createContext("/serverinfo", this::handleServerInfoRequest);
-            server.setExecutor(Executors.newCachedThreadPool());
+
+            int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
+            server.setExecutor(Executors.newFixedThreadPool(threads));
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runAsync(task -> {
-                updateCache();
-                cacheInitialized = true;
-            });
-
-            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(() -> {
-                updateCache();
-            }, 600L, 600L);
+            plugin.getFoliaLib().getScheduler().runAsync(task -> updateCache());
+            this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateCache, 600L, 600L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
@@ -71,9 +65,6 @@ public class WebServerManager {
 
     private void updateCache() {
         try {
-            // /players -> только краткие данные
-            this.cachedPlayersJson = databaseManager.getPlayersSummaryJson();
-
             JsonObject json = new JsonObject();
             json.addProperty("online", plugin.getServer().getOnlinePlayers().size());
 
@@ -92,7 +83,6 @@ public class WebServerManager {
             json.addProperty("server", plugin.getServer().getName());
 
             this.cachedServerInfoJson = json.toString();
-
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update web server cache: " + e.getMessage());
         }
@@ -109,13 +99,11 @@ public class WebServerManager {
         String path = exchange.getRequestURI().getPath();
 
         if (path.equals("/players") || path.equals("/players/")) {
-            // summary
-            sendResponse(exchange, 200, cachedPlayersJson);
+            sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
         } else if (path.startsWith("/players/")) {
             String[] segments = path.split("/");
             if (segments.length > 2) {
                 String playerId = segments[2];
-                // full
                 String response = databaseManager.getPlayerJsonById(playerId);
 
                 if (response.contains("\"error\":\"Player not found\"")) {
@@ -124,10 +112,10 @@ public class WebServerManager {
                     sendResponse(exchange, 200, response);
                 }
             } else {
-                sendResponse(exchange, 200, cachedPlayersJson);
+                sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
             }
         } else {
-            sendResponse(exchange, 200, cachedPlayersJson);
+            sendResponse(exchange, 200, databaseManager.getPlayersSummaryJson());
         }
     }
 

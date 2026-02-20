@@ -7,11 +7,14 @@ import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.Bukkit;
-import org.bukkit.Material;
-import org.bukkit.OfflinePlayer;
-import org.bukkit.Statistic;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
@@ -19,8 +22,30 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.*;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.PriorityQueue;
+import java.util.Scanner;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class DatabaseManager {
 
@@ -38,14 +63,33 @@ public class DatabaseManager {
     private final Map<String, String> skinsSkinUrlCache = new ConcurrentHashMap<>();
     private final Map<String, String> skinsNameSkinUrlCache = new ConcurrentHashMap<>();
 
-    // FULL cache (используется getDatabaseJson, если нужно)
-    private final Map<String, JsonObject> playersCache = new ConcurrentHashMap<>();
+    private volatile long userCacheLastModified = -1L;
+    private volatile Map<String, String> userCacheMap = Map.of();
 
-    // SUMMARY cache (для /players)
-    private final Map<String, JsonObject> playersSummaryCache = new ConcurrentHashMap<>();
+    private volatile long accountsLastModified = -1L;
+    private volatile List<AccountEntry> accountsList = List.of();
+
+    private volatile List<File> statsFolders = List.of();
+    private final Map<String, StatsCacheEntry> statsCache = new ConcurrentHashMap<>();
+
+    private final Object summaryLock = new Object();
+    private volatile Map<String, JsonObject> summaryByDiscordId = Map.of();
+    private volatile List<String> summaryOrder = List.of();
+    private volatile Map<String, String> discordIdByUuid = Map.of();
+    private volatile String playersSummaryListCache = "[]";
+
+    private final Set<String> onlineUuids = ConcurrentHashMap.newKeySet();
+
+    private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
 
     private WrappedTask updateTask;
     private WrappedTask skinsUpdateTask;
+    private WrappedTask playersStatsUpdateTask;
+
+    private final OnlineListener onlineListener = new OnlineListener();
+
+    private volatile boolean dbReady = false;
+    private ConnectionPool pool;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -56,20 +100,132 @@ public class DatabaseManager {
 
     public void start() {
         loadDataYml();
+        buildStatsFolders();
+
+        try {
+            Bukkit.getOnlinePlayers().forEach(p -> onlineUuids.add(p.getUniqueId().toString()));
+        } catch (Exception ignored) {
+        }
+
+        try {
+            Bukkit.getPluginManager().registerEvents(onlineListener, plugin);
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to register online listener: " + e.getMessage());
+        }
+
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
+            initMysql();
             updateExternalData();
             updateSkinsData();
+            refreshPlayersData();
         });
+
         this.updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateExternalData, 3600L, 3600L);
         this.skinsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateSkinsData, 300L, 300L);
+        this.playersStatsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::refreshPlayersData, 6000L, 6000L);
     }
 
     public void stop() {
-        if (updateTask != null) {
-            updateTask.cancel();
+        if (updateTask != null) updateTask.cancel();
+        if (skinsUpdateTask != null) skinsUpdateTask.cancel();
+        if (playersStatsUpdateTask != null) playersStatsUpdateTask.cancel();
+        updateTask = null;
+        skinsUpdateTask = null;
+        playersStatsUpdateTask = null;
+
+        try {
+            HandlerList.unregisterAll(onlineListener);
+        } catch (Exception ignored) {
         }
-        if (skinsUpdateTask != null) {
-            skinsUpdateTask.cancel();
+
+        if (pool != null) pool.close();
+        pool = null;
+        dbReady = false;
+    }
+
+    private void buildStatsFolders() {
+        try {
+            List<File> folders = new ArrayList<>();
+            Bukkit.getWorlds().forEach(w -> {
+                File wf = w.getWorldFolder();
+                if (wf != null) folders.add(new File(wf, "stats"));
+            });
+            this.statsFolders = folders;
+        } catch (Exception e) {
+            this.statsFolders = List.of();
+        }
+    }
+
+    private void initMysql() {
+        boolean enabled = plugin.getConfig().getBoolean("modules.web-server.mysql.enabled", true);
+        if (!enabled) {
+            dbReady = false;
+            return;
+        }
+
+        String host = plugin.getConfig().getString("modules.web-server.mysql.host", "127.0.0.1");
+        int port = plugin.getConfig().getInt("modules.web-server.mysql.port", 3306);
+        String database = plugin.getConfig().getString("modules.web-server.mysql.database", "cookiepl");
+        String user = plugin.getConfig().getString("modules.web-server.mysql.user", "root");
+        String password = plugin.getConfig().getString("modules.web-server.mysql.password", "");
+        int poolSize = Math.max(2, plugin.getConfig().getInt("modules.web-server.mysql.pool-size", 10));
+
+        String baseParams = "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&cachePrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048&useServerPrepStmts=true&rewriteBatchedStatements=true";
+        String serverUrl = "jdbc:mysql://" + host + ":" + port + "/?" + baseParams;
+        String dbUrl = "jdbc:mysql://" + host + ":" + port + "/" + database + "?" + baseParams;
+
+        try {
+            try {
+                Class.forName("com.mysql.cj.jdbc.Driver");
+            } catch (ClassNotFoundException e) {
+                Class.forName("org.mariadb.jdbc.Driver");
+            }
+
+            try (Connection c = DriverManager.getConnection(serverUrl, user, password); Statement st = c.createStatement()) {
+                st.execute("CREATE DATABASE IF NOT EXISTS `" + database + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+            } catch (Exception ignored) {
+            }
+
+            this.pool = new ConnectionPool(dbUrl, user, password, poolSize);
+
+            Connection c = null;
+            try {
+                c = pool.borrow();
+                try (Statement st = c.createStatement()) {
+                    st.execute("CREATE TABLE IF NOT EXISTS players (" +
+                            "discord_id VARCHAR(32) PRIMARY KEY," +
+                            "minecraft_uuid CHAR(36) NOT NULL," +
+                            "minecraft_name VARCHAR(32) NOT NULL," +
+                            "minecraft_name_lc VARCHAR(32) NOT NULL," +
+                            "skin_url TEXT," +
+                            "head_url TEXT," +
+                            "is_online TINYINT(1) NOT NULL DEFAULT 0," +
+                            "play_time_hours DOUBLE NOT NULL DEFAULT 0," +
+                            "summary_json MEDIUMTEXT," +
+                            "full_json MEDIUMTEXT," +
+                            "summary_updated_at BIGINT NOT NULL DEFAULT 0," +
+                            "full_updated_at BIGINT NOT NULL DEFAULT 0," +
+                            "stats_mtime BIGINT NOT NULL DEFAULT 0," +
+                            "INDEX idx_uuid (minecraft_uuid)," +
+                            "INDEX idx_name_lc (minecraft_name_lc)" +
+                            ") CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+                    st.execute("CREATE TABLE IF NOT EXISTS meta (" +
+                            "k VARCHAR(64) PRIMARY KEY," +
+                            "v MEDIUMTEXT," +
+                            "updated_at BIGINT NOT NULL DEFAULT 0" +
+                            ") CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+                }
+            } finally {
+                pool.release(c);
+            }
+
+            dbReady = true;
+            String cached = readMeta("players_summary_json");
+            if (cached != null && !cached.isBlank()) playersSummaryListCache = cached;
+        } catch (Exception e) {
+            dbReady = false;
+            pool = null;
+            plugin.getLogManager().warn("MySQL init failed: " + e.getMessage());
         }
     }
 
@@ -78,50 +234,11 @@ public class DatabaseManager {
         try {
             YamlConfiguration config = YamlConfiguration.loadConfiguration(dataFile);
             for (String key : config.getKeys(false)) {
-                externalCache.put(key, config.getString(key));
+                String v = config.getString(key);
+                if (v != null) externalCache.put(key, v);
             }
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to load data.yml: " + e.getMessage());
-        }
-    }
-
-    private void updateExternalData() {
-        try {
-            URL url = new URL(externalDatabaseUrl);
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(3000);
-            connection.setReadTimeout(3000);
-            connection.setRequestMethod("GET");
-
-            if (connection.getResponseCode() == 200) {
-                try (Scanner scanner = new Scanner(connection.getInputStream())) {
-                    boolean changed = false;
-                    while (scanner.hasNextLine()) {
-                        String line = scanner.nextLine();
-                        if (line.trim().isEmpty()) continue;
-
-                        String[] parts = line.trim().split("\\s+");
-                        if (parts.length >= 2) {
-                            String discordId = parts[0];
-                            String nick = parts[1];
-
-                            if (!nick.equals(externalCache.get(discordId))) {
-                                externalCache.put(discordId, nick);
-                                changed = true;
-                            }
-                        }
-                    }
-
-                    if (changed) {
-                        saveDataYml();
-                    }
-                }
-            } else {
-                plugin.getLogManager().warn("External database returned: " + connection.getResponseCode());
-            }
-            connection.disconnect();
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update external database: " + e.getMessage());
         }
     }
 
@@ -137,405 +254,477 @@ public class DatabaseManager {
         }
     }
 
-    private void updatePlayersCache() {
-        Map<String, String> userCacheMap = loadUserCache();
-        File accountsFile = new File(discordSrvFolder, "accounts.aof");
-
-        if (!accountsFile.exists()) {
-            playersCache.clear();
-            return;
-        }
-
-        Map<String, JsonObject> newCache = new HashMap<>();
+    private void updateExternalData() {
         try {
-            List<String> lines = Files.readAllLines(accountsFile.toPath());
-            for (String line : lines) {
-                if (line.trim().isEmpty()) continue;
+            URL url = new URL(externalDatabaseUrl);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(3000);
+            connection.setReadTimeout(3000);
+            connection.setRequestMethod("GET");
 
-                String[] parts = line.trim().split("\\s+");
-                if (parts.length >= 2) {
-                    String discordId = parts[0];
-                    String minecraftUuid = parts[1];
+            if (connection.getResponseCode() == 200) {
+                try (Scanner scanner = new Scanner(connection.getInputStream(), StandardCharsets.UTF_8)) {
+                    boolean changed = false;
+                    while (scanner.hasNextLine()) {
+                        String line = scanner.nextLine();
+                        if (line == null) continue;
+                        line = line.trim();
+                        if (line.isEmpty()) continue;
 
-                    JsonObject playerData = createPlayerData(discordId, minecraftUuid, userCacheMap);
-                    if (playerData != null) {
-                        newCache.put(discordId, playerData);
+                        String[] parts = line.split("\\s+");
+                        if (parts.length >= 2) {
+                            String discordId = parts[0];
+                            String nick = parts[1];
+
+                            String prev = externalCache.get(discordId);
+                            if (!Objects.equals(prev, nick)) {
+                                externalCache.put(discordId, nick);
+                                changed = true;
+                            }
+                        }
                     }
+                    if (changed) saveDataYml();
                 }
+            } else {
+                plugin.getLogManager().warn("External database returned: " + connection.getResponseCode());
             }
-            playersCache.clear();
-            playersCache.putAll(newCache);
-        } catch (IOException e) {
-            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+            connection.disconnect();
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update external database: " + e.getMessage());
         }
     }
 
-    private void updatePlayersSummaryCache() {
-        Map<String, String> userCacheMap = loadUserCache();
-        File accountsFile = new File(discordSrvFolder, "accounts.aof");
-
-        if (!accountsFile.exists()) {
-            playersSummaryCache.clear();
-            return;
-        }
-
-        Map<String, JsonObject> newCache = new HashMap<>();
+    private void refreshPlayersData() {
+        if (!statsRefreshRunning.compareAndSet(false, true)) return;
         try {
-            List<String> lines = Files.readAllLines(accountsFile.toPath());
-            for (String line : lines) {
-                if (line.trim().isEmpty()) continue;
+            List<AccountEntry> accounts = loadAccountsIfChanged();
+            Map<String, String> userCache = loadUserCacheIfChanged();
 
-                String[] parts = line.trim().split("\\s+");
-                if (parts.length >= 2) {
-                    String discordId = parts[0];
-                    String minecraftUuid = parts[1];
-
-                    JsonObject playerData = createPlayerSummaryData(discordId, minecraftUuid, userCacheMap);
-                    if (playerData != null) {
-                        newCache.put(discordId, playerData);
-                    }
+            if (accounts.isEmpty()) {
+                synchronized (summaryLock) {
+                    summaryByDiscordId = Map.of();
+                    summaryOrder = List.of();
+                    discordIdByUuid = Map.of();
+                    playersSummaryListCache = "[]";
                 }
+                if (dbReady) writeMeta("players_summary_json", "[]", System.currentTimeMillis());
+                return;
             }
-            playersSummaryCache.clear();
-            playersSummaryCache.putAll(newCache);
-        } catch (IOException e) {
-            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+
+            long now = System.currentTimeMillis();
+            List<PlayerUpsertRow> rows = new ArrayList<>(accounts.size());
+
+            Map<String, JsonObject> newSummaryMap = new HashMap<>(Math.max(16, accounts.size() * 2));
+            ArrayList<String> newOrder = new ArrayList<>(accounts.size());
+            Map<String, String> newDiscordIdByUuid = new HashMap<>(Math.max(16, accounts.size() * 2));
+            JsonArray summaryArray = new JsonArray();
+
+            for (AccountEntry entry : accounts) {
+                String discordId = entry.discordId();
+                String minecraftUuid = entry.minecraftUuid();
+                UUID uuid;
+                try {
+                    uuid = UUID.fromString(minecraftUuid);
+                } catch (Exception ignored) {
+                    continue;
+                }
+
+                String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCache);
+                SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
+
+                boolean isOnline = onlineUuids.contains(minecraftUuid);
+
+                StatsSnapshot snapshot = getStatsSnapshot(uuid);
+                double playTimeHours = round1(ticksToHours(snapshot.playTimeTicks()));
+                JsonObject statsObj = buildStatsJson(snapshot, isOnline);
+
+                JsonObject summary = new JsonObject();
+                summary.addProperty("id", discordId);
+                summary.addProperty("minecraft_name", minecraftName);
+                summary.addProperty("minecraft_uuid", minecraftUuid);
+                summary.addProperty("skinUrl", skinLinks.skinUrl());
+                summary.addProperty("headUrl", skinLinks.headUrl());
+                summary.addProperty("is_online", isOnline);
+                summary.addProperty("play_time_hours", playTimeHours);
+                summaryArray.add(summary);
+
+                JsonObject full = new JsonObject();
+                full.addProperty("id", discordId);
+                full.addProperty("minecraft_name", minecraftName);
+                full.addProperty("minecraft_uuid", minecraftUuid);
+                full.addProperty("skinUrl", skinLinks.skinUrl());
+                full.addProperty("headUrl", skinLinks.headUrl());
+                full.addProperty("is_online", isOnline);
+                full.add("stats", statsObj);
+
+                newSummaryMap.put(discordId, summary);
+                newOrder.add(discordId);
+                newDiscordIdByUuid.put(minecraftUuid, discordId);
+
+                rows.add(new PlayerUpsertRow(
+                        discordId,
+                        minecraftUuid,
+                        minecraftName,
+                        minecraftName == null ? "" : minecraftName.toLowerCase(Locale.ROOT),
+                        skinLinks.skinUrl(),
+                        skinLinks.headUrl(),
+                        isOnline,
+                        playTimeHours,
+                        summary.toString(),
+                        full.toString(),
+                        now,
+                        now,
+                        snapshot.mtime()
+                ));
+            }
+
+            String summaryStr = summaryArray.toString();
+            synchronized (summaryLock) {
+                summaryByDiscordId = newSummaryMap;
+                summaryOrder = List.copyOf(newOrder);
+                discordIdByUuid = newDiscordIdByUuid;
+                playersSummaryListCache = summaryStr;
+            }
+
+            if (dbReady) {
+                upsertPlayers(rows);
+                writeMeta("players_summary_json", summaryStr, now);
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to refresh players data: " + e.getMessage());
+        } finally {
+            statsRefreshRunning.set(false);
         }
     }
 
-    /**
-     * FULL (как было раньше) — может быть полезно для других модулей.
-     */
-    public String getDatabaseJson() {
-        updatePlayersCache();
-        JsonArray rootArray = new JsonArray();
-        for (JsonObject playerData : playersCache.values()) {
-            rootArray.add(playerData);
-        }
-        return rootArray.toString();
-    }
-
-    /**
-     * SUMMARY для /players:
-     * id discord, name, uuid, skin(full), head, online, play_time_hours
-     */
     public String getPlayersSummaryJson() {
-        updatePlayersSummaryCache();
-        JsonArray rootArray = new JsonArray();
-        for (JsonObject playerData : playersSummaryCache.values()) {
-            rootArray.add(playerData);
-        }
-        return rootArray.toString();
+        String cached = playersSummaryListCache;
+        if (cached != null && !cached.isBlank()) return cached;
+        if (!dbReady) return "[]";
+        String v = readMeta("players_summary_json");
+        if (v == null || v.isBlank()) return "[]";
+        playersSummaryListCache = v;
+        return v;
     }
 
-    /**
-     * Для /players/<nickname|id|uuid> — всегда FULL.
-     */
     public String getPlayerJsonById(String query) {
-        String normalizedQuery = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-        Map<String, String> userCacheMap = loadUserCache();
+        String q = query == null ? "" : query.trim();
+        if (q.isEmpty()) {
+            JsonObject errorObj = new JsonObject();
+            errorObj.addProperty("error", "Player not found");
+            return errorObj.toString();
+        }
 
-        AccountEntry entry = findAccountEntry(normalizedQuery, userCacheMap);
-        if (entry != null) {
-            JsonObject playerData = createPlayerData(entry.discordId(), entry.minecraftUuid(), userCacheMap);
-            if (playerData != null) {
-                return playerData.toString();
+        if (dbReady) {
+            String fromDb = findFullJsonInDb(q);
+            if (fromDb != null) {
+                try {
+                    JsonObject obj = JsonParser.parseString(fromDb).getAsJsonObject();
+                    if (obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull()) {
+                        String uuid = obj.get("minecraft_uuid").getAsString();
+                        obj.addProperty("is_online", onlineUuids.contains(uuid));
+                    }
+                    return obj.toString();
+                } catch (Exception ignored) {
+                    return fromDb;
+                }
             }
         }
+
+        String fallback = findFullJsonFallback(q);
+        if (fallback != null) return fallback;
 
         JsonObject errorObj = new JsonObject();
         errorObj.addProperty("error", "Player not found");
         return errorObj.toString();
     }
 
-    private boolean matchesQuery(JsonObject playerData, String query) {
-        if (query.isBlank()) {
-            return false;
+    private void handleOnlineChange(String uuid, boolean isOnline) {
+        if (uuid == null || uuid.isBlank()) return;
+
+        if (isOnline) onlineUuids.add(uuid);
+        else onlineUuids.remove(uuid);
+
+        String discordId = discordIdByUuid.get(uuid);
+        if (discordId == null || discordId.isBlank()) return;
+
+        boolean changed = false;
+        String newSummary = null;
+
+        synchronized (summaryLock) {
+            JsonObject obj = summaryByDiscordId.get(discordId);
+            if (obj == null) return;
+
+            boolean wasOnline = obj.has("is_online") && !obj.get("is_online").isJsonNull() && obj.get("is_online").getAsBoolean();
+            if (wasOnline != isOnline) {
+                obj.addProperty("is_online", isOnline);
+                changed = true;
+            }
+
+            if (changed) {
+                JsonArray arr = new JsonArray();
+                for (String id : summaryOrder) {
+                    JsonObject o = summaryByDiscordId.get(id);
+                    if (o != null) arr.add(o);
+                }
+                newSummary = arr.toString();
+                playersSummaryListCache = newSummary;
+            }
         }
 
-        String id = playerData.has("id") ? playerData.get("id").getAsString() : "";
-        String uuid = playerData.has("minecraft_uuid") ? playerData.get("minecraft_uuid").getAsString() : "";
-        String name = playerData.has("minecraft_name") ? playerData.get("minecraft_name").getAsString() : "";
-
-        return id.equalsIgnoreCase(query)
-                || uuid.equalsIgnoreCase(query)
-                || name.equalsIgnoreCase(query);
+        if (changed && dbReady) {
+            boolean onlineValue = isOnline;
+            String did = discordId;
+            plugin.getFoliaLib().getScheduler().runAsync(task -> updateSingleOnlineInDb(did, onlineValue));
+        }
     }
 
-    private AccountEntry findAccountEntry(String normalizedQuery, Map<String, String> userCacheMap) {
-        if (normalizedQuery.isBlank()) {
-            return null;
-        }
-
-        File accountsFile = new File(discordSrvFolder, "accounts.aof");
-        if (!accountsFile.exists()) {
-            return null;
-        }
-
+    private void updateSingleOnlineInDb(String discordId, boolean online) {
+        Connection c = null;
         try {
-            List<String> lines = Files.readAllLines(accountsFile.toPath());
-            for (String line : lines) {
-                if (line.trim().isEmpty()) {
-                    continue;
-                }
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement("UPDATE players SET is_online=? WHERE discord_id=?")) {
+                ps.setInt(1, online ? 1 : 0);
+                ps.setString(2, discordId);
+                ps.executeUpdate();
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update is_online in MySQL: " + e.getMessage());
+        } finally {
+            pool.release(c);
+        }
+    }
 
-                String[] parts = line.trim().split("\\s+");
-                if (parts.length < 2) {
-                    continue;
-                }
+    private String findFullJsonInDb(String q) {
+        String discordId = q;
+        String uuid = q;
+        String nameLc = q.toLowerCase(Locale.ROOT);
 
-                String discordId = parts[0];
-                String minecraftUuid = parts[1];
-                String resolvedName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
-
-                if (discordId.equalsIgnoreCase(normalizedQuery)
-                        || minecraftUuid.equalsIgnoreCase(normalizedQuery)
-                        || resolvedName.equalsIgnoreCase(normalizedQuery)) {
-                    return new AccountEntry(discordId, minecraftUuid);
+        Connection c = null;
+        try {
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement("SELECT full_json FROM players WHERE discord_id=? OR minecraft_uuid=? OR minecraft_name_lc=? LIMIT 1")) {
+                ps.setString(1, discordId);
+                ps.setString(2, uuid);
+                ps.setString(3, nameLc);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String json = rs.getString(1);
+                        if (json != null && !json.isBlank()) return json;
+                    }
                 }
             }
-        } catch (IOException e) {
-            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to lookup player in MySQL: " + e.getMessage());
+        } finally {
+            pool.release(c);
+        }
+        return null;
+    }
+
+    private String findFullJsonFallback(String q) {
+        List<AccountEntry> accounts = loadAccountsIfChanged();
+        Map<String, String> userCache = loadUserCacheIfChanged();
+
+        String nq = q.trim().toLowerCase(Locale.ROOT);
+        if (nq.isEmpty()) return null;
+
+        for (AccountEntry entry : accounts) {
+            String discordId = entry.discordId();
+            String minecraftUuid = entry.minecraftUuid();
+            String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCache);
+            if (discordId.equalsIgnoreCase(nq) || minecraftUuid.equalsIgnoreCase(nq) || (minecraftName != null && minecraftName.equalsIgnoreCase(nq))) {
+                UUID uuid;
+                try {
+                    uuid = UUID.fromString(minecraftUuid);
+                } catch (Exception ignored) {
+                    return null;
+                }
+
+                SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
+                boolean isOnline = onlineUuids.contains(minecraftUuid);
+
+                StatsSnapshot snapshot = getStatsSnapshot(uuid);
+                JsonObject statsObj = buildStatsJson(snapshot, isOnline);
+
+                JsonObject full = new JsonObject();
+                full.addProperty("id", discordId);
+                full.addProperty("minecraft_name", minecraftName);
+                full.addProperty("minecraft_uuid", minecraftUuid);
+                full.addProperty("skinUrl", skinLinks.skinUrl());
+                full.addProperty("headUrl", skinLinks.headUrl());
+                full.addProperty("is_online", isOnline);
+                full.add("stats", statsObj);
+
+                return full.toString();
+            }
         }
 
         return null;
     }
 
-    private String resolveMinecraftName(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
-        if (externalCache.containsKey(discordId)) {
-            return externalCache.get(discordId);
-        }
-        return userCacheMap.getOrDefault(minecraftUuid, "Unknown");
-    }
+    private void upsertPlayers(List<PlayerUpsertRow> rows) {
+        if (rows.isEmpty()) return;
 
-    private JsonObject createPlayerSummaryData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
-        String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
+        String sql = "INSERT INTO players (discord_id,minecraft_uuid,minecraft_name,minecraft_name_lc,skin_url,head_url,is_online,play_time_hours,summary_json,full_json,summary_updated_at,full_updated_at,stats_mtime) " +
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+                "ON DUPLICATE KEY UPDATE " +
+                "minecraft_uuid=VALUES(minecraft_uuid)," +
+                "minecraft_name=VALUES(minecraft_name)," +
+                "minecraft_name_lc=VALUES(minecraft_name_lc)," +
+                "skin_url=VALUES(skin_url)," +
+                "head_url=VALUES(head_url)," +
+                "is_online=VALUES(is_online)," +
+                "play_time_hours=VALUES(play_time_hours)," +
+                "summary_json=VALUES(summary_json)," +
+                "full_json=VALUES(full_json)," +
+                "summary_updated_at=VALUES(summary_updated_at)," +
+                "full_updated_at=VALUES(full_updated_at)," +
+                "stats_mtime=VALUES(stats_mtime)";
 
-        OfflinePlayer player = null;
+        Connection c = null;
         try {
-            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-        } catch (Exception ignored) {
-        }
-
-        SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
-
-        boolean isOnline = player != null && player.isOnline();
-        double playTimeHours = 0.0;
-
-        if (player != null && (player.hasPlayedBefore() || isOnline)) {
-            long playTimeTicks = getStatistic(player, Statistic.PLAY_ONE_MINUTE);
-            playTimeHours = playTimeTicks / 20.0 / 3600.0;
-            playTimeHours = Math.round(playTimeHours * 10.0) / 10.0;
-        }
-
-        JsonObject playerData = new JsonObject();
-        playerData.addProperty("id", discordId);
-        playerData.addProperty("minecraft_name", minecraftName);
-        playerData.addProperty("minecraft_uuid", minecraftUuid);
-        playerData.addProperty("skinUrl", skinLinks.skinUrl());
-        playerData.addProperty("headUrl", skinLinks.headUrl());
-        playerData.addProperty("is_online", isOnline);
-        playerData.addProperty("play_time_hours", playTimeHours);
-
-        return playerData;
-    }
-
-    private JsonObject createPlayerData(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
-        String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCacheMap);
-
-        OfflinePlayer player = null;
-        try {
-            player = Bukkit.getOfflinePlayer(UUID.fromString(minecraftUuid));
-        } catch (Exception ignored) {
-        }
-
-        SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
-
-        JsonObject playerData = new JsonObject();
-        playerData.addProperty("id", discordId);
-        playerData.addProperty("minecraft_name", minecraftName);
-        playerData.addProperty("minecraft_uuid", minecraftUuid);
-        playerData.addProperty("skinUrl", skinLinks.skinUrl());
-        playerData.addProperty("headUrl", skinLinks.headUrl());
-
-        if (player != null) {
-            playerData.addProperty("is_online", player.isOnline());
-            playerData.add("stats", getPlayerStatistics(player));
-        } else {
-            playerData.addProperty("is_online", false);
-            playerData.add("stats", getEmptyStats());
-        }
-
-        return playerData;
-    }
-
-    private JsonObject getPlayerStatistics(OfflinePlayer player) {
-        try {
-            boolean isOnline = player.isOnline();
-
-            if (player.hasPlayedBefore() || isOnline) {
-                JsonObject stats = new JsonObject();
-
-                long playTimeTicks = getStatistic(player, Statistic.PLAY_ONE_MINUTE);
-                double playTimeHours = playTimeTicks / 20.0 / 3600.0;
-                stats.addProperty("play_time_hours", Math.round(playTimeHours * 10.0) / 10.0);
-                stats.addProperty("joins", isOnline ? getStatistic(player, Statistic.LEAVE_GAME) + 1L : getStatistic(player, Statistic.LEAVE_GAME));
-                stats.addProperty("deaths", getStatistic(player, Statistic.DEATHS));
-
-                JsonObject kills = new JsonObject();
-                kills.addProperty("players", getStatistic(player, Statistic.PLAYER_KILLS));
-                kills.addProperty("mobs", getStatistic(player, Statistic.MOB_KILLS));
-                stats.add("kills", kills);
-
-                JsonObject damage = new JsonObject();
-                damage.addProperty("dealt", getStatistic(player, Statistic.DAMAGE_DEALT));
-                damage.addProperty("taken", getStatistic(player, Statistic.DAMAGE_TAKEN));
-                stats.add("damage", damage);
-
-                long walkCm = getStatistic(player, Statistic.WALK_ONE_CM);
-                long flyCm = getStatistic(player, Statistic.AVIATE_ONE_CM);
-                long swimCm = getStatistic(player, Statistic.SWIM_ONE_CM);
-                long totalCm = walkCm
-                        + flyCm
-                        + swimCm
-                        + getStatistic(player, Statistic.SPRINT_ONE_CM)
-                        + getStatistic(player, Statistic.CROUCH_ONE_CM)
-                        + getStatistic(player, Statistic.CLIMB_ONE_CM)
-                        + getStatistic(player, Statistic.FALL_ONE_CM)
-                        + getStatistic(player, Statistic.MINECART_ONE_CM)
-                        + getStatistic(player, Statistic.BOAT_ONE_CM)
-                        + getStatistic(player, Statistic.PIG_ONE_CM)
-                        + getStatistic(player, Statistic.HORSE_ONE_CM)
-                        + getStatistic(player, Statistic.STRIDER_ONE_CM);
-
-                JsonObject distance = new JsonObject();
-                distance.addProperty("total_km", toKilometers(totalCm));
-                distance.addProperty("walk_km", toKilometers(walkCm));
-                distance.addProperty("fly_km", toKilometers(flyCm));
-                distance.addProperty("swim_km", toKilometers(swimCm));
-                stats.add("distance", distance);
-
-                long minedTotal = 0;
-                long usedTotal = 0;
-                long craftedTotal = 0;
-                long pickedUpTotal = 0;
-                long droppedTotal = 0;
-
-                List<Map.Entry<String, Long>> topMined = new ArrayList<>();
-                List<Map.Entry<String, Long>> topUsed = new ArrayList<>();
-
-                for (Material material : Material.values()) {
-                    if (material.isLegacy()) {
-                        continue;
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                int batch = 0;
+                for (PlayerUpsertRow r : rows) {
+                    ps.setString(1, r.discordId());
+                    ps.setString(2, r.minecraftUuid());
+                    ps.setString(3, r.minecraftName());
+                    ps.setString(4, r.minecraftNameLc());
+                    ps.setString(5, r.skinUrl());
+                    ps.setString(6, r.headUrl());
+                    ps.setInt(7, r.isOnline() ? 1 : 0);
+                    ps.setDouble(8, r.playTimeHours());
+                    ps.setString(9, r.summaryJson());
+                    ps.setString(10, r.fullJson());
+                    ps.setLong(11, r.summaryUpdatedAt());
+                    ps.setLong(12, r.fullUpdatedAt());
+                    ps.setLong(13, r.statsMtime());
+                    ps.addBatch();
+                    batch++;
+                    if (batch >= 500) {
+                        ps.executeBatch();
+                        batch = 0;
                     }
+                }
+                if (batch > 0) ps.executeBatch();
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to upsert players to MySQL: " + e.getMessage());
+        } finally {
+            pool.release(c);
+        }
+    }
 
-                    if (material.isBlock()) {
-                        long mined = getStatistic(player, Statistic.MINE_BLOCK, material);
-                        minedTotal += mined;
-                        if (mined > 0) {
-                            topMined.add(Map.entry(material.name().toLowerCase(Locale.ROOT), mined));
+    private void writeMeta(String key, String value, long now) {
+        Connection c = null;
+        try {
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement("INSERT INTO meta (k,v,updated_at) VALUES (?,?,?) ON DUPLICATE KEY UPDATE v=VALUES(v), updated_at=VALUES(updated_at)")) {
+                ps.setString(1, key);
+                ps.setString(2, value);
+                ps.setLong(3, now);
+                ps.executeUpdate();
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to write meta: " + e.getMessage());
+        } finally {
+            pool.release(c);
+        }
+    }
+
+    private String readMeta(String key) {
+        Connection c = null;
+        try {
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement("SELECT v FROM meta WHERE k=? LIMIT 1")) {
+                ps.setString(1, key);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return rs.getString(1);
+                }
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to read meta: " + e.getMessage());
+        } finally {
+            pool.release(c);
+        }
+        return null;
+    }
+
+    private List<AccountEntry> loadAccountsIfChanged() {
+        File accountsFile = new File(discordSrvFolder, "accounts.aof");
+        if (!accountsFile.exists()) {
+            accountsList = List.of();
+            accountsLastModified = -1L;
+            return accountsList;
+        }
+
+        long lm = accountsFile.lastModified();
+        List<AccountEntry> cached = accountsList;
+        if (lm == accountsLastModified && cached != null) return cached;
+
+        List<AccountEntry> list = new ArrayList<>();
+        try (BufferedReader br = Files.newBufferedReader(accountsFile.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                String[] parts = line.split("\\s+");
+                if (parts.length < 2) continue;
+                list.add(new AccountEntry(parts[0], parts[1]));
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+        }
+
+        accountsLastModified = lm;
+        accountsList = list;
+        return list;
+    }
+
+    private Map<String, String> loadUserCacheIfChanged() {
+        if (!userCacheFile.exists()) {
+            userCacheMap = Map.of();
+            userCacheLastModified = -1L;
+            return userCacheMap;
+        }
+
+        long lm = userCacheFile.lastModified();
+        Map<String, String> cached = userCacheMap;
+        if (lm == userCacheLastModified && cached != null && !cached.isEmpty()) return cached;
+
+        Map<String, String> map = new HashMap<>();
+        try (FileReader reader = new FileReader(userCacheFile)) {
+            JsonElement element = JsonParser.parseReader(reader);
+            if (element.isJsonArray()) {
+                JsonArray array = element.getAsJsonArray();
+                for (JsonElement entry : array) {
+                    if (entry.isJsonObject()) {
+                        JsonObject obj = entry.getAsJsonObject();
+                        if (obj.has("uuid") && obj.has("name")) {
+                            String uuid = obj.get("uuid").getAsString();
+                            String name = obj.get("name").getAsString();
+                            map.put(uuid, name);
                         }
                     }
-
-                    long used = getStatistic(player, Statistic.USE_ITEM, material);
-                    usedTotal += used;
-                    if (used > 0) {
-                        topUsed.add(Map.entry(material.name().toLowerCase(Locale.ROOT), used));
-                    }
-
-                    craftedTotal += getStatistic(player, Statistic.CRAFT_ITEM, material);
-                    pickedUpTotal += getStatistic(player, Statistic.PICKUP, material);
-                    droppedTotal += getStatistic(player, Statistic.DROP, material);
                 }
-
-                JsonObject blocks = new JsonObject();
-                blocks.addProperty("mined_total", minedTotal);
-                stats.add("blocks", blocks);
-
-                JsonObject items = new JsonObject();
-                items.addProperty("used_total", usedTotal);
-                items.addProperty("crafted_total", craftedTotal);
-                items.addProperty("picked_up_total", pickedUpTotal);
-                items.addProperty("dropped_total", droppedTotal);
-                stats.add("items", items);
-
-                JsonObject fun = new JsonObject();
-                fun.addProperty("jumps", getStatistic(player, Statistic.JUMP));
-                fun.addProperty("animals_bred", getStatistic(player, Statistic.ANIMALS_BRED));
-                fun.addProperty("fish_caught", getStatistic(player, Statistic.FISH_CAUGHT));
-                fun.addProperty("villager_trades", getStatistic(player, Statistic.TRADED_WITH_VILLAGER));
-                fun.addProperty("enchantments", getStatistic(player, Statistic.ITEM_ENCHANTED));
-                stats.add("fun", fun);
-
-                topMined.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
-                topUsed.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
-
-                JsonObject top = new JsonObject();
-                top.add("mined", toTopArray(topMined));
-                top.add("used", toTopArray(topUsed));
-                stats.add("top", top);
-
-                stats.addProperty("favorite_mined", topMined.isEmpty() ? "" : topMined.get(0).getKey());
-                stats.addProperty("favorite_used", topUsed.isEmpty() ? "" : topUsed.get(0).getKey());
-
-                return stats;
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to read usercache.json: " + e.getMessage());
         }
 
-        return getEmptyStats();
+        userCacheLastModified = lm;
+        userCacheMap = map;
+        return map;
     }
 
-    private JsonObject getEmptyStats() {
-        JsonObject stats = new JsonObject();
-        stats.addProperty("play_time_hours", 0);
-        stats.addProperty("joins", 0);
-        stats.addProperty("deaths", 0);
-
-        JsonObject kills = new JsonObject();
-        kills.addProperty("players", 0);
-        kills.addProperty("mobs", 0);
-        stats.add("kills", kills);
-
-        JsonObject damage = new JsonObject();
-        damage.addProperty("dealt", 0);
-        damage.addProperty("taken", 0);
-        stats.add("damage", damage);
-
-        JsonObject distance = new JsonObject();
-        distance.addProperty("total_km", 0);
-        distance.addProperty("walk_km", 0);
-        distance.addProperty("fly_km", 0);
-        distance.addProperty("swim_km", 0);
-        stats.add("distance", distance);
-
-        JsonObject blocks = new JsonObject();
-        blocks.addProperty("mined_total", 0);
-        stats.add("blocks", blocks);
-
-        JsonObject items = new JsonObject();
-        items.addProperty("used_total", 0);
-        items.addProperty("crafted_total", 0);
-        items.addProperty("picked_up_total", 0);
-        items.addProperty("dropped_total", 0);
-        stats.add("items", items);
-
-        JsonObject fun = new JsonObject();
-        fun.addProperty("jumps", 0);
-        fun.addProperty("animals_bred", 0);
-        fun.addProperty("fish_caught", 0);
-        fun.addProperty("villager_trades", 0);
-        fun.addProperty("enchantments", 0);
-        stats.add("fun", fun);
-
-        JsonObject top = new JsonObject();
-        top.add("mined", new JsonArray());
-        top.add("used", new JsonArray());
-        stats.add("top", top);
-
-        stats.addProperty("favorite_mined", "");
-        stats.addProperty("favorite_used", "");
-        return stats;
+    private String resolveMinecraftName(String discordId, String minecraftUuid, Map<String, String> userCacheMap) {
+        String fromExternal = externalCache.get(discordId);
+        if (fromExternal != null && !fromExternal.isBlank()) return fromExternal;
+        String fromUsercache = userCacheMap.get(minecraftUuid);
+        if (fromUsercache != null && !fromUsercache.isBlank()) return fromUsercache;
+        return "Unknown";
     }
 
     private SkinLinks getSkinLinksForPlayer(String minecraftUuid, String minecraftName) {
@@ -545,19 +734,11 @@ public class DatabaseManager {
         String skinUrl = skinsSkinUrlCache.get(uuidKey);
         String headUrl = skinsHeadUrlCache.get(uuidKey);
 
-        if ((skinUrl == null || skinUrl.isBlank()) && !nameKey.isBlank()) {
-            skinUrl = skinsNameSkinUrlCache.get(nameKey);
-        }
-        if ((headUrl == null || headUrl.isBlank()) && !nameKey.isBlank()) {
-            headUrl = skinsNameHeadUrlCache.get(nameKey);
-        }
+        if ((skinUrl == null || skinUrl.isBlank()) && !nameKey.isBlank()) skinUrl = skinsNameSkinUrlCache.get(nameKey);
+        if ((headUrl == null || headUrl.isBlank()) && !nameKey.isBlank()) headUrl = skinsNameHeadUrlCache.get(nameKey);
 
-        if (skinUrl == null || skinUrl.isBlank()) {
-            skinUrl = buildFallbackSkinUrl(minecraftUuid, minecraftName);
-        }
-        if (headUrl == null || headUrl.isBlank()) {
-            headUrl = buildFallbackHeadUrl(minecraftUuid, minecraftName);
-        }
+        if (skinUrl == null || skinUrl.isBlank()) skinUrl = buildFallbackSkinUrl(minecraftUuid, minecraftName);
+        if (headUrl == null || headUrl.isBlank()) headUrl = buildFallbackHeadUrl(minecraftUuid, minecraftName);
 
         return new SkinLinks(skinUrl, headUrl);
     }
@@ -580,36 +761,35 @@ public class DatabaseManager {
             Map<String, String> freshNameHeadCache = new HashMap<>();
             Map<String, String> freshSkinCache = new HashMap<>();
             Map<String, String> freshNameSkinCache = new HashMap<>();
-            try (Scanner scanner = new Scanner(connection.getInputStream())) {
+
+            String response;
+            try (Scanner scanner = new Scanner(connection.getInputStream(), StandardCharsets.UTF_8)) {
                 scanner.useDelimiter("\\A");
-                String response = scanner.hasNext() ? scanner.next() : "[]";
-                JsonElement parsed = JsonParser.parseString(response);
+                response = scanner.hasNext() ? scanner.next() : "[]";
+            }
 
-                if (parsed.isJsonArray()) {
-                    JsonArray array = parsed.getAsJsonArray();
-                    for (JsonElement element : array) {
-                        if (!element.isJsonObject()) {
-                            continue;
-                        }
+            JsonElement parsed = JsonParser.parseString(response);
+            if (parsed.isJsonArray()) {
+                JsonArray array = parsed.getAsJsonArray();
+                for (JsonElement element : array) {
+                    if (!element.isJsonObject()) continue;
 
-                        JsonObject entry = element.getAsJsonObject();
-                        if (!entry.has("playerUuid")) {
-                            continue;
-                        }
+                    JsonObject entry = element.getAsJsonObject();
+                    if (!entry.has("playerUuid")) continue;
 
-                        String playerUuid = entry.get("playerUuid").getAsString();
-                        SkinLinks links = resolveSkinLinksFromEntry(entry, playerUuid);
-                        String uuidKey = normalizeUuidKey(playerUuid);
-                        freshHeadCache.put(uuidKey, links.headUrl());
-                        freshSkinCache.put(uuidKey, links.skinUrl());
+                    String playerUuid = entry.get("playerUuid").getAsString();
+                    SkinLinks links = resolveSkinLinksFromEntry(entry, playerUuid);
+                    String uuidKey = normalizeUuidKey(playerUuid);
 
-                        if (entry.has("lastKnownName") && !entry.get("lastKnownName").isJsonNull()) {
-                            String name = entry.get("lastKnownName").getAsString();
-                            if (!name.isBlank()) {
-                                String nameKey = name.toLowerCase(Locale.ROOT);
-                                freshNameHeadCache.put(nameKey, links.headUrl());
-                                freshNameSkinCache.put(nameKey, links.skinUrl());
-                            }
+                    freshHeadCache.put(uuidKey, links.headUrl());
+                    freshSkinCache.put(uuidKey, links.skinUrl());
+
+                    if (entry.has("lastKnownName") && !entry.get("lastKnownName").isJsonNull()) {
+                        String name = entry.get("lastKnownName").getAsString();
+                        if (name != null && !name.isBlank()) {
+                            String nameKey = name.toLowerCase(Locale.ROOT);
+                            freshNameHeadCache.put(nameKey, links.headUrl());
+                            freshNameSkinCache.put(nameKey, links.skinUrl());
                         }
                     }
                 }
@@ -623,6 +803,7 @@ public class DatabaseManager {
             skinsNameHeadUrlCache.putAll(freshNameHeadCache);
             skinsSkinUrlCache.putAll(freshSkinCache);
             skinsNameSkinUrlCache.putAll(freshNameSkinCache);
+
             connection.disconnect();
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update skins database: " + e.getMessage());
@@ -633,31 +814,21 @@ public class DatabaseManager {
         String skinUrl = getStringOrNull(entry, "skinUrl");
         String headUrl = getStringOrNull(entry, "headUrl");
 
-        if ((skinUrl == null || skinUrl.isBlank())) {
+        if (skinUrl == null || skinUrl.isBlank()) {
             String sourceUrl = getStringOrNull(entry, "sourceUrl");
-            if (sourceUrl != null && !sourceUrl.isBlank()) {
-                skinUrl = sourceUrl;
-            }
+            if (sourceUrl != null && !sourceUrl.isBlank()) skinUrl = sourceUrl;
         }
 
         if ((skinUrl == null || skinUrl.isBlank()) || (headUrl == null || headUrl.isBlank())) {
             String textureId = resolveTextureIdFromSkinEntry(entry);
             if (textureId != null && !textureId.isBlank()) {
-                if (skinUrl == null || skinUrl.isBlank()) {
-                    skinUrl = "https://textures.minecraft.net/texture/" + textureId;
-                }
-                if (headUrl == null || headUrl.isBlank()) {
-                    headUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
-                }
+                if (skinUrl == null || skinUrl.isBlank()) skinUrl = "https://textures.minecraft.net/texture/" + textureId;
+                if (headUrl == null || headUrl.isBlank()) headUrl = "https://mc-heads.net/avatar/" + textureId + ".png";
             }
         }
 
-        if (skinUrl == null || skinUrl.isBlank()) {
-            skinUrl = buildFallbackSkinUrl(playerUuid, getStringOrNull(entry, "lastKnownName"));
-        }
-        if (headUrl == null || headUrl.isBlank()) {
-            headUrl = buildFallbackHeadUrl(playerUuid, getStringOrNull(entry, "lastKnownName"));
-        }
+        if (skinUrl == null || skinUrl.isBlank()) skinUrl = buildFallbackSkinUrl(playerUuid, getStringOrNull(entry, "lastKnownName"));
+        if (headUrl == null || headUrl.isBlank()) headUrl = buildFallbackHeadUrl(playerUuid, getStringOrNull(entry, "lastKnownName"));
 
         return new SkinLinks(skinUrl, headUrl);
     }
@@ -665,9 +836,7 @@ public class DatabaseManager {
     private String resolveTextureIdFromSkinEntry(JsonObject entry) {
         if (entry.has("skinHash")) {
             String skinHash = entry.get("skinHash").getAsString();
-            if (!skinHash.isBlank()) {
-                return skinHash;
-            }
+            if (skinHash != null && !skinHash.isBlank()) return skinHash;
         }
 
         if (entry.has("decoded")) {
@@ -677,9 +846,7 @@ public class DatabaseManager {
                         ? decodedElement.getAsJsonObject()
                         : JsonParser.parseString(decodedElement.getAsString()).getAsJsonObject();
                 String fromDecoded = extractTextureIdFromDecodedObject(decodedObj);
-                if (fromDecoded != null && !fromDecoded.isBlank()) {
-                    return fromDecoded;
-                }
+                if (fromDecoded != null && !fromDecoded.isBlank()) return fromDecoded;
             } catch (Exception ignored) {
             }
         }
@@ -689,27 +856,21 @@ public class DatabaseManager {
                 String value = entry.get("value").getAsString();
                 String decodedValue = new String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8);
                 String fromValue = extractTextureIdFromDecoded(decodedValue);
-                if (fromValue != null && !fromValue.isBlank()) {
-                    return fromValue;
-                }
+                if (fromValue != null && !fromValue.isBlank()) return fromValue;
             } catch (Exception ignored) {
             }
         }
 
         String skinUrlRaw = getStringOrNull(entry, "skinUrlRaw");
         String fromSkinUrlRaw = extractTextureIdFromUrl(skinUrlRaw);
-        if (fromSkinUrlRaw != null) {
-            return fromSkinUrlRaw;
-        }
+        if (fromSkinUrlRaw != null) return fromSkinUrlRaw;
 
         String skinUrl = getStringOrNull(entry, "skinUrl");
         return extractTextureIdFromUrl(skinUrl);
     }
 
     private String getStringOrNull(JsonObject json, String key) {
-        if (!json.has(key) || json.get(key).isJsonNull()) {
-            return null;
-        }
+        if (!json.has(key) || json.get(key).isJsonNull()) return null;
         return json.get(key).getAsString();
     }
 
@@ -724,19 +885,13 @@ public class DatabaseManager {
     }
 
     private String resolveFallbackIdentifier(String minecraftUuid, String minecraftName) {
-        if (minecraftName != null && !minecraftName.isBlank() && !minecraftName.equalsIgnoreCase("Unknown")) {
-            return minecraftName;
-        }
-        if (minecraftUuid != null && !minecraftUuid.isBlank()) {
-            return minecraftUuid;
-        }
+        if (minecraftName != null && !minecraftName.isBlank() && !minecraftName.equalsIgnoreCase("Unknown")) return minecraftName;
+        if (minecraftUuid != null && !minecraftUuid.isBlank()) return minecraftUuid;
         return "Steve";
     }
 
     private String normalizeUuidKey(String uuid) {
-        if (uuid == null) {
-            return "";
-        }
+        if (uuid == null) return "";
         return uuid.replace("-", "").toLowerCase(Locale.ROOT);
     }
 
@@ -750,51 +905,248 @@ public class DatabaseManager {
     }
 
     private String extractTextureIdFromDecodedObject(JsonObject decoded) {
-        if (!decoded.has("textures")) {
-            return null;
-        }
+        if (!decoded.has("textures")) return null;
 
         JsonObject textures = decoded.getAsJsonObject("textures");
-        if (!textures.has("SKIN")) {
-            return null;
-        }
+        if (!textures.has("SKIN")) return null;
 
         JsonObject skin = textures.getAsJsonObject("SKIN");
-        if (!skin.has("url")) {
-            return null;
-        }
+        if (!skin.has("url")) return null;
 
         String textureUrl = skin.get("url").getAsString();
         return extractTextureIdFromUrl(textureUrl);
     }
 
     private String extractTextureIdFromUrl(String textureUrl) {
-        if (textureUrl == null || textureUrl.isBlank()) {
-            return null;
-        }
+        if (textureUrl == null || textureUrl.isBlank()) return null;
         int index = textureUrl.lastIndexOf('/');
         return index >= 0 ? textureUrl.substring(index + 1) : textureUrl;
     }
 
-    private int getStatistic(OfflinePlayer player, Statistic statistic) {
-        try {
-            return player.getStatistic(statistic);
+    private StatsSnapshot getStatsSnapshot(UUID uuid) {
+        String key = uuid.toString();
+        StatsCacheEntry cached = statsCache.get(key);
+
+        StatsFileRef ref = findLatestStatsFile(uuid);
+        long mtime = ref == null ? 0L : ref.mtime();
+
+        if (cached != null && cached.mtime() == mtime) return cached.snapshot();
+
+        StatsSnapshot snapshot = ref == null ? StatsSnapshot.empty(0L) : parseStatsFile(ref.path(), mtime);
+        statsCache.put(key, new StatsCacheEntry(mtime, snapshot));
+        return snapshot;
+    }
+
+    private StatsFileRef findLatestStatsFile(UUID uuid) {
+        String fn = uuid.toString() + ".json";
+        long best = 0L;
+        Path bestPath = null;
+
+        for (File folder : statsFolders) {
+            if (folder == null) continue;
+            try {
+                File f = new File(folder, fn);
+                if (!f.exists() || !f.isFile()) continue;
+                long lm = f.lastModified();
+                if (lm > best) {
+                    best = lm;
+                    bestPath = f.toPath();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (bestPath == null) return null;
+        return new StatsFileRef(bestPath, best);
+    }
+
+    private StatsSnapshot parseStatsFile(Path path, long mtime) {
+        try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            JsonElement rootEl = JsonParser.parseReader(br);
+            if (!rootEl.isJsonObject()) return StatsSnapshot.empty(mtime);
+
+            JsonObject root = rootEl.getAsJsonObject();
+            JsonObject statsRoot = root.has("stats") && root.get("stats").isJsonObject() ? root.getAsJsonObject("stats") : null;
+            if (statsRoot == null) return StatsSnapshot.empty(mtime);
+
+            JsonObject custom = statsRoot.has("minecraft:custom") && statsRoot.get("minecraft:custom").isJsonObject()
+                    ? statsRoot.getAsJsonObject("minecraft:custom")
+                    : null;
+
+            long playTime = getLong(custom, "minecraft:play_time", "minecraft:play_one_minute", "stat.playOneMinute");
+            long leaveGame = getLong(custom, "minecraft:leave_game", "stat.leaveGame");
+            long deaths = getLong(custom, "minecraft:deaths", "stat.deaths");
+            long playerKills = getLong(custom, "minecraft:player_kills", "stat.playerKills");
+            long mobKills = getLong(custom, "minecraft:mob_kills", "stat.mobKills");
+            long damageDealt = getLong(custom, "minecraft:damage_dealt", "stat.damageDealt");
+            long damageTaken = getLong(custom, "minecraft:damage_taken", "stat.damageTaken");
+
+            long walkCm = getLong(custom, "minecraft:walk_one_cm", "stat.walkOneCm");
+            long flyCm = getLong(custom, "minecraft:aviate_one_cm", "stat.aviateOneCm");
+            long swimCm = getLong(custom, "minecraft:swim_one_cm", "stat.swimOneCm");
+            long sprintCm = getLong(custom, "minecraft:sprint_one_cm", "stat.sprintOneCm");
+            long crouchCm = getLong(custom, "minecraft:crouch_one_cm", "stat.crouchOneCm");
+            long climbCm = getLong(custom, "minecraft:climb_one_cm", "stat.climbOneCm");
+            long fallCm = getLong(custom, "minecraft:fall_one_cm", "stat.fallOneCm");
+            long minecartCm = getLong(custom, "minecraft:minecart_one_cm", "stat.minecartOneCm");
+            long boatCm = getLong(custom, "minecraft:boat_one_cm", "stat.boatOneCm");
+            long pigCm = getLong(custom, "minecraft:pig_one_cm", "stat.pigOneCm");
+            long horseCm = getLong(custom, "minecraft:horse_one_cm", "stat.horseOneCm");
+            long striderCm = getLong(custom, "minecraft:strider_one_cm", "stat.striderOneCm");
+
+            long jumps = getLong(custom, "minecraft:jump", "stat.jump");
+            long animalsBred = getLong(custom, "minecraft:animals_bred", "stat.animalsBred");
+            long fishCaught = getLong(custom, "minecraft:fish_caught", "stat.fishCaught");
+            long villagerTrades = getLong(custom, "minecraft:traded_with_villager", "stat.tradedWithVillager");
+            long enchantments = getLong(custom, "minecraft:item_enchanted", "stat.itemEnchanted");
+
+            JsonObject minedObj = statsRoot.has("minecraft:mined") && statsRoot.get("minecraft:mined").isJsonObject()
+                    ? statsRoot.getAsJsonObject("minecraft:mined")
+                    : null;
+
+            JsonObject usedObj = statsRoot.has("minecraft:used") && statsRoot.get("minecraft:used").isJsonObject()
+                    ? statsRoot.getAsJsonObject("minecraft:used")
+                    : null;
+
+            JsonObject craftedObj = statsRoot.has("minecraft:crafted") && statsRoot.get("minecraft:crafted").isJsonObject()
+                    ? statsRoot.getAsJsonObject("minecraft:crafted")
+                    : null;
+
+            JsonObject pickedObj = statsRoot.has("minecraft:picked_up") && statsRoot.get("minecraft:picked_up").isJsonObject()
+                    ? statsRoot.getAsJsonObject("minecraft:picked_up")
+                    : null;
+
+            JsonObject droppedObj = statsRoot.has("minecraft:dropped") && statsRoot.get("minecraft:dropped").isJsonObject()
+                    ? statsRoot.getAsJsonObject("minecraft:dropped")
+                    : null;
+
+            long minedTotal = 0L;
+            long usedTotal = 0L;
+            long craftedTotal = sumValues(craftedObj);
+            long pickedUpTotal = sumValues(pickedObj);
+            long droppedTotal = sumValues(droppedObj);
+
+            TopK topMined = new TopK(5);
+            TopK topUsed = new TopK(5);
+
+            if (minedObj != null) {
+                for (Map.Entry<String, JsonElement> e : minedObj.entrySet()) {
+                    long v = asLong(e.getValue());
+                    if (v <= 0) continue;
+                    minedTotal += v;
+                    topMined.add(stripNamespace(e.getKey()).toLowerCase(Locale.ROOT), v);
+                }
+            }
+
+            if (usedObj != null) {
+                for (Map.Entry<String, JsonElement> e : usedObj.entrySet()) {
+                    long v = asLong(e.getValue());
+                    if (v <= 0) continue;
+                    usedTotal += v;
+                    topUsed.add(stripNamespace(e.getKey()).toLowerCase(Locale.ROOT), v);
+                }
+            }
+
+            List<Map.Entry<String, Long>> topMinedList = topMined.toSortedDesc();
+            List<Map.Entry<String, Long>> topUsedList = topUsed.toSortedDesc();
+
+            return new StatsSnapshot(
+                    mtime,
+                    playTime,
+                    leaveGame,
+                    deaths,
+                    playerKills,
+                    mobKills,
+                    damageDealt,
+                    damageTaken,
+                    walkCm,
+                    flyCm,
+                    swimCm,
+                    sprintCm,
+                    crouchCm,
+                    climbCm,
+                    fallCm,
+                    minecartCm,
+                    boatCm,
+                    pigCm,
+                    horseCm,
+                    striderCm,
+                    jumps,
+                    animalsBred,
+                    fishCaught,
+                    villagerTrades,
+                    enchantments,
+                    minedTotal,
+                    usedTotal,
+                    craftedTotal,
+                    pickedUpTotal,
+                    droppedTotal,
+                    topMinedList,
+                    topUsedList
+            );
         } catch (Exception ignored) {
-            return 0;
+            return StatsSnapshot.empty(mtime);
         }
     }
 
-    private int getStatistic(OfflinePlayer player, Statistic statistic, Material material) {
-        try {
-            return player.getStatistic(statistic, material);
-        } catch (Exception ignored) {
-            return 0;
-        }
-    }
+    private JsonObject buildStatsJson(StatsSnapshot s, boolean isOnline) {
+        JsonObject stats = new JsonObject();
 
-    private double toKilometers(long centimeters) {
-        double kilometers = centimeters / 100000.0;
-        return Math.round(kilometers * 100.0) / 100.0;
+        double playTimeHours = round1(ticksToHours(s.playTimeTicks()));
+        stats.addProperty("play_time_hours", playTimeHours);
+
+        long joins = isOnline ? s.leaveGame() + 1L : s.leaveGame();
+        stats.addProperty("joins", joins);
+        stats.addProperty("deaths", s.deaths());
+
+        JsonObject kills = new JsonObject();
+        kills.addProperty("players", s.playerKills());
+        kills.addProperty("mobs", s.mobKills());
+        stats.add("kills", kills);
+
+        JsonObject damage = new JsonObject();
+        damage.addProperty("dealt", s.damageDealt());
+        damage.addProperty("taken", s.damageTaken());
+        stats.add("damage", damage);
+
+        long totalCm = s.walkCm() + s.flyCm() + s.swimCm() + s.sprintCm() + s.crouchCm() + s.climbCm() + s.fallCm()
+                + s.minecartCm() + s.boatCm() + s.pigCm() + s.horseCm() + s.striderCm();
+
+        JsonObject distance = new JsonObject();
+        distance.addProperty("total_km", toKilometers(totalCm));
+        distance.addProperty("walk_km", toKilometers(s.walkCm()));
+        distance.addProperty("fly_km", toKilometers(s.flyCm()));
+        distance.addProperty("swim_km", toKilometers(s.swimCm()));
+        stats.add("distance", distance);
+
+        JsonObject blocks = new JsonObject();
+        blocks.addProperty("mined_total", s.minedTotal());
+        stats.add("blocks", blocks);
+
+        JsonObject items = new JsonObject();
+        items.addProperty("used_total", s.usedTotal());
+        items.addProperty("crafted_total", s.craftedTotal());
+        items.addProperty("picked_up_total", s.pickedUpTotal());
+        items.addProperty("dropped_total", s.droppedTotal());
+        stats.add("items", items);
+
+        JsonObject fun = new JsonObject();
+        fun.addProperty("jumps", s.jumps());
+        fun.addProperty("animals_bred", s.animalsBred());
+        fun.addProperty("fish_caught", s.fishCaught());
+        fun.addProperty("villager_trades", s.villagerTrades());
+        fun.addProperty("enchantments", s.enchantments());
+        stats.add("fun", fun);
+
+        JsonObject top = new JsonObject();
+        top.add("mined", toTopArray(s.topMined()));
+        top.add("used", toTopArray(s.topUsed()));
+        stats.add("top", top);
+
+        stats.addProperty("favorite_mined", s.topMined().isEmpty() ? "" : s.topMined().get(0).getKey());
+        stats.addProperty("favorite_used", s.topUsed().isEmpty() ? "" : s.topUsed().get(0).getKey());
+
+        return stats;
     }
 
     private JsonArray toTopArray(List<Map.Entry<String, Long>> entries) {
@@ -810,34 +1162,255 @@ public class DatabaseManager {
         return array;
     }
 
+    private long getLong(JsonObject obj, String... keys) {
+        if (obj == null) return 0L;
+        for (String k : keys) {
+            if (k == null) continue;
+            if (obj.has(k) && !obj.get(k).isJsonNull()) {
+                try {
+                    return obj.get(k).getAsLong();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return 0L;
+    }
+
+    private long asLong(JsonElement el) {
+        try {
+            return el == null || el.isJsonNull() ? 0L : el.getAsLong();
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private long sumValues(JsonObject obj) {
+        if (obj == null) return 0L;
+        long sum = 0L;
+        for (Map.Entry<String, JsonElement> e : obj.entrySet()) {
+            long v = asLong(e.getValue());
+            if (v > 0) sum += v;
+        }
+        return sum;
+    }
+
+    private String stripNamespace(String key) {
+        if (key == null) return "";
+        int idx = key.indexOf(':');
+        return idx >= 0 ? key.substring(idx + 1) : key;
+    }
+
+    private double ticksToHours(long ticks) {
+        return ticks / 20.0 / 3600.0;
+    }
+
+    private double round1(double v) {
+        return Math.round(v * 10.0) / 10.0;
+    }
+
+    private double toKilometers(long centimeters) {
+        double kilometers = centimeters / 100000.0;
+        return Math.round(kilometers * 100.0) / 100.0;
+    }
+
+    private static final class TopK {
+        private final int k;
+        private final PriorityQueue<Map.Entry<String, Long>> pq;
+
+        private TopK(int k) {
+            this.k = k;
+            this.pq = new PriorityQueue<>(Comparator.comparingLong(Map.Entry::getValue));
+        }
+
+        private void add(String key, long value) {
+            if (value <= 0) return;
+            Map.Entry<String, Long> e = Map.entry(key, value);
+            if (pq.size() < k) {
+                pq.offer(e);
+                return;
+            }
+            Map.Entry<String, Long> min = pq.peek();
+            if (min != null && value > min.getValue()) {
+                pq.poll();
+                pq.offer(e);
+            }
+        }
+
+        private List<Map.Entry<String, Long>> toSortedDesc() {
+            ArrayList<Map.Entry<String, Long>> list = new ArrayList<>(pq);
+            list.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+            return list;
+        }
+    }
+
     private record AccountEntry(String discordId, String minecraftUuid) {
     }
 
     private record SkinLinks(String skinUrl, String headUrl) {
     }
 
-    private Map<String, String> loadUserCache() {
-        Map<String, String> map = new HashMap<>();
-        if (userCacheFile.exists()) {
-            try (FileReader reader = new FileReader(userCacheFile)) {
-                JsonElement element = JsonParser.parseReader(reader);
-                if (element.isJsonArray()) {
-                    JsonArray array = element.getAsJsonArray();
-                    for (JsonElement entry : array) {
-                        if (entry.isJsonObject()) {
-                            JsonObject obj = entry.getAsJsonObject();
-                            if (obj.has("uuid") && obj.has("name")) {
-                                String uuid = obj.get("uuid").getAsString();
-                                String name = obj.get("name").getAsString();
-                                map.put(uuid, name);
-                            }
-                        }
-                    }
+    private record PlayerUpsertRow(
+            String discordId,
+            String minecraftUuid,
+            String minecraftName,
+            String minecraftNameLc,
+            String skinUrl,
+            String headUrl,
+            boolean isOnline,
+            double playTimeHours,
+            String summaryJson,
+            String fullJson,
+            long summaryUpdatedAt,
+            long fullUpdatedAt,
+            long statsMtime
+    ) {
+    }
+
+    private record StatsFileRef(Path path, long mtime) {
+    }
+
+    private record StatsCacheEntry(long mtime, StatsSnapshot snapshot) {
+    }
+
+    private record StatsSnapshot(
+            long mtime,
+            long playTimeTicks,
+            long leaveGame,
+            long deaths,
+            long playerKills,
+            long mobKills,
+            long damageDealt,
+            long damageTaken,
+            long walkCm,
+            long flyCm,
+            long swimCm,
+            long sprintCm,
+            long crouchCm,
+            long climbCm,
+            long fallCm,
+            long minecartCm,
+            long boatCm,
+            long pigCm,
+            long horseCm,
+            long striderCm,
+            long jumps,
+            long animalsBred,
+            long fishCaught,
+            long villagerTrades,
+            long enchantments,
+            long minedTotal,
+            long usedTotal,
+            long craftedTotal,
+            long pickedUpTotal,
+            long droppedTotal,
+            List<Map.Entry<String, Long>> topMined,
+            List<Map.Entry<String, Long>> topUsed
+    ) {
+        static StatsSnapshot empty(long mtime) {
+            return new StatsSnapshot(
+                    mtime,
+                    0L, 0L, 0L, 0L, 0L, 0L, 0L,
+                    0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+                    0L, 0L, 0L, 0L, 0L,
+                    0L, 0L, 0L, 0L, 0L,
+                    List.of(), List.of()
+            );
+        }
+    }
+
+    private final class OnlineListener implements Listener {
+        @EventHandler
+        public void onJoin(PlayerJoinEvent e) {
+            handleOnlineChange(e.getPlayer().getUniqueId().toString(), true);
+        }
+
+        @EventHandler
+        public void onQuit(PlayerQuitEvent e) {
+            handleOnlineChange(e.getPlayer().getUniqueId().toString(), false);
+        }
+    }
+
+    private static final class ConnectionPool {
+        private final String url;
+        private final String user;
+        private final String pass;
+        private final ArrayBlockingQueue<Connection> queue;
+        private final int max;
+        private final AtomicInteger created = new AtomicInteger(0);
+
+        private ConnectionPool(String url, String user, String pass, int max) {
+            this.url = url;
+            this.user = user;
+            this.pass = pass;
+            this.max = max;
+            this.queue = new ArrayBlockingQueue<>(max);
+        }
+
+        private Connection borrow() throws Exception {
+            Connection c = queue.poll();
+            if (c != null) {
+                if (isOk(c)) return c;
+                closeQuietly(c);
+                created.decrementAndGet();
+            }
+
+            if (created.get() < max) {
+                int n = created.incrementAndGet();
+                if (n <= max) {
+                    Connection nc = DriverManager.getConnection(url, user, pass);
+                    nc.setAutoCommit(true);
+                    return nc;
+                } else {
+                    created.decrementAndGet();
+                }
+            }
+
+            c = queue.poll(10, TimeUnit.SECONDS);
+            if (c != null) {
+                if (isOk(c)) return c;
+                closeQuietly(c);
+                created.decrementAndGet();
+            }
+
+            throw new IllegalStateException("No DB connections available");
+        }
+
+        private void release(Connection c) {
+            if (c == null) return;
+            try {
+                if (!isOk(c)) {
+                    closeQuietly(c);
+                    created.decrementAndGet();
+                    return;
+                }
+                if (!queue.offer(c)) {
+                    closeQuietly(c);
+                    created.decrementAndGet();
                 }
             } catch (Exception e) {
-                plugin.getLogManager().warn("Failed to read usercache.json: " + e.getMessage());
+                closeQuietly(c);
+                created.decrementAndGet();
             }
         }
-        return map;
+
+        private boolean isOk(Connection c) {
+            try {
+                return !c.isClosed() && c.isValid(2);
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        private void close() {
+            Connection c;
+            while ((c = queue.poll()) != null) closeQuietly(c);
+        }
+
+        private void closeQuietly(Connection c) {
+            try {
+                c.close();
+            } catch (Exception ignored) {
+            }
+        }
     }
 }
