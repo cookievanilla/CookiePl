@@ -8,9 +8,9 @@ import com.google.gson.stream.JsonReader;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import net.luckperms.api.LuckPerms;
+import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
-import net.luckperms.api.model.user.UserManager;
 import net.luckperms.api.query.QueryOptions;
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -46,7 +47,6 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Scanner;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -112,7 +112,6 @@ public class DatabaseManager {
     private ConnectionPool pool;
 
     private volatile LuckPerms luckPerms;
-    private final Map<UUID, LuckPermsGroupsCacheEntry> luckPermsGroupsCache = new ConcurrentHashMap<>();
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -127,11 +126,6 @@ public class DatabaseManager {
 
         try {
             Bukkit.getOnlinePlayers().forEach(p -> onlineUuids.add(p.getUniqueId().toString()));
-        } catch (Exception ignored) {
-        }
-
-        try {
-            this.luckPerms = Bukkit.getServicesManager().load(LuckPerms.class);
         } catch (Exception ignored) {
         }
 
@@ -178,7 +172,68 @@ public class DatabaseManager {
         if (pool != null) pool.close();
         pool = null;
         dbReady = false;
-        luckPermsGroupsCache.clear();
+    }
+
+    private LuckPerms getLuckPerms() {
+        LuckPerms lp = luckPerms;
+        if (lp != null) return lp;
+        try {
+            lp = LuckPermsProvider.get();
+            luckPerms = lp;
+            return lp;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private JsonArray getLuckPermsGroups(UUID uuid) {
+        JsonArray out = new JsonArray();
+        if (uuid == null) return out;
+
+        LuckPerms lp = getLuckPerms();
+        if (lp == null) return out;
+
+        User user = null;
+        boolean loadedTemp = false;
+
+        try {
+            user = lp.getUserManager().getUser(uuid);
+            if (user == null) {
+                user = lp.getUserManager().loadUser(uuid).get(2, TimeUnit.SECONDS);
+                loadedTemp = true;
+            }
+            if (user == null) return out;
+
+            QueryOptions qo = lp.getContextManager().getQueryOptions(user).orElseGet(() -> lp.getContextManager().getStaticQueryOptions());
+            Set<Group> groups = user.getInheritedGroups(qo);
+
+            HashSet<String> names = new HashSet<>();
+            if (groups != null) {
+                for (Group g : groups) {
+                    if (g == null) continue;
+                    String n = g.getName();
+                    if (n != null && !n.isBlank()) names.add(n);
+                }
+            }
+
+            String primary = user.getPrimaryGroup();
+            if (primary != null && !primary.isBlank()) names.add(primary);
+
+            ArrayList<String> sorted = new ArrayList<>(names);
+            sorted.sort(String.CASE_INSENSITIVE_ORDER);
+            for (String n : sorted) out.add(n);
+
+        } catch (Exception ignored) {
+        } finally {
+            if (loadedTemp && user != null) {
+                try {
+                    lp.getUserManager().cleanupUser(user);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        return out;
     }
 
     private void buildStatsFolders() {
@@ -596,104 +651,6 @@ public class DatabaseManager {
         return false;
     }
 
-    private LuckPerms getLuckPerms() {
-        LuckPerms lp = luckPerms;
-        if (lp != null) return lp;
-        try {
-            lp = Bukkit.getServicesManager().load(LuckPerms.class);
-            if (lp != null) luckPerms = lp;
-        } catch (Exception ignored) {
-        }
-        return lp;
-    }
-
-    private List<String> resolveLuckPermsGroups(UUID uuid, boolean isOnline) {
-        if (uuid == null) return List.of();
-
-        LuckPerms lp = getLuckPerms();
-        if (lp == null) return List.of();
-
-        long now = System.currentTimeMillis();
-        LuckPermsGroupsCacheEntry cached = luckPermsGroupsCache.get(uuid);
-        if (cached != null && now - cached.createdAt() <= 120000L && cached.groups() != null) {
-            return cached.groups();
-        }
-
-        UserManager um = lp.getUserManager();
-        User user = null;
-        boolean loadedNow = false;
-
-        try {
-            user = um.getUser(uuid);
-        } catch (Exception ignored) {
-        }
-
-        if (user == null) {
-            try {
-                user = um.loadUser(uuid).get(3, TimeUnit.SECONDS);
-                loadedNow = true;
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (user == null) {
-            if (cached != null && cached.groups() != null) return cached.groups();
-            return List.of();
-        }
-
-        String primary = null;
-        try {
-            primary = user.getPrimaryGroup();
-        } catch (Exception ignored) {
-        }
-
-        TreeSet<String> all = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        try {
-            QueryOptions qo = user.getQueryOptions();
-            for (Group g : user.getInheritedGroups(qo)) {
-                if (g == null) continue;
-                String n = g.getName();
-                if (n != null && !n.isBlank()) all.add(n);
-            }
-        } catch (Exception ignored) {
-        }
-
-        ArrayList<String> out = new ArrayList<>(Math.max(1, all.size() + 1));
-        if (primary != null && !primary.isBlank()) out.add(primary);
-
-        for (String g : all) {
-            if (g == null || g.isBlank()) continue;
-            if (primary != null && primary.equalsIgnoreCase(g)) continue;
-            out.add(g);
-        }
-
-        List<String> res = List.copyOf(out);
-        luckPermsGroupsCache.put(uuid, new LuckPermsGroupsCacheEntry(now, res));
-
-        if (loadedNow && !isOnline) {
-            try {
-                um.cleanupUser(user);
-            } catch (Exception ignored) {
-            }
-        }
-
-        return res;
-    }
-
-    private JsonArray toStringArrayJson(List<String> list) {
-        JsonArray arr = new JsonArray();
-        if (list == null || list.isEmpty()) return arr;
-        for (String s : list) {
-            if (s != null && !s.isBlank()) arr.add(s);
-        }
-        return arr;
-    }
-
-    private void cleanupLuckPermsCache(long now) {
-        if (luckPermsGroupsCache.isEmpty()) return;
-        luckPermsGroupsCache.entrySet().removeIf(e -> e.getValue() == null || now - e.getValue().createdAt() > 900000L);
-    }
-
     private void refreshPlayersData() {
         if (!playersRefreshRunning.compareAndSet(false, true)) return;
         try {
@@ -734,13 +691,11 @@ public class DatabaseManager {
 
                 boolean isOnline = onlineUuids.contains(minecraftUuid);
 
-                List<String> lpGroups = resolveLuckPermsGroups(uuid, isOnline);
-                JsonArray lpGroupsJsonSummary = toStringArrayJson(lpGroups);
-                JsonArray lpGroupsJsonFull = toStringArrayJson(lpGroups);
-
                 StatsSnapshot snapshot = getStatsSnapshot(uuid);
                 double playTimeHours = round1(ticksToHours(snapshot.playTimeTicks()));
                 JsonObject statsObj = buildStatsJson(snapshot, isOnline);
+
+                JsonArray lpGroups = getLuckPermsGroups(uuid);
 
                 JsonObject summary = new JsonObject();
                 summary.addProperty("id", discordId);
@@ -750,7 +705,7 @@ public class DatabaseManager {
                 summary.addProperty("headUrl", skinLinks.headUrl());
                 summary.addProperty("is_online", isOnline);
                 summary.addProperty("play_time_hours", playTimeHours);
-                summary.add("luckperms", lpGroupsJsonSummary);
+                summary.add("luckperms", lpGroups);
                 summaryArray.add(summary);
 
                 JsonObject full = new JsonObject();
@@ -760,8 +715,8 @@ public class DatabaseManager {
                 full.addProperty("skinUrl", skinLinks.skinUrl());
                 full.addProperty("headUrl", skinLinks.headUrl());
                 full.addProperty("is_online", isOnline);
+                full.add("luckperms", lpGroups);
                 full.add("stats", statsObj);
-                full.add("luckperms", lpGroupsJsonFull);
 
                 newSummaryMap.put(discordId, summary);
                 newOrder.add(discordId);
@@ -796,8 +751,6 @@ public class DatabaseManager {
                 upsertPlayers(rows);
                 writeMeta("players_summary_json", summaryStr, now);
             }
-
-            cleanupLuckPermsCache(now);
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to refresh players data: " + e.getMessage());
         } finally {
@@ -987,9 +940,6 @@ public class DatabaseManager {
                 SkinLinks skinLinks = getSkinLinksForPlayer(minecraftUuid, minecraftName);
                 boolean isOnline = onlineUuids.contains(minecraftUuid);
 
-                List<String> lpGroups = resolveLuckPermsGroups(uuid, isOnline);
-                JsonArray lpGroupsJson = toStringArrayJson(lpGroups);
-
                 StatsSnapshot snapshot = getStatsSnapshot(uuid);
                 JsonObject statsObj = buildStatsJson(snapshot, isOnline);
 
@@ -1000,8 +950,8 @@ public class DatabaseManager {
                 full.addProperty("skinUrl", skinLinks.skinUrl());
                 full.addProperty("headUrl", skinLinks.headUrl());
                 full.addProperty("is_online", isOnline);
+                full.add("luckperms", getLuckPermsGroups(uuid));
                 full.add("stats", statsObj);
-                full.add("luckperms", lpGroupsJson);
 
                 return full.toString();
             }
@@ -1965,9 +1915,6 @@ public class DatabaseManager {
             }
             return (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
         }
-    }
-
-    private record LuckPermsGroupsCacheEntry(long createdAt, List<String> groups) {
     }
 
     private static final class ConnectionPool {
