@@ -37,6 +37,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -186,8 +187,11 @@ public class DatabaseManager {
         }
     }
 
-    private JsonArray getLuckPermsGroups(UUID uuid) {
-        JsonArray out = new JsonArray();
+    private JsonObject getLuckPermsGroups(UUID uuid) {
+        JsonObject out = new JsonObject();
+        JsonArray groupsArr = new JsonArray();
+        out.add("groups", groupsArr);
+
         if (uuid == null) return out;
 
         LuckPerms lp = getLuckPerms();
@@ -205,7 +209,7 @@ public class DatabaseManager {
             if (user == null) return out;
 
             QueryOptions qo = lp.getContextManager().getQueryOptions(user).orElseGet(() -> lp.getContextManager().getStaticQueryOptions());
-            java.util.Collection<Group> groups = user.getInheritedGroups(qo);
+            Collection<Group> groups = user.getInheritedGroups(qo);
 
             HashSet<String> names = new HashSet<>();
             if (groups != null) {
@@ -221,7 +225,7 @@ public class DatabaseManager {
 
             ArrayList<String> sorted = new ArrayList<>(names);
             sorted.sort(String.CASE_INSENSITIVE_ORDER);
-            for (String n : sorted) out.add(n);
+            for (String n : sorted) groupsArr.add(n);
 
         } catch (Exception ignored) {
         } finally {
@@ -695,7 +699,7 @@ public class DatabaseManager {
                 double playTimeHours = round1(ticksToHours(snapshot.playTimeTicks()));
                 JsonObject statsObj = buildStatsJson(snapshot, isOnline);
 
-                JsonArray lpGroups = getLuckPermsGroups(uuid);
+                JsonObject lpGroups = getLuckPermsGroups(uuid);
 
                 JsonObject summary = new JsonObject();
                 summary.addProperty("id", discordId);
