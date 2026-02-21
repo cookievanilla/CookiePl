@@ -34,6 +34,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -70,7 +72,8 @@ public class DatabaseManager {
     private volatile long userCacheLastModified = -1L;
     private volatile Map<String, String> userCacheMap = Map.of();
 
-    private volatile long accountsLastModified = -1L;
+    private volatile long accountsLastModified = -1L;       // accounts.aof
+    private volatile long accountsOldLastModified = -1L;    // accounts-old.aof
     private volatile List<AccountEntry> accountsList = List.of();
 
     private volatile List<File> statsFolders = List.of();
@@ -972,35 +975,116 @@ public class DatabaseManager {
         return null;
     }
 
+    /**
+     * accounts.aof (новый) имеет приоритет.
+     * Если discordId ИЛИ uuid присутствует в accounts.aof — берём строку оттуда.
+     * Если нет — добираем из accounts-old.aof (та же папка).
+     */
     private List<AccountEntry> loadAccountsIfChanged() {
         File accountsFile = new File(discordSrvFolder, "accounts.aof");
-        if (!accountsFile.exists()) {
+        File accountsOldFile = new File(discordSrvFolder, "accounts-old.aof");
+
+        long lmNew = accountsFile.exists() ? accountsFile.lastModified() : -1L;
+        long lmOld = accountsOldFile.exists() ? accountsOldFile.lastModified() : -1L;
+
+        List<AccountEntry> cached = accountsList;
+        if (lmNew == accountsLastModified && lmOld == accountsOldLastModified && cached != null) return cached;
+
+        if (lmNew == -1L && lmOld == -1L) {
             accountsList = List.of();
             accountsLastModified = -1L;
+            accountsOldLastModified = -1L;
             return accountsList;
         }
 
-        long lm = accountsFile.lastModified();
-        List<AccountEntry> cached = accountsList;
-        if (lm == accountsLastModified && cached != null) return cached;
+        List<AccountEntry> freshNew = accountsFile.exists() ? readAccountsFile(accountsFile) : List.of();
+        List<AccountEntry> freshOld = accountsOldFile.exists() ? readAccountsFile(accountsOldFile) : List.of();
+
+        LinkedHashMap<String, AccountEntry> byDiscord = new LinkedHashMap<>(Math.max(16, freshNew.size() + freshOld.size()));
+        Map<String, String> discordByUuid = new HashMap<>(Math.max(16, freshNew.size() + freshOld.size()));
+
+        for (AccountEntry e : freshNew) {
+            putAccountPreferNew(byDiscord, discordByUuid, e);
+        }
+
+        for (AccountEntry e : freshOld) {
+            putAccountIfNoConflicts(byDiscord, discordByUuid, e);
+        }
+
+        List<AccountEntry> merged = List.copyOf(byDiscord.values());
+
+        accountsLastModified = lmNew;
+        accountsOldLastModified = lmOld;
+        accountsList = merged;
+
+        return merged;
+    }
+
+    private List<AccountEntry> readAccountsFile(File file) {
+        if (file == null || !file.exists() || !file.isFile()) return List.of();
 
         List<AccountEntry> list = new ArrayList<>();
-        try (BufferedReader br = Files.newBufferedReader(accountsFile.toPath(), StandardCharsets.UTF_8)) {
+        try (BufferedReader br = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8)) {
             String line;
             while ((line = br.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty()) continue;
                 String[] parts = line.split("\\s+");
                 if (parts.length < 2) continue;
-                list.add(new AccountEntry(parts[0], parts[1]));
+
+                String discordId = parts[0] == null ? "" : parts[0].trim();
+                String uuid = parts[1] == null ? "" : parts[1].trim();
+                if (discordId.isEmpty() || uuid.isEmpty()) continue;
+
+                list.add(new AccountEntry(discordId, uuid));
             }
         } catch (Exception e) {
-            plugin.getLogManager().severe("Failed to read DiscordSRV accounts.aof: " + e.getMessage());
+            plugin.getLogManager().severe("Failed to read DiscordSRV " + file.getName() + ": " + e.getMessage());
+        }
+        return list;
+    }
+
+    private void putAccountPreferNew(LinkedHashMap<String, AccountEntry> byDiscord, Map<String, String> discordByUuid, AccountEntry e) {
+        if (e == null) return;
+
+        String discordId = e.discordId();
+        String uuid = e.minecraftUuid();
+        if (discordId == null || discordId.isBlank() || uuid == null || uuid.isBlank()) return;
+
+        String uuidKey = uuid.toLowerCase(Locale.ROOT);
+
+        AccountEntry prev = byDiscord.get(discordId);
+        if (prev != null) {
+            String prevUuid = prev.minecraftUuid();
+            if (prevUuid != null && !prevUuid.isBlank()) {
+                discordByUuid.remove(prevUuid.toLowerCase(Locale.ROOT));
+            }
         }
 
-        accountsLastModified = lm;
-        accountsList = list;
-        return list;
+        String otherDiscord = discordByUuid.get(uuidKey);
+        if (otherDiscord != null && !otherDiscord.equals(discordId)) {
+            byDiscord.remove(otherDiscord);
+        }
+
+        byDiscord.put(discordId, e);
+        discordByUuid.put(uuidKey, discordId);
+    }
+
+
+    private void putAccountIfNoConflicts(LinkedHashMap<String, AccountEntry> byDiscord, Map<String, String> discordByUuid, AccountEntry e) {
+        if (e == null) return;
+
+        String discordId = e.discordId();
+        String uuid = e.minecraftUuid();
+        if (discordId == null || discordId.isBlank() || uuid == null || uuid.isBlank()) return;
+
+        if (byDiscord.containsKey(discordId)) return;
+
+        String uuidKey = uuid.toLowerCase(Locale.ROOT);
+        if (discordByUuid.containsKey(uuidKey)) return;
+
+        byDiscord.put(discordId, e);
+        discordByUuid.put(uuidKey, discordId);
     }
 
     private Map<String, String> loadUserCacheIfChanged() {
