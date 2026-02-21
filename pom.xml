@@ -41,10 +41,6 @@
                         <configuration>
                             <relocations>
                                 <relocation>
-                                    <pattern>org.reflections</pattern>
-                                    <shadedPattern>com.leir4iks.cookiepl.libs.reflections</shadedPattern>
-                                </relocation>
-                                <relocation>
                                     <pattern>com.tcoded.folialib</pattern>
                                     <shadedPattern>com.leir4iks.cookiepl.libs.folialib</shadedPattern>
                                 </relocation>
@@ -98,16 +94,17 @@
         </dependency>
 
         <dependency>
-            <groupId>org.reflections</groupId>
-            <artifactId>reflections</artifactId>
-            <version>0.10.2</version>
-        </dependency>
-
-        <dependency>
             <groupId>com.tcoded</groupId>
             <artifactId>FoliaLib</artifactId>
             <version>0.5.1</version>
             <scope>compile</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>net.luckperms</groupId>
+            <artifactId>api</artifactId>
+            <version>5.5</version>
+            <scope>provided</scope>
         </dependency>
 
         <dependency>
