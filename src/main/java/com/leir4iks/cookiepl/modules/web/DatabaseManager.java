@@ -205,7 +205,7 @@ public class DatabaseManager {
             if (user == null) return out;
 
             QueryOptions qo = lp.getContextManager().getQueryOptions(user).orElseGet(() -> lp.getContextManager().getStaticQueryOptions());
-            Set<Group> groups = user.getInheritedGroups(qo);
+            java.util.Collection<Group> groups = user.getInheritedGroups(qo);
 
             HashSet<String> names = new HashSet<>();
             if (groups != null) {
