@@ -27,12 +27,10 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -48,7 +46,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.PriorityQueue;
-import java.util.Properties;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.UUID;
@@ -64,9 +61,6 @@ public class DatabaseManager {
     private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
-
-    private static final long LITEBANS_CACHE_TTL_MS = 30_000L;
-    private static final int LITEBANS_MAX_ENTRIES = 50;
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
@@ -107,17 +101,6 @@ public class DatabaseManager {
     private volatile Map<String, List<TicketInfo>> ticketsByUserId = Map.of();
     private volatile int lastStatsHash = 0;
 
-    private final ConcurrentHashMap<String, LiteBansBansCacheEntry> litebansBansCache = new ConcurrentHashMap<>();
-    private final Object litebansDriverLock = new Object();
-    private volatile boolean litebansDriverReady = false;
-    private volatile URLClassLoader litebansH2ClassLoader;
-    private volatile Driver litebansShimDriver;
-    private volatile String litebansLoadedJarPath;
-    private volatile LiteBansPaths litebansPaths;
-    private volatile long litebansLastWarnAt = 0L;
-    private volatile long litebansLastDebugAt = 0L;
-    private volatile long litebansLastEmptyAt = 0L;
-
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
     private WrappedTask whitelistUpdateTask;
@@ -130,6 +113,14 @@ public class DatabaseManager {
     private ConnectionPool pool;
 
     private volatile LuckPerms luckPerms;
+
+    private final Object liteBansInitLock = new Object();
+    private final ConcurrentHashMap<String, Long> liteBansThrottle = new ConcurrentHashMap<>();
+    private volatile boolean liteBansReady = false;
+    private volatile String liteBansJdbcUrl = null;
+    private volatile File liteBansDbFile = null;
+    private volatile long liteBansDbLastModified = -1L;
+    private volatile long liteBansLastInitAttempt = 0L;
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -155,6 +146,7 @@ public class DatabaseManager {
 
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
             initMysql();
+            initLiteBans();
             updateExternalNameData();
             updateWhitelistData();
             updateExternalStatsData();
@@ -191,12 +183,12 @@ public class DatabaseManager {
         pool = null;
         dbReady = false;
 
-        litebansBansCache.clear();
-        tryDeregisterLiteBansDriver();
-        tryCloseLiteBansClassLoader();
-        litebansDriverReady = false;
-        litebansLoadedJarPath = null;
-        litebansPaths = null;
+        liteBansReady = false;
+        liteBansJdbcUrl = null;
+        liteBansDbFile = null;
+        liteBansDbLastModified = -1L;
+        liteBansLastInitAttempt = 0L;
+        liteBansThrottle.clear();
     }
 
     private LuckPerms getLuckPerms() {
@@ -348,6 +340,324 @@ public class DatabaseManager {
             dbReady = false;
             pool = null;
             plugin.getLogManager().warn("MySQL init failed: " + e.getMessage());
+        }
+    }
+
+    private void initLiteBans() {
+        long now = System.currentTimeMillis();
+        if (now - liteBansLastInitAttempt < 5000L) return;
+
+        synchronized (liteBansInitLock) {
+            now = System.currentTimeMillis();
+            if (now - liteBansLastInitAttempt < 5000L) return;
+            liteBansLastInitAttempt = now;
+
+            File pluginsDir = plugin.getDataFolder() == null ? null : plugin.getDataFolder().getParentFile();
+            File lbDir = pluginsDir == null ? new File("plugins", "LiteBans") : new File(pluginsDir, "LiteBans");
+
+            File dbFile = findLiteBansDbFile(lbDir);
+            if (dbFile == null || !dbFile.exists() || !dbFile.isFile()) {
+                liteBansReady = false;
+                liteBansJdbcUrl = null;
+                liteBansDbFile = null;
+                liteBansDbLastModified = -1L;
+                if (shouldLiteBansLog("lb:init:nodb", 30000L)) {
+                    plugin.getLogManager().warn("[LiteBansDBG] db file not found in " + safePath(lbDir));
+                }
+                return;
+            }
+
+            long lm = dbFile.lastModified();
+            if (liteBansReady && liteBansDbFile != null && safePath(liteBansDbFile).equals(safePath(dbFile)) && liteBansDbLastModified == lm && liteBansJdbcUrl != null) {
+                return;
+            }
+
+            String base = stripMvDb(dbFile);
+            String url = "jdbc:h2:" + base + ";IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
+
+            try {
+                Class.forName("org.h2.Driver");
+            } catch (Exception e) {
+                liteBansReady = false;
+                liteBansJdbcUrl = null;
+                liteBansDbFile = null;
+                liteBansDbLastModified = -1L;
+                plugin.getLogManager().warn("[LiteBansDBG] org.h2.Driver not available: " + e.getMessage());
+                return;
+            }
+
+            try (Connection c = DriverManager.getConnection(url, "", "")) {
+                int bansTables = 0;
+                int historyTables = 0;
+
+                try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE UPPER(TABLE_NAME)=UPPER(?)")) {
+                    ps.setString(1, "LITEBANS_BANS");
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) bansTables = rs.getInt(1);
+                    }
+                } catch (Exception ignored) {
+                }
+
+                try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE UPPER(TABLE_NAME)=UPPER(?)")) {
+                    ps.setString(1, "LITEBANS_HISTORY");
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) historyTables = rs.getInt(1);
+                    }
+                } catch (Exception ignored) {
+                }
+
+                liteBansReady = true;
+                liteBansJdbcUrl = url;
+                liteBansDbFile = dbFile;
+                liteBansDbLastModified = lm;
+
+                plugin.getLogManager().info("[LiteBansDBG] ready url=" + url + " db=" + safePath(dbFile) + " bansTable=" + bansTables + " historyTable=" + historyTables);
+            } catch (Exception e) {
+                liteBansReady = false;
+                liteBansJdbcUrl = null;
+                liteBansDbFile = null;
+                liteBansDbLastModified = -1L;
+                plugin.getLogManager().warn("[LiteBansDBG] connect failed url=" + url + " err=" + e.getMessage());
+            }
+        }
+    }
+
+    private File findLiteBansDbFile(File lbDir) {
+        try {
+            File direct = new File(lbDir, "litebans.mv.db");
+            if (direct.exists() && direct.isFile()) return direct;
+
+            if (lbDir == null || !lbDir.exists() || !lbDir.isDirectory()) return null;
+
+            File[] files = lbDir.listFiles();
+            if (files == null) return null;
+
+            File best = null;
+            long bestLm = -1L;
+
+            for (File f : files) {
+                if (f == null || !f.isFile()) continue;
+                String n = f.getName();
+                if (n == null) continue;
+                if (!n.toLowerCase(Locale.ROOT).endsWith(".mv.db")) continue;
+                long lm = f.lastModified();
+                if (best == null || lm > bestLm) {
+                    best = f;
+                    bestLm = lm;
+                }
+            }
+
+            return best;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String stripMvDb(File f) {
+        String p;
+        try {
+            p = f.getCanonicalPath();
+        } catch (Exception ignored) {
+            p = f.getAbsolutePath();
+        }
+
+        String lower = p.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".mv.db")) return p.substring(0, p.length() - ".mv.db".length());
+        if (lower.endsWith(".db")) return p.substring(0, p.length() - ".db".length());
+        return p;
+    }
+
+    private String safePath(File f) {
+        if (f == null) return "null";
+        try {
+            return f.getCanonicalPath();
+        } catch (Exception ignored) {
+            try {
+                return f.getAbsolutePath();
+            } catch (Exception ignored2) {
+                return f.getPath();
+            }
+        }
+    }
+
+    private boolean shouldLiteBansLog(String key, long intervalMs) {
+        long now = System.currentTimeMillis();
+        Long prev = liteBansThrottle.put(key, now);
+        return prev == null || (now - prev) >= intervalMs;
+    }
+
+    private void ensureLiteBansReady() {
+        File f = liteBansDbFile;
+        String url = liteBansJdbcUrl;
+        if (liteBansReady && f != null && url != null) {
+            long lm = f.exists() ? f.lastModified() : -1L;
+            if (lm == liteBansDbLastModified && lm != -1L) return;
+        }
+        initLiteBans();
+    }
+
+    private JsonArray getLiteBansBansArray(String minecraftUuid, boolean allowIp) {
+        JsonArray out = new JsonArray();
+        if (minecraftUuid == null || minecraftUuid.isBlank()) return out;
+
+        ensureLiteBansReady();
+
+        String url = liteBansJdbcUrl;
+        if (!liteBansReady || url == null) {
+            if (shouldLiteBansLog("lb:notready", 30000L)) {
+                plugin.getLogManager().warn("[LiteBansDBG] not ready (no url)");
+            }
+            return out;
+        }
+
+        String u1 = minecraftUuid.trim();
+        String u2 = u1.replace("-", "");
+        String latestHistoryIp = null;
+
+        try (Connection c = DriverManager.getConnection(url, "", "")) {
+            latestHistoryIp = queryLatestHistoryIp(c, u1, u2);
+
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT \"ID\",\"UUID\",\"IP\",\"REASON\",\"BANNED_BY_UUID\",\"BANNED_BY_NAME\",\"REMOVED_BY_UUID\",\"REMOVED_BY_NAME\",\"REMOVED_BY_REASON\",\"REMOVED_BY_DATE\",\"TIME\",\"UNTIL\",\"TEMPLATE\",\"SERVER_SCOPE\",\"SERVER_ORIGIN\",\"SILENT\",\"IPBAN\",\"IPBAN_WILDCARD\",\"ACTIVE\" " +
+                            "FROM \"LITEBANS_BANS\" " +
+                            "WHERE \"UUID\"=? OR \"UUID\"=? " +
+                            "ORDER BY \"TIME\" DESC " +
+                            "LIMIT 50"
+            )) {
+                ps.setString(1, u1);
+                ps.setString(2, u2);
+
+                int count = 0;
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        JsonObject ban = new JsonObject();
+
+                        long id = safeLong(rs, 1);
+                        String uuid = safeString(rs, 2);
+                        String ip = safeString(rs, 3);
+                        String reason = safeString(rs, 4);
+
+                        String bannedByUuid = safeString(rs, 5);
+                        String bannedByName = safeString(rs, 6);
+                        String removedByUuid = safeString(rs, 7);
+                        String removedByName = safeString(rs, 8);
+                        String removedReason = safeString(rs, 9);
+                        String removedDate = safeString(rs, 10);
+
+                        long time = safeLong(rs, 11);
+                        long until = safeLong(rs, 12);
+
+                        int template = safeInt(rs, 13);
+                        String serverScope = safeString(rs, 14);
+                        String serverOrigin = safeString(rs, 15);
+
+                        boolean silent = safeBool(rs, 16);
+                        boolean ipban = safeBool(rs, 17);
+                        boolean ipbanWildcard = safeBool(rs, 18);
+                        boolean active = safeBool(rs, 19);
+
+                        String ipValue = ip;
+                        if (ipValue == null || ipValue.isBlank()) ipValue = latestHistoryIp;
+                        if (ipValue == null) ipValue = "";
+                        String ipOut = allowIp ? ipValue : "not allowed";
+
+                        ban.addProperty("id", id);
+                        ban.addProperty("uuid", uuid == null ? u1 : uuid);
+                        ban.addProperty("ip", ipOut);
+                        ban.addProperty("reason", reason == null ? "" : reason);
+
+                        ban.addProperty("banned_by_uuid", bannedByUuid == null ? "" : bannedByUuid);
+                        ban.addProperty("banned_by_name", bannedByName == null ? "" : bannedByName);
+                        ban.addProperty("removed_by_uuid", removedByUuid == null ? "" : removedByUuid);
+                        ban.addProperty("removed_by_name", removedByName == null ? "" : removedByName);
+                        ban.addProperty("removed_by_reason", removedReason == null ? "" : removedReason);
+                        ban.addProperty("removed_by_date", removedDate == null ? "" : removedDate);
+
+                        ban.addProperty("time", time);
+                        ban.addProperty("until", until);
+                        ban.addProperty("template", template);
+
+                        ban.addProperty("server_scope", serverScope == null ? "" : serverScope);
+                        ban.addProperty("server_origin", serverOrigin == null ? "" : serverOrigin);
+
+                        ban.addProperty("silent", silent);
+                        ban.addProperty("ipban", ipban);
+                        ban.addProperty("ipban_wildcard", ipbanWildcard);
+                        ban.addProperty("active", active);
+
+                        out.add(ban);
+                        count++;
+                    }
+                }
+
+                if (count == 0 && shouldLiteBansLog("lb:empty:" + u1, 15000L)) {
+                    plugin.getLogManager().info("[LiteBansDBG] bans empty uuid=" + u1 + " url=" + url + " db=" + (liteBansDbFile == null ? "null" : safePath(liteBansDbFile)));
+                }
+
+                if (count > 0 && shouldLiteBansLog("lb:ok:" + u1, 15000L)) {
+                    plugin.getLogManager().info("[LiteBansDBG] bans found uuid=" + u1 + " count=" + count + " allowIp=" + allowIp);
+                }
+            } catch (Exception e) {
+                if (shouldLiteBansLog("lb:queryerr:" + u1, 15000L)) {
+                    plugin.getLogManager().warn("[LiteBansDBG] query failed uuid=" + u1 + " err=" + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            if (shouldLiteBansLog("lb:connerr", 15000L)) {
+                plugin.getLogManager().warn("[LiteBansDBG] connect failed err=" + e.getMessage() + " url=" + url);
+            }
+        }
+
+        return out;
+    }
+
+    private String queryLatestHistoryIp(Connection c, String u1, String u2) {
+        if (c == null) return null;
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT \"IP\" FROM \"LITEBANS_HISTORY\" WHERE \"UUID\"=? OR \"UUID\"=? ORDER BY \"DATE\" DESC LIMIT 1"
+        )) {
+            ps.setString(1, u1);
+            ps.setString(2, u2);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String ip = rs.getString(1);
+                    if (ip != null && !ip.isBlank()) return ip;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private long safeLong(ResultSet rs, int idx) {
+        try {
+            return rs.getLong(idx);
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private int safeInt(ResultSet rs, int idx) {
+        try {
+            return rs.getInt(idx);
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private boolean safeBool(ResultSet rs, int idx) {
+        try {
+            return rs.getBoolean(idx);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String safeString(ResultSet rs, int idx) {
+        try {
+            return rs.getString(idx);
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -859,478 +1169,14 @@ public class DatabaseManager {
                 obj.add("tickets", ticketsOut);
             }
 
-            String minecraftUuid = obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull() ? obj.get("minecraft_uuid").getAsString() : null;
-            obj.add("litebans", buildLiteBansObject(minecraftUuid, allowed));
+            String mcUuid = obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull() ? obj.get("minecraft_uuid").getAsString() : null;
+            JsonObject lite = new JsonObject();
+            lite.add("bans", getLiteBansBansArray(mcUuid, allowed));
+            obj.add("litebans", lite);
 
             return obj.toString();
         } catch (Exception e) {
             return baseJson;
-        }
-    }
-
-    private JsonObject buildLiteBansObject(String minecraftUuid, boolean ipAllowed) {
-        JsonObject out = new JsonObject();
-        JsonArray bansArr = new JsonArray();
-        out.add("bans", bansArr);
-
-        if (minecraftUuid == null || minecraftUuid.isBlank()) return out;
-
-        List<LiteBansBan> bans = getLiteBansBansCached(minecraftUuid);
-        if (bans != null) {
-            for (LiteBansBan b : bans) {
-                if (b == null) continue;
-                bansArr.add(b.toJson(ipAllowed));
-            }
-        }
-
-        if (bansArr.size() == 0) {
-            litebansEmptyDebug(minecraftUuid);
-        }
-
-        return out;
-    }
-
-    private void litebansEmptyDebug(String uuid) {
-        long now = System.currentTimeMillis();
-        if ((now - litebansLastEmptyAt) < 5000L) return;
-        litebansLastEmptyAt = now;
-
-        LiteBansPaths p = resolveLiteBansPaths();
-        if (p == null) {
-            litebansWarn("[LiteBansDBG] paths not resolved, uuid=" + uuid);
-            return;
-        }
-
-        String jdbc1 = buildLiteBansJdbcUrl(p.dbFile(), true);
-        String jdbc2 = buildLiteBansJdbcUrl(p.dbFile(), false);
-
-        litebansWarn("[LiteBansDBG] empty bans uuid=" + uuid +
-                " dbFile=" + safePath(p.dbFile()) +
-                " jar=" + safePath(p.h2Jar()) +
-                " jdbc1=" + (jdbc1 == null ? "null" : jdbc1) +
-                " jdbc2=" + (jdbc2 == null ? "null" : jdbc2) +
-                " dbSize=" + (p.dbFile() != null && p.dbFile().exists() ? p.dbFile().length() : -1));
-
-        Connection c = null;
-        try {
-            c = openLiteBansConnection(jdbc1, jdbc2);
-            if (c == null) return;
-
-            long total = countLiteBansBans(c);
-            litebansWarn("[LiteBansDBG] LITEBANS_BANS totalRows=" + total + " uuid=" + uuid);
-        } catch (Exception e) {
-            litebansWarn("[LiteBansDBG] empty-debug failed: " + e.getMessage());
-        } finally {
-            closeQuietly(c);
-        }
-    }
-
-    private String safePath(File f) {
-        if (f == null) return "null";
-        try {
-            return f.getAbsolutePath();
-        } catch (Exception ignored) {
-            return f.getPath();
-        }
-    }
-
-    private List<LiteBansBan> getLiteBansBansCached(String uuid) {
-        String key = (uuid == null ? "" : uuid.trim().toLowerCase(Locale.ROOT));
-        if (key.isEmpty()) return List.of();
-
-        long now = System.currentTimeMillis();
-        LiteBansBansCacheEntry cached = litebansBansCache.get(key);
-        if (cached != null && (now - cached.fetchedAt()) <= LITEBANS_CACHE_TTL_MS) {
-            List<LiteBansBan> list = cached.bans();
-            return list == null ? List.of() : list;
-        }
-
-        List<LiteBansBan> fresh = queryLiteBansBans(uuid);
-        litebansBansCache.put(key, new LiteBansBansCacheEntry(now, fresh == null ? List.of() : List.copyOf(fresh)));
-        return fresh == null ? List.of() : fresh;
-    }
-
-    private List<LiteBansBan> queryLiteBansBans(String uuid) {
-        if (uuid == null || uuid.isBlank()) return List.of();
-
-        LiteBansPaths p = resolveLiteBansPaths();
-        if (p == null) {
-            litebansWarn("[LiteBansDBG] LiteBans paths not found");
-            return List.of();
-        }
-
-        String jdbc1 = buildLiteBansJdbcUrl(p.dbFile(), true);
-        String jdbc2 = buildLiteBansJdbcUrl(p.dbFile(), false);
-
-        Connection c = null;
-        try {
-            c = openLiteBansConnection(jdbc1, jdbc2);
-            if (c == null) return List.of();
-
-            ArrayList<LiteBansBan> list = runLiteBansBansQuery(c, uuid);
-            if (!list.isEmpty()) return list;
-
-            String alt = uuid.replace("-", "").trim();
-            if (!alt.isEmpty() && !alt.equalsIgnoreCase(uuid)) {
-                ArrayList<LiteBansBan> list2 = runLiteBansBansQueryNoDashes(c, alt.toLowerCase(Locale.ROOT));
-                if (!list2.isEmpty()) return list2;
-            }
-
-            return list;
-        } catch (Exception e) {
-            litebansWarn("[LiteBansDBG] LiteBans query failed: " + e.getMessage());
-            return List.of();
-        } finally {
-            closeQuietly(c);
-        }
-    }
-
-    private long countLiteBansBans(Connection c) {
-        if (c == null) return -1L;
-        try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM \"LITEBANS_BANS\"")) {
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) return rs.getLong(1);
-            }
-        } catch (Exception ignored) {
-        }
-        return -1L;
-    }
-
-    private ArrayList<LiteBansBan> runLiteBansBansQuery(Connection c, String uuid) throws Exception {
-        String sql = "SELECT " +
-                "\"ID\",\"UUID\",\"IP\",\"REASON\",\"BANNED_BY_UUID\",\"BANNED_BY_NAME\",\"REMOVED_BY_UUID\",\"REMOVED_BY_NAME\",\"REMOVED_BY_REASON\",\"REMOVED_BY_DATE\"," +
-                "\"TIME\",\"UNTIL\",\"TEMPLATE\",\"SERVER_SCOPE\",\"SERVER_ORIGIN\",\"SILENT\",\"IPBAN\",\"IPBAN_WILDCARD\",\"ACTIVE\" " +
-                "FROM \"LITEBANS_BANS\" WHERE LOWER(\"UUID\")=LOWER(?) ORDER BY \"TIME\" DESC LIMIT " + LITEBANS_MAX_ENTRIES;
-
-        ArrayList<LiteBansBan> list = new ArrayList<>();
-        long started = System.currentTimeMillis();
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, uuid);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    list.add(new LiteBansBan(
-                            rs.getLong("ID"),
-                            rs.getString("UUID"),
-                            rs.getString("IP"),
-                            rs.getString("REASON"),
-                            rs.getString("BANNED_BY_UUID"),
-                            rs.getString("BANNED_BY_NAME"),
-                            rs.getString("REMOVED_BY_UUID"),
-                            rs.getString("REMOVED_BY_NAME"),
-                            rs.getString("REMOVED_BY_REASON"),
-                            rs.getString("REMOVED_BY_DATE"),
-                            rs.getLong("TIME"),
-                            rs.getLong("UNTIL"),
-                            rs.getInt("TEMPLATE"),
-                            rs.getString("SERVER_SCOPE"),
-                            rs.getString("SERVER_ORIGIN"),
-                            rs.getBoolean("SILENT"),
-                            rs.getBoolean("IPBAN"),
-                            rs.getBoolean("IPBAN_WILDCARD"),
-                            rs.getBoolean("ACTIVE")
-                    ));
-                }
-            }
-        }
-        long took = System.currentTimeMillis() - started;
-        litebansDebug("[LiteBansDBG] query UUID rows=" + list.size() + " tookMs=" + took);
-        return list;
-    }
-
-    private ArrayList<LiteBansBan> runLiteBansBansQueryNoDashes(Connection c, String uuidNoDashesLower) throws Exception {
-        String sql = "SELECT " +
-                "\"ID\",\"UUID\",\"IP\",\"REASON\",\"BANNED_BY_UUID\",\"BANNED_BY_NAME\",\"REMOVED_BY_UUID\",\"REMOVED_BY_NAME\",\"REMOVED_BY_REASON\",\"REMOVED_BY_DATE\"," +
-                "\"TIME\",\"UNTIL\",\"TEMPLATE\",\"SERVER_SCOPE\",\"SERVER_ORIGIN\",\"SILENT\",\"IPBAN\",\"IPBAN_WILDCARD\",\"ACTIVE\" " +
-                "FROM \"LITEBANS_BANS\" WHERE REPLACE(LOWER(\"UUID\"),'-','')=? ORDER BY \"TIME\" DESC LIMIT " + LITEBANS_MAX_ENTRIES;
-
-        ArrayList<LiteBansBan> list = new ArrayList<>();
-        long started = System.currentTimeMillis();
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, uuidNoDashesLower);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    list.add(new LiteBansBan(
-                            rs.getLong("ID"),
-                            rs.getString("UUID"),
-                            rs.getString("IP"),
-                            rs.getString("REASON"),
-                            rs.getString("BANNED_BY_UUID"),
-                            rs.getString("BANNED_BY_NAME"),
-                            rs.getString("REMOVED_BY_UUID"),
-                            rs.getString("REMOVED_BY_NAME"),
-                            rs.getString("REMOVED_BY_REASON"),
-                            rs.getString("REMOVED_BY_DATE"),
-                            rs.getLong("TIME"),
-                            rs.getLong("UNTIL"),
-                            rs.getInt("TEMPLATE"),
-                            rs.getString("SERVER_SCOPE"),
-                            rs.getString("SERVER_ORIGIN"),
-                            rs.getBoolean("SILENT"),
-                            rs.getBoolean("IPBAN"),
-                            rs.getBoolean("IPBAN_WILDCARD"),
-                            rs.getBoolean("ACTIVE")
-                    ));
-                }
-            }
-        }
-        long took = System.currentTimeMillis() - started;
-        litebansDebug("[LiteBansDBG] query UUID(no-dashes) rows=" + list.size() + " tookMs=" + took);
-        return list;
-    }
-
-    private Connection openLiteBansConnection(String jdbcPrimary, String jdbcFallback) {
-        if (!ensureLiteBansDriver()) return null;
-
-        Connection c = null;
-
-        if (jdbcPrimary != null && !jdbcPrimary.isBlank()) {
-            c = tryOpenLiteBansConnectionOnce(jdbcPrimary);
-            if (c != null) return c;
-        }
-
-        if (jdbcFallback != null && !jdbcFallback.isBlank()) {
-            c = tryOpenLiteBansConnectionOnce(jdbcFallback);
-            if (c != null) return c;
-        }
-
-        return null;
-    }
-
-    private Connection tryOpenLiteBansConnectionOnce(String jdbcUrl) {
-        try {
-            Properties props = new Properties();
-            props.setProperty("user", "");
-            props.setProperty("password", "");
-
-            Driver d = litebansShimDriver;
-            Connection c = null;
-
-            if (d != null) {
-                c = d.connect(jdbcUrl, props);
-            } else {
-                c = DriverManager.getConnection(jdbcUrl, "", "");
-            }
-
-            if (c == null) return null;
-
-            try {
-                c.setReadOnly(true);
-            } catch (Exception ignored) {
-            }
-            c.setAutoCommit(true);
-
-            litebansDebug("[LiteBansDBG] connection OK url=" + jdbcUrl);
-            return c;
-        } catch (Exception e) {
-            litebansWarn("[LiteBansDBG] connection FAIL url=" + jdbcUrl + " err=" + e.getMessage());
-            return null;
-        }
-    }
-
-    private LiteBansPaths resolveLiteBansPaths() {
-        LiteBansPaths cached = litebansPaths;
-        if (cached != null && cached.dbFile() != null && cached.h2Jar() != null) return cached;
-
-        File pluginsFolder = null;
-        try {
-            pluginsFolder = plugin.getDataFolder() != null ? plugin.getDataFolder().getParentFile() : null;
-        } catch (Exception ignored) {
-        }
-        if (pluginsFolder == null) pluginsFolder = new File("plugins");
-
-        File liteBansFolder = new File(pluginsFolder, "LiteBans");
-        if (!liteBansFolder.exists() || !liteBansFolder.isDirectory()) {
-            liteBansFolder = new File("plugins/LiteBans");
-        }
-
-        File db = null;
-        File db1 = new File(liteBansFolder, "litebans.mv.db");
-        if (db1.exists() && db1.isFile()) db = db1;
-
-        if (db == null) {
-            File[] list = liteBansFolder.listFiles();
-            if (list != null) {
-                for (File f : list) {
-                    if (f == null) continue;
-                    String n = f.getName();
-                    if (n == null) continue;
-                    String nl = n.toLowerCase(Locale.ROOT);
-                    if (nl.endsWith(".mv.db") && nl.contains("litebans") && f.isFile()) {
-                        db = f;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (db == null) {
-            File[] list = liteBansFolder.listFiles();
-            if (list != null) {
-                for (File f : list) {
-                    if (f == null) continue;
-                    String n = f.getName();
-                    if (n == null) continue;
-                    String nl = n.toLowerCase(Locale.ROOT);
-                    if (nl.endsWith(".mv.db") && f.isFile()) {
-                        db = f;
-                        break;
-                    }
-                }
-            }
-        }
-
-        File lib = new File(liteBansFolder, "lib");
-        if (!lib.exists() || !lib.isDirectory()) lib = new File("plugins/LiteBans/lib");
-
-        File h2 = null;
-        if (lib.exists() && lib.isDirectory()) {
-            File[] jars = lib.listFiles();
-            if (jars != null) {
-                for (File f : jars) {
-                    if (f == null || !f.isFile()) continue;
-                    String n = f.getName();
-                    if (n == null) continue;
-                    String nl = n.toLowerCase(Locale.ROOT);
-                    if (nl.startsWith("h2-") && nl.endsWith(".jar")) {
-                        if (h2 == null || n.compareToIgnoreCase(h2.getName()) > 0) h2 = f;
-                    }
-                }
-            }
-        }
-
-        if (h2 == null) {
-            File h2Fallback = new File(lib, "h2-1.4.197.jar");
-            if (h2Fallback.exists() && h2Fallback.isFile()) h2 = h2Fallback;
-        }
-
-        if (db == null || h2 == null) {
-            litebansPaths = null;
-            litebansWarn("[LiteBansDBG] resolve paths FAILED pluginsFolder=" + safePath(pluginsFolder) +
-                    " liteBansFolder=" + safePath(liteBansFolder) +
-                    " db=" + safePath(db) +
-                    " jar=" + safePath(h2));
-            return null;
-        }
-
-        LiteBansPaths out = new LiteBansPaths(db, h2);
-        litebansPaths = out;
-        litebansWarn("[LiteBansDBG] resolved db=" + safePath(db) + " jar=" + safePath(h2));
-        return out;
-    }
-
-    private String buildLiteBansJdbcUrl(File dbFile, boolean withReadOnlyParams) {
-        if (dbFile == null) return null;
-        if (!dbFile.exists() || !dbFile.isFile()) return null;
-
-        String base;
-        try {
-            base = dbFile.getAbsolutePath();
-        } catch (Exception e) {
-            base = dbFile.getPath();
-        }
-
-        String lower = base.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".mv.db")) base = base.substring(0, base.length() - 6);
-        else if (lower.endsWith(".h2.db")) base = base.substring(0, base.length() - 6);
-        else if (lower.endsWith(".db")) base = base.substring(0, base.length() - 3);
-
-        String jdbc = "jdbc:h2:" + base;
-        if (withReadOnlyParams) {
-            jdbc = jdbc + ";IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
-        } else {
-            jdbc = jdbc + ";IFEXISTS=TRUE";
-        }
-        return jdbc;
-    }
-
-    private boolean ensureLiteBansDriver() {
-        LiteBansPaths p = resolveLiteBansPaths();
-        if (p == null) return false;
-
-        String jarPath = safePath(p.h2Jar());
-        if (jarPath == null || jarPath.equals("null")) return false;
-
-        if (litebansDriverReady && jarPath.equals(litebansLoadedJarPath)) return true;
-
-        synchronized (litebansDriverLock) {
-            if (litebansDriverReady && jarPath.equals(litebansLoadedJarPath)) return true;
-
-            tryDeregisterLiteBansDriver();
-            tryCloseLiteBansClassLoader();
-            litebansDriverReady = false;
-            litebansLoadedJarPath = null;
-
-            File jar = p.h2Jar();
-            if (!jar.exists() || !jar.isFile()) {
-                litebansWarn("[LiteBansDBG] H2 jar not found: " + safePath(jar));
-                return false;
-            }
-
-            try {
-                URLClassLoader cl = new URLClassLoader(new URL[]{jar.toURI().toURL()}, getClass().getClassLoader());
-                Class<?> driverClass = Class.forName("org.h2.Driver", true, cl);
-                Driver drv = (Driver) driverClass.getDeclaredConstructor().newInstance();
-
-                Driver shim = new DriverShim(drv);
-                DriverManager.registerDriver(shim);
-
-                litebansH2ClassLoader = cl;
-                litebansShimDriver = shim;
-                litebansLoadedJarPath = jarPath;
-                litebansDriverReady = true;
-
-                litebansWarn("[LiteBansDBG] H2 driver loaded jar=" + jarPath);
-                return true;
-            } catch (Exception e) {
-                litebansWarn("[LiteBansDBG] failed to load H2 driver: " + e.getMessage());
-                tryCloseLiteBansClassLoader();
-                litebansShimDriver = null;
-                litebansDriverReady = false;
-                litebansLoadedJarPath = null;
-                return false;
-            }
-        }
-    }
-
-    private void litebansWarn(String msg) {
-        long now = System.currentTimeMillis();
-        if ((now - litebansLastWarnAt) < 1000L) return;
-        litebansLastWarnAt = now;
-        plugin.getLogManager().warn(msg);
-    }
-
-    private void litebansDebug(String msg) {
-        long now = System.currentTimeMillis();
-        if ((now - litebansLastDebugAt) < 2000L) return;
-        litebansLastDebugAt = now;
-        plugin.getLogManager().warn(msg);
-    }
-
-    private void tryDeregisterLiteBansDriver() {
-        Driver d = litebansShimDriver;
-        litebansShimDriver = null;
-        if (d == null) return;
-        try {
-            DriverManager.deregisterDriver(d);
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void tryCloseLiteBansClassLoader() {
-        URLClassLoader cl = litebansH2ClassLoader;
-        litebansH2ClassLoader = null;
-        if (cl == null) return;
-        try {
-            cl.close();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void closeQuietly(Connection c) {
-        if (c == null) return;
-        try {
-            c.close();
-        } catch (Exception ignored) {
         }
     }
 
@@ -2322,58 +2168,6 @@ public class DatabaseManager {
     private record TicketInfo(String moderatorId, String ticketId, JsonObject ticket, String timeKey) {
     }
 
-    private record LiteBansBansCacheEntry(long fetchedAt, List<LiteBansBan> bans) {
-    }
-
-    private record LiteBansPaths(File dbFile, File h2Jar) {
-    }
-
-    private record LiteBansBan(
-            long id,
-            String uuid,
-            String ip,
-            String reason,
-            String bannedByUuid,
-            String bannedByName,
-            String removedByUuid,
-            String removedByName,
-            String removedByReason,
-            String removedByDate,
-            long time,
-            long until,
-            int template,
-            String serverScope,
-            String serverOrigin,
-            boolean silent,
-            boolean ipban,
-            boolean ipbanWildcard,
-            boolean active
-    ) {
-        JsonObject toJson(boolean ipAllowed) {
-            JsonObject o = new JsonObject();
-            o.addProperty("id", id);
-            o.addProperty("uuid", uuid == null ? "" : uuid);
-            o.addProperty("ip", ipAllowed ? (ip == null ? "" : ip) : "not allowed");
-            o.addProperty("reason", reason == null ? "" : reason);
-            o.addProperty("banned_by_uuid", bannedByUuid == null ? "" : bannedByUuid);
-            o.addProperty("banned_by_name", bannedByName == null ? "" : bannedByName);
-            o.addProperty("removed_by_uuid", removedByUuid == null ? "" : removedByUuid);
-            o.addProperty("removed_by_name", removedByName == null ? "" : removedByName);
-            o.addProperty("removed_by_reason", removedByReason == null ? "" : removedByReason);
-            o.addProperty("removed_by_date", removedByDate == null ? "" : removedByDate);
-            o.addProperty("time", time);
-            o.addProperty("until", until);
-            o.addProperty("template", template);
-            o.addProperty("server_scope", serverScope == null ? "" : serverScope);
-            o.addProperty("server_origin", serverOrigin == null ? "" : serverOrigin);
-            o.addProperty("silent", silent);
-            o.addProperty("ipban", ipban);
-            o.addProperty("ipban_wildcard", ipbanWildcard);
-            o.addProperty("active", active);
-            return o;
-        }
-    }
-
     private record IpRule(int network, int maskBits, int mask) {
 
         static IpRule parse(String s) {
@@ -2463,53 +2257,6 @@ public class DatabaseManager {
                 oct[i] = v;
             }
             return (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
-        }
-    }
-
-    private static final class DriverShim implements Driver {
-        private final Driver driver;
-
-        private DriverShim(Driver driver) {
-            this.driver = driver;
-        }
-
-        @Override
-        public Connection connect(String url, Properties info) throws java.sql.SQLException {
-            return driver.connect(url, info);
-        }
-
-        @Override
-        public boolean acceptsURL(String url) throws java.sql.SQLException {
-            return driver.acceptsURL(url);
-        }
-
-        @Override
-        public java.sql.DriverPropertyInfo[] getPropertyInfo(String url, Properties info) throws java.sql.SQLException {
-            return driver.getPropertyInfo(url, info);
-        }
-
-        @Override
-        public int getMajorVersion() {
-            return driver.getMajorVersion();
-        }
-
-        @Override
-        public int getMinorVersion() {
-            return driver.getMinorVersion();
-        }
-
-        @Override
-        public boolean jdbcCompliant() {
-            return driver.jdbcCompliant();
-        }
-
-        @Override
-        public java.util.logging.Logger getParentLogger() {
-            try {
-                return driver.getParentLogger();
-            } catch (Exception e) {
-                return java.util.logging.Logger.getLogger("global");
-            }
         }
     }
 
