@@ -65,8 +65,8 @@ public class DatabaseManager {
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
 
-    private static final String LITEBANS_DB_FILE = "/home/container/plugins/LiteBans/litebans.mv.db";
-    private static final String LITEBANS_H2_JAR = "/home/container/plugins/LiteBans/lib/h2-1.4.197.jar";
+    private static final String LITEBANS_DB_FILE = "plugins/LiteBans/litebans.mv.db";
+    private static final String LITEBANS_H2_JAR = "plugins/LiteBans/lib/h2-1.4.197.jar";
     private static final String LITEBANS_DB_PARAMS = "IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
     private static final long LITEBANS_CACHE_TTL_MS = 30_000L;
     private static final int LITEBANS_MAX_ENTRIES = 50;
