@@ -68,7 +68,7 @@ public class DatabaseManager {
     private static final String LITEBANS_DB_FILE = "/home/container/plugins/LiteBans/litebans.mv.db";
     private static final String LITEBANS_H2_JAR = "/home/container/plugins/LiteBans/lib/h2-1.4.197.jar";
     private static final String LITEBANS_DB_PARAMS = "IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
-    private static final long LITEBANS_CACHE_TTL_MS = 60_000L;
+    private static final long LITEBANS_CACHE_TTL_MS = 30_000L;
     private static final int LITEBANS_MAX_ENTRIES = 50;
 
     private final CookiePl plugin;
@@ -116,6 +116,7 @@ public class DatabaseManager {
     private volatile URLClassLoader litebansH2ClassLoader;
     private volatile Driver litebansShimDriver;
     private volatile long litebansLastWarnAt = 0L;
+    private volatile long litebansLastDebugAt = 0L;
 
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
@@ -873,9 +874,12 @@ public class DatabaseManager {
         if (minecraftUuid == null || minecraftUuid.isBlank()) return out;
 
         List<LiteBansBan> bans = getLiteBansBansCached(minecraftUuid);
-        for (LiteBansBan b : bans) {
-            if (b == null) continue;
-            bansArr.add(b.toJson(ipAllowed));
+        debugLiteBans("LiteBans bans for uuid=" + minecraftUuid + " -> " + (bans == null ? 0 : bans.size()));
+        if (bans != null) {
+            for (LiteBansBan b : bans) {
+                if (b == null) continue;
+                bansArr.add(b.toJson(ipAllowed));
+            }
         }
         return out;
     }
@@ -901,42 +905,18 @@ public class DatabaseManager {
 
         Connection c = null;
         try {
-            c = openLiteBansConnection();
+            String jdbc = buildLiteBansJdbcUrl();
+            debugLiteBans("LiteBans JDBC url=" + (jdbc == null ? "null" : jdbc));
+            c = openLiteBansConnection(jdbc);
             if (c == null) return List.of();
 
-            String sql = "SELECT " +
-                    "ID,UUID,IP,REASON,BANNED_BY_UUID,BANNED_BY_NAME,REMOVED_BY_UUID,REMOVED_BY_NAME,REMOVED_BY_REASON,REMOVED_BY_DATE," +
-                    "TIME,UNTIL,TEMPLATE,SERVER_SCOPE,SERVER_ORIGIN,SILENT,IPBAN,IPBAN_WILDCARD,ACTIVE " +
-                    "FROM LITEBANS_BANS WHERE UUID=? ORDER BY TIME DESC LIMIT " + LITEBANS_MAX_ENTRIES;
+            ArrayList<LiteBansBan> list = runLiteBansBansQuery(c, uuid);
+            if (!list.isEmpty()) return list;
 
-            ArrayList<LiteBansBan> list = new ArrayList<>();
-            try (PreparedStatement ps = c.prepareStatement(sql)) {
-                ps.setString(1, uuid);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        list.add(new LiteBansBan(
-                                rs.getLong("ID"),
-                                rs.getString("UUID"),
-                                rs.getString("IP"),
-                                rs.getString("REASON"),
-                                rs.getString("BANNED_BY_UUID"),
-                                rs.getString("BANNED_BY_NAME"),
-                                rs.getString("REMOVED_BY_UUID"),
-                                rs.getString("REMOVED_BY_NAME"),
-                                rs.getString("REMOVED_BY_REASON"),
-                                rs.getString("REMOVED_BY_DATE"),
-                                rs.getLong("TIME"),
-                                rs.getLong("UNTIL"),
-                                rs.getInt("TEMPLATE"),
-                                rs.getString("SERVER_SCOPE"),
-                                rs.getString("SERVER_ORIGIN"),
-                                rs.getBoolean("SILENT"),
-                                rs.getBoolean("IPBAN"),
-                                rs.getBoolean("IPBAN_WILDCARD"),
-                                rs.getBoolean("ACTIVE")
-                        ));
-                    }
-                }
+            String alt = uuid.replace("-", "").trim();
+            if (!alt.isEmpty() && !alt.equalsIgnoreCase(uuid)) {
+                ArrayList<LiteBansBan> list2 = runLiteBansBansQueryNoDashes(c, alt.toLowerCase(Locale.ROOT));
+                if (!list2.isEmpty()) return list2;
             }
 
             return list;
@@ -948,15 +928,100 @@ public class DatabaseManager {
         }
     }
 
-    private Connection openLiteBansConnection() {
-        if (!ensureLiteBansDriver()) return null;
+    private ArrayList<LiteBansBan> runLiteBansBansQuery(Connection c, String uuid) throws Exception {
+        String sql = "SELECT " +
+                "\"ID\",\"UUID\",\"IP\",\"REASON\",\"BANNED_BY_UUID\",\"BANNED_BY_NAME\",\"REMOVED_BY_UUID\",\"REMOVED_BY_NAME\",\"REMOVED_BY_REASON\",\"REMOVED_BY_DATE\"," +
+                "\"TIME\",\"UNTIL\",\"TEMPLATE\",\"SERVER_SCOPE\",\"SERVER_ORIGIN\",\"SILENT\",\"IPBAN\",\"IPBAN_WILDCARD\",\"ACTIVE\" " +
+                "FROM \"LITEBANS_BANS\" WHERE LOWER(\"UUID\")=LOWER(?) ORDER BY \"TIME\" DESC LIMIT " + LITEBANS_MAX_ENTRIES;
 
-        String url = buildLiteBansJdbcUrl();
-        if (url == null || url.isBlank()) return null;
+        ArrayList<LiteBansBan> list = new ArrayList<>();
+        long started = System.currentTimeMillis();
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, uuid);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new LiteBansBan(
+                            rs.getLong("ID"),
+                            rs.getString("UUID"),
+                            rs.getString("IP"),
+                            rs.getString("REASON"),
+                            rs.getString("BANNED_BY_UUID"),
+                            rs.getString("BANNED_BY_NAME"),
+                            rs.getString("REMOVED_BY_UUID"),
+                            rs.getString("REMOVED_BY_NAME"),
+                            rs.getString("REMOVED_BY_REASON"),
+                            rs.getString("REMOVED_BY_DATE"),
+                            rs.getLong("TIME"),
+                            rs.getLong("UNTIL"),
+                            rs.getInt("TEMPLATE"),
+                            rs.getString("SERVER_SCOPE"),
+                            rs.getString("SERVER_ORIGIN"),
+                            rs.getBoolean("SILENT"),
+                            rs.getBoolean("IPBAN"),
+                            rs.getBoolean("IPBAN_WILDCARD"),
+                            rs.getBoolean("ACTIVE")
+                    ));
+                }
+            }
+        }
+        long took = System.currentTimeMillis() - started;
+        debugLiteBans("LiteBans query by UUID rows=" + list.size() + " tookMs=" + took);
+        return list;
+    }
+
+    private ArrayList<LiteBansBan> runLiteBansBansQueryNoDashes(Connection c, String uuidNoDashesLower) throws Exception {
+        String sql = "SELECT " +
+                "\"ID\",\"UUID\",\"IP\",\"REASON\",\"BANNED_BY_UUID\",\"BANNED_BY_NAME\",\"REMOVED_BY_UUID\",\"REMOVED_BY_NAME\",\"REMOVED_BY_REASON\",\"REMOVED_BY_DATE\"," +
+                "\"TIME\",\"UNTIL\",\"TEMPLATE\",\"SERVER_SCOPE\",\"SERVER_ORIGIN\",\"SILENT\",\"IPBAN\",\"IPBAN_WILDCARD\",\"ACTIVE\" " +
+                "FROM \"LITEBANS_BANS\" WHERE REPLACE(LOWER(\"UUID\"),'-','')=? ORDER BY \"TIME\" DESC LIMIT " + LITEBANS_MAX_ENTRIES;
+
+        ArrayList<LiteBansBan> list = new ArrayList<>();
+        long started = System.currentTimeMillis();
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, uuidNoDashesLower);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new LiteBansBan(
+                            rs.getLong("ID"),
+                            rs.getString("UUID"),
+                            rs.getString("IP"),
+                            rs.getString("REASON"),
+                            rs.getString("BANNED_BY_UUID"),
+                            rs.getString("BANNED_BY_NAME"),
+                            rs.getString("REMOVED_BY_UUID"),
+                            rs.getString("REMOVED_BY_NAME"),
+                            rs.getString("REMOVED_BY_REASON"),
+                            rs.getString("REMOVED_BY_DATE"),
+                            rs.getLong("TIME"),
+                            rs.getLong("UNTIL"),
+                            rs.getInt("TEMPLATE"),
+                            rs.getString("SERVER_SCOPE"),
+                            rs.getString("SERVER_ORIGIN"),
+                            rs.getBoolean("SILENT"),
+                            rs.getBoolean("IPBAN"),
+                            rs.getBoolean("IPBAN_WILDCARD"),
+                            rs.getBoolean("ACTIVE")
+                    ));
+                }
+            }
+        }
+        long took = System.currentTimeMillis() - started;
+        debugLiteBans("LiteBans query by UUID(no-dashes) rows=" + list.size() + " tookMs=" + took);
+        return list;
+    }
+
+    private Connection openLiteBansConnection(String jdbcUrl) {
+        if (!ensureLiteBansDriver()) return null;
+        if (jdbcUrl == null || jdbcUrl.isBlank()) return null;
 
         try {
-            Connection c = DriverManager.getConnection(url, "", "");
+            Connection c = DriverManager.getConnection(jdbcUrl, "", "");
+            try {
+                c.setReadOnly(true);
+            } catch (Exception ignored) {
+            }
             c.setAutoCommit(true);
+            debugLiteBans("LiteBans connection OK");
             return c;
         } catch (Exception e) {
             warnLiteBans("LiteBans DB connection failed: " + e.getMessage());
@@ -966,7 +1031,10 @@ public class DatabaseManager {
 
     private String buildLiteBansJdbcUrl() {
         File f = new File(LITEBANS_DB_FILE);
-        if (!f.exists() || !f.isFile()) return null;
+        if (!f.exists() || !f.isFile()) {
+            warnLiteBans("LiteBans DB file missing: " + f.getAbsolutePath());
+            return null;
+        }
 
         String base = LITEBANS_DB_FILE.trim();
         if (base.endsWith(".mv.db")) base = base.substring(0, base.length() - 6);
@@ -983,13 +1051,6 @@ public class DatabaseManager {
 
         synchronized (litebansDriverLock) {
             if (litebansDriverReady) return true;
-
-            try {
-                Class.forName("org.h2.Driver");
-                litebansDriverReady = true;
-                return true;
-            } catch (Throwable ignored) {
-            }
 
             File jar = new File(LITEBANS_H2_JAR);
             if (!jar.exists() || !jar.isFile()) {
@@ -1008,6 +1069,8 @@ public class DatabaseManager {
                 litebansH2ClassLoader = cl;
                 litebansShimDriver = shim;
                 litebansDriverReady = true;
+
+                debugLiteBans("LiteBans H2 driver loaded from " + jar.getAbsolutePath());
                 return true;
             } catch (Exception e) {
                 warnLiteBans("Failed to load LiteBans H2 driver: " + e.getMessage());
@@ -1021,9 +1084,16 @@ public class DatabaseManager {
 
     private void warnLiteBans(String msg) {
         long now = System.currentTimeMillis();
-        if ((now - litebansLastWarnAt) < 60_000L) return;
+        if ((now - litebansLastWarnAt) < 15_000L) return;
         litebansLastWarnAt = now;
         plugin.getLogManager().warn(msg);
+    }
+
+    private void debugLiteBans(String msg) {
+        long now = System.currentTimeMillis();
+        if ((now - litebansLastDebugAt) < 5_000L) return;
+        litebansLastDebugAt = now;
+        plugin.getLogManager().info(msg);
     }
 
     private void tryDeregisterLiteBansDriver() {
@@ -2070,6 +2140,7 @@ public class DatabaseManager {
             JsonObject o = new JsonObject();
             o.addProperty("id", id);
             o.addProperty("uuid", uuid == null ? "" : uuid);
+            o.addProperty("ip", ipAllowed ? (ip == null ? "" : ip) : "not allowed");
             o.addProperty("reason", reason == null ? "" : reason);
             o.addProperty("banned_by_uuid", bannedByUuid == null ? "" : bannedByUuid);
             o.addProperty("banned_by_name", bannedByName == null ? "" : bannedByName);
@@ -2086,7 +2157,6 @@ public class DatabaseManager {
             o.addProperty("ipban", ipban);
             o.addProperty("ipban_wildcard", ipbanWildcard);
             o.addProperty("active", active);
-            if (ipAllowed) o.addProperty("ip", ip == null ? "" : ip);
             return o;
         }
     }
