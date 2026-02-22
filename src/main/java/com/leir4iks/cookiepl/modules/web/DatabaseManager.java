@@ -27,10 +27,12 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -46,6 +48,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Properties;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.UUID;
@@ -61,6 +64,12 @@ public class DatabaseManager {
     private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
+
+    private static final String LITEBANS_DB_FILE = "/home/container/plugins/LiteBans/litebans.mv.db";
+    private static final String LITEBANS_H2_JAR = "/home/container/plugins/LiteBans/lib/h2-1.4.197.jar";
+    private static final String LITEBANS_DB_PARAMS = "IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
+    private static final long LITEBANS_CACHE_TTL_MS = 60_000L;
+    private static final int LITEBANS_MAX_ENTRIES = 50;
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
@@ -100,6 +109,13 @@ public class DatabaseManager {
     private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
     private volatile Map<String, List<TicketInfo>> ticketsByUserId = Map.of();
     private volatile int lastStatsHash = 0;
+
+    private final ConcurrentHashMap<String, LiteBansBansCacheEntry> litebansBansCache = new ConcurrentHashMap<>();
+    private final Object litebansDriverLock = new Object();
+    private volatile boolean litebansDriverReady = false;
+    private volatile URLClassLoader litebansH2ClassLoader;
+    private volatile Driver litebansShimDriver;
+    private volatile long litebansLastWarnAt = 0L;
 
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
@@ -173,6 +189,11 @@ public class DatabaseManager {
         if (pool != null) pool.close();
         pool = null;
         dbReady = false;
+
+        litebansBansCache.clear();
+        tryDeregisterLiteBansDriver();
+        tryCloseLiteBansClassLoader();
+        litebansDriverReady = false;
     }
 
     private LuckPerms getLuckPerms() {
@@ -835,9 +856,201 @@ public class DatabaseManager {
                 obj.add("tickets", ticketsOut);
             }
 
+            String minecraftUuid = obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull() ? obj.get("minecraft_uuid").getAsString() : null;
+            obj.add("litebans", buildLiteBansObject(minecraftUuid, allowed));
+
             return obj.toString();
         } catch (Exception e) {
             return baseJson;
+        }
+    }
+
+    private JsonObject buildLiteBansObject(String minecraftUuid, boolean ipAllowed) {
+        JsonObject out = new JsonObject();
+        JsonArray bansArr = new JsonArray();
+        out.add("bans", bansArr);
+
+        if (minecraftUuid == null || minecraftUuid.isBlank()) return out;
+
+        List<LiteBansBan> bans = getLiteBansBansCached(minecraftUuid);
+        for (LiteBansBan b : bans) {
+            if (b == null) continue;
+            bansArr.add(b.toJson(ipAllowed));
+        }
+        return out;
+    }
+
+    private List<LiteBansBan> getLiteBansBansCached(String uuid) {
+        String key = (uuid == null ? "" : uuid.trim().toLowerCase(Locale.ROOT));
+        if (key.isEmpty()) return List.of();
+
+        long now = System.currentTimeMillis();
+        LiteBansBansCacheEntry cached = litebansBansCache.get(key);
+        if (cached != null && (now - cached.fetchedAt()) <= LITEBANS_CACHE_TTL_MS) {
+            List<LiteBansBan> list = cached.bans();
+            return list == null ? List.of() : list;
+        }
+
+        List<LiteBansBan> fresh = queryLiteBansBans(uuid);
+        litebansBansCache.put(key, new LiteBansBansCacheEntry(now, fresh == null ? List.of() : List.copyOf(fresh)));
+        return fresh == null ? List.of() : fresh;
+    }
+
+    private List<LiteBansBan> queryLiteBansBans(String uuid) {
+        if (uuid == null || uuid.isBlank()) return List.of();
+
+        Connection c = null;
+        try {
+            c = openLiteBansConnection();
+            if (c == null) return List.of();
+
+            String sql = "SELECT " +
+                    "ID,UUID,IP,REASON,BANNED_BY_UUID,BANNED_BY_NAME,REMOVED_BY_UUID,REMOVED_BY_NAME,REMOVED_BY_REASON,REMOVED_BY_DATE," +
+                    "TIME,UNTIL,TEMPLATE,SERVER_SCOPE,SERVER_ORIGIN,SILENT,IPBAN,IPBAN_WILDCARD,ACTIVE " +
+                    "FROM LITEBANS_BANS WHERE UUID=? ORDER BY TIME DESC LIMIT " + LITEBANS_MAX_ENTRIES;
+
+            ArrayList<LiteBansBan> list = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, uuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        list.add(new LiteBansBan(
+                                rs.getLong("ID"),
+                                rs.getString("UUID"),
+                                rs.getString("IP"),
+                                rs.getString("REASON"),
+                                rs.getString("BANNED_BY_UUID"),
+                                rs.getString("BANNED_BY_NAME"),
+                                rs.getString("REMOVED_BY_UUID"),
+                                rs.getString("REMOVED_BY_NAME"),
+                                rs.getString("REMOVED_BY_REASON"),
+                                rs.getString("REMOVED_BY_DATE"),
+                                rs.getLong("TIME"),
+                                rs.getLong("UNTIL"),
+                                rs.getInt("TEMPLATE"),
+                                rs.getString("SERVER_SCOPE"),
+                                rs.getString("SERVER_ORIGIN"),
+                                rs.getBoolean("SILENT"),
+                                rs.getBoolean("IPBAN"),
+                                rs.getBoolean("IPBAN_WILDCARD"),
+                                rs.getBoolean("ACTIVE")
+                        ));
+                    }
+                }
+            }
+
+            return list;
+        } catch (Exception e) {
+            warnLiteBans("LiteBans query failed: " + e.getMessage());
+            return List.of();
+        } finally {
+            closeQuietly(c);
+        }
+    }
+
+    private Connection openLiteBansConnection() {
+        if (!ensureLiteBansDriver()) return null;
+
+        String url = buildLiteBansJdbcUrl();
+        if (url == null || url.isBlank()) return null;
+
+        try {
+            Connection c = DriverManager.getConnection(url, "", "");
+            c.setAutoCommit(true);
+            return c;
+        } catch (Exception e) {
+            warnLiteBans("LiteBans DB connection failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private String buildLiteBansJdbcUrl() {
+        File f = new File(LITEBANS_DB_FILE);
+        if (!f.exists() || !f.isFile()) return null;
+
+        String base = LITEBANS_DB_FILE.trim();
+        if (base.endsWith(".mv.db")) base = base.substring(0, base.length() - 6);
+        else if (base.endsWith(".h2.db")) base = base.substring(0, base.length() - 6);
+        else if (base.endsWith(".db")) base = base.substring(0, base.length() - 3);
+
+        String jdbc = "jdbc:h2:" + base;
+        if (LITEBANS_DB_PARAMS != null && !LITEBANS_DB_PARAMS.isBlank()) jdbc = jdbc + ";" + LITEBANS_DB_PARAMS;
+        return jdbc;
+    }
+
+    private boolean ensureLiteBansDriver() {
+        if (litebansDriverReady) return true;
+
+        synchronized (litebansDriverLock) {
+            if (litebansDriverReady) return true;
+
+            try {
+                Class.forName("org.h2.Driver");
+                litebansDriverReady = true;
+                return true;
+            } catch (Throwable ignored) {
+            }
+
+            File jar = new File(LITEBANS_H2_JAR);
+            if (!jar.exists() || !jar.isFile()) {
+                warnLiteBans("LiteBans H2 jar not found: " + jar.getAbsolutePath());
+                return false;
+            }
+
+            try {
+                URLClassLoader cl = new URLClassLoader(new URL[]{jar.toURI().toURL()}, getClass().getClassLoader());
+                Class<?> driverClass = Class.forName("org.h2.Driver", true, cl);
+                Driver drv = (Driver) driverClass.getDeclaredConstructor().newInstance();
+
+                Driver shim = new DriverShim(drv);
+                DriverManager.registerDriver(shim);
+
+                litebansH2ClassLoader = cl;
+                litebansShimDriver = shim;
+                litebansDriverReady = true;
+                return true;
+            } catch (Exception e) {
+                warnLiteBans("Failed to load LiteBans H2 driver: " + e.getMessage());
+                tryCloseLiteBansClassLoader();
+                litebansShimDriver = null;
+                litebansDriverReady = false;
+                return false;
+            }
+        }
+    }
+
+    private void warnLiteBans(String msg) {
+        long now = System.currentTimeMillis();
+        if ((now - litebansLastWarnAt) < 60_000L) return;
+        litebansLastWarnAt = now;
+        plugin.getLogManager().warn(msg);
+    }
+
+    private void tryDeregisterLiteBansDriver() {
+        Driver d = litebansShimDriver;
+        litebansShimDriver = null;
+        if (d == null) return;
+        try {
+            DriverManager.deregisterDriver(d);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void tryCloseLiteBansClassLoader() {
+        URLClassLoader cl = litebansH2ClassLoader;
+        litebansH2ClassLoader = null;
+        if (cl == null) return;
+        try {
+            cl.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void closeQuietly(Connection c) {
+        if (c == null) return;
+        try {
+            c.close();
+        } catch (Exception ignored) {
         }
     }
 
@@ -1829,6 +2042,55 @@ public class DatabaseManager {
     private record TicketInfo(String moderatorId, String ticketId, JsonObject ticket, String timeKey) {
     }
 
+    private record LiteBansBansCacheEntry(long fetchedAt, List<LiteBansBan> bans) {
+    }
+
+    private record LiteBansBan(
+            long id,
+            String uuid,
+            String ip,
+            String reason,
+            String bannedByUuid,
+            String bannedByName,
+            String removedByUuid,
+            String removedByName,
+            String removedByReason,
+            String removedByDate,
+            long time,
+            long until,
+            int template,
+            String serverScope,
+            String serverOrigin,
+            boolean silent,
+            boolean ipban,
+            boolean ipbanWildcard,
+            boolean active
+    ) {
+        JsonObject toJson(boolean ipAllowed) {
+            JsonObject o = new JsonObject();
+            o.addProperty("id", id);
+            o.addProperty("uuid", uuid == null ? "" : uuid);
+            o.addProperty("reason", reason == null ? "" : reason);
+            o.addProperty("banned_by_uuid", bannedByUuid == null ? "" : bannedByUuid);
+            o.addProperty("banned_by_name", bannedByName == null ? "" : bannedByName);
+            o.addProperty("removed_by_uuid", removedByUuid == null ? "" : removedByUuid);
+            o.addProperty("removed_by_name", removedByName == null ? "" : removedByName);
+            o.addProperty("removed_by_reason", removedByReason == null ? "" : removedByReason);
+            o.addProperty("removed_by_date", removedByDate == null ? "" : removedByDate);
+            o.addProperty("time", time);
+            o.addProperty("until", until);
+            o.addProperty("template", template);
+            o.addProperty("server_scope", serverScope == null ? "" : serverScope);
+            o.addProperty("server_origin", serverOrigin == null ? "" : serverOrigin);
+            o.addProperty("silent", silent);
+            o.addProperty("ipban", ipban);
+            o.addProperty("ipban_wildcard", ipbanWildcard);
+            o.addProperty("active", active);
+            if (ipAllowed) o.addProperty("ip", ip == null ? "" : ip);
+            return o;
+        }
+    }
+
     private record IpRule(int network, int maskBits, int mask) {
 
         static IpRule parse(String s) {
@@ -1918,6 +2180,53 @@ public class DatabaseManager {
                 oct[i] = v;
             }
             return (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
+        }
+    }
+
+    private static final class DriverShim implements Driver {
+        private final Driver driver;
+
+        private DriverShim(Driver driver) {
+            this.driver = driver;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) throws java.sql.SQLException {
+            return driver.connect(url, info);
+        }
+
+        @Override
+        public boolean acceptsURL(String url) throws java.sql.SQLException {
+            return driver.acceptsURL(url);
+        }
+
+        @Override
+        public java.sql.DriverPropertyInfo[] getPropertyInfo(String url, Properties info) throws java.sql.SQLException {
+            return driver.getPropertyInfo(url, info);
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return driver.getMajorVersion();
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return driver.getMinorVersion();
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return driver.jdbcCompliant();
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            try {
+                return driver.getParentLogger();
+            } catch (Exception e) {
+                return java.util.logging.Logger.getLogger("global");
+            }
         }
     }
 
