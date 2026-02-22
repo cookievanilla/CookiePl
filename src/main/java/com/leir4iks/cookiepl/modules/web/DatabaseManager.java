@@ -114,6 +114,8 @@ public class DatabaseManager {
 
     private volatile LuckPerms luckPerms;
 
+    private final LiteBansBridge liteBansBridge;
+
     private final Object liteBansInitLock = new Object();
     private final ConcurrentHashMap<String, Long> liteBansThrottle = new ConcurrentHashMap<>();
     private volatile boolean liteBansReady = false;
@@ -127,6 +129,7 @@ public class DatabaseManager {
         this.discordSrvFolder = new File(plugin.getDataFolder().getParentFile(), "DiscordSRV");
         this.userCacheFile = new File(plugin.getDataFolder().getParentFile().getParentFile(), "usercache.json");
         this.dataFile = new File(plugin.getDataFolder(), "data.yml");
+        this.liteBansBridge = new LiteBansBridge(plugin);
     }
 
     public void start() {
@@ -146,6 +149,7 @@ public class DatabaseManager {
 
         plugin.getFoliaLib().getScheduler().runAsync(task -> {
             initMysql();
+            liteBansBridge.warmup();
             initLiteBans();
             updateExternalNameData();
             updateWhitelistData();
@@ -180,6 +184,7 @@ public class DatabaseManager {
         }
 
         if (pool != null) pool.close();
+        liteBansBridge.close();
         pool = null;
         dbReady = false;
 
@@ -1169,10 +1174,14 @@ public class DatabaseManager {
                 obj.add("tickets", ticketsOut);
             }
 
-            String mcUuid = obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull() ? obj.get("minecraft_uuid").getAsString() : null;
-            JsonObject lite = new JsonObject();
-            lite.add("bans", getLiteBansBansArray(mcUuid, allowed));
-            obj.add("litebans", lite);
+            UUID mcUuid = null;
+            try {
+                if (obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull()) {
+                    mcUuid = UUID.fromString(obj.get("minecraft_uuid").getAsString());
+                }
+            } catch (Exception ignored) {
+            }
+            obj.add("litebans", liteBansBridge.getLiteBansJson(mcUuid, allowed, remoteIp));
 
             return obj.toString();
         } catch (Exception e) {
