@@ -3,6 +3,7 @@ package com.leir4iks.cookiepl.modules.web;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.leir4iks.cookiepl.CookiePl;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
