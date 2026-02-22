@@ -65,9 +65,6 @@ public class DatabaseManager {
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
 
-    private static final String LITEBANS_DB_FILE = "plugins/LiteBans/litebans.mv.db";
-    private static final String LITEBANS_H2_JAR = "plugins/LiteBans/lib/h2-1.4.197.jar";
-    private static final String LITEBANS_DB_PARAMS = "IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
     private static final long LITEBANS_CACHE_TTL_MS = 30_000L;
     private static final int LITEBANS_MAX_ENTRIES = 50;
 
@@ -115,8 +112,11 @@ public class DatabaseManager {
     private volatile boolean litebansDriverReady = false;
     private volatile URLClassLoader litebansH2ClassLoader;
     private volatile Driver litebansShimDriver;
+    private volatile String litebansLoadedJarPath;
+    private volatile LiteBansPaths litebansPaths;
     private volatile long litebansLastWarnAt = 0L;
     private volatile long litebansLastDebugAt = 0L;
+    private volatile long litebansLastEmptyAt = 0L;
 
     private WrappedTask skinsUpdateTask;
     private WrappedTask playersStatsUpdateTask;
@@ -195,6 +195,8 @@ public class DatabaseManager {
         tryDeregisterLiteBansDriver();
         tryCloseLiteBansClassLoader();
         litebansDriverReady = false;
+        litebansLoadedJarPath = null;
+        litebansPaths = null;
     }
 
     private LuckPerms getLuckPerms() {
@@ -874,14 +876,62 @@ public class DatabaseManager {
         if (minecraftUuid == null || minecraftUuid.isBlank()) return out;
 
         List<LiteBansBan> bans = getLiteBansBansCached(minecraftUuid);
-        debugLiteBans("LiteBans bans for uuid=" + minecraftUuid + " -> " + (bans == null ? 0 : bans.size()));
         if (bans != null) {
             for (LiteBansBan b : bans) {
                 if (b == null) continue;
                 bansArr.add(b.toJson(ipAllowed));
             }
         }
+
+        if (bansArr.size() == 0) {
+            litebansEmptyDebug(minecraftUuid);
+        }
+
         return out;
+    }
+
+    private void litebansEmptyDebug(String uuid) {
+        long now = System.currentTimeMillis();
+        if ((now - litebansLastEmptyAt) < 5000L) return;
+        litebansLastEmptyAt = now;
+
+        LiteBansPaths p = resolveLiteBansPaths();
+        if (p == null) {
+            litebansWarn("[LiteBansDBG] paths not resolved, uuid=" + uuid);
+            return;
+        }
+
+        String jdbc1 = buildLiteBansJdbcUrl(p.dbFile(), true);
+        String jdbc2 = buildLiteBansJdbcUrl(p.dbFile(), false);
+
+        litebansWarn("[LiteBansDBG] empty bans uuid=" + uuid +
+                " dbFile=" + safePath(p.dbFile()) +
+                " jar=" + safePath(p.h2Jar()) +
+                " jdbc1=" + (jdbc1 == null ? "null" : jdbc1) +
+                " jdbc2=" + (jdbc2 == null ? "null" : jdbc2) +
+                " dbSize=" + (p.dbFile() != null && p.dbFile().exists() ? p.dbFile().length() : -1));
+
+        Connection c = null;
+        try {
+            c = openLiteBansConnection(jdbc1, jdbc2);
+            if (c == null) return;
+
+            long total = countLiteBansBans(c);
+            litebansWarn("[LiteBansDBG] LITEBANS_BANS totalRows=" + total + " uuid=" + uuid);
+        } catch (Exception e) {
+            litebansWarn("[LiteBansDBG] empty-debug failed: " + e.getMessage());
+        } finally {
+            closeQuietly(c);
+        }
+    }
+
+    private String safePath(File f) {
+        if (f == null) return "null";
+        try {
+            return f.getAbsolutePath();
+        } catch (Exception ignored) {
+            return f.getPath();
+        }
     }
 
     private List<LiteBansBan> getLiteBansBansCached(String uuid) {
@@ -903,11 +953,18 @@ public class DatabaseManager {
     private List<LiteBansBan> queryLiteBansBans(String uuid) {
         if (uuid == null || uuid.isBlank()) return List.of();
 
+        LiteBansPaths p = resolveLiteBansPaths();
+        if (p == null) {
+            litebansWarn("[LiteBansDBG] LiteBans paths not found");
+            return List.of();
+        }
+
+        String jdbc1 = buildLiteBansJdbcUrl(p.dbFile(), true);
+        String jdbc2 = buildLiteBansJdbcUrl(p.dbFile(), false);
+
         Connection c = null;
         try {
-            String jdbc = buildLiteBansJdbcUrl();
-            debugLiteBans("LiteBans JDBC url=" + (jdbc == null ? "null" : jdbc));
-            c = openLiteBansConnection(jdbc);
+            c = openLiteBansConnection(jdbc1, jdbc2);
             if (c == null) return List.of();
 
             ArrayList<LiteBansBan> list = runLiteBansBansQuery(c, uuid);
@@ -921,11 +978,22 @@ public class DatabaseManager {
 
             return list;
         } catch (Exception e) {
-            warnLiteBans("LiteBans query failed: " + e.getMessage());
+            litebansWarn("[LiteBansDBG] LiteBans query failed: " + e.getMessage());
             return List.of();
         } finally {
             closeQuietly(c);
         }
+    }
+
+    private long countLiteBansBans(Connection c) {
+        if (c == null) return -1L;
+        try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM \"LITEBANS_BANS\"")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+            }
+        } catch (Exception ignored) {
+        }
+        return -1L;
     }
 
     private ArrayList<LiteBansBan> runLiteBansBansQuery(Connection c, String uuid) throws Exception {
@@ -965,7 +1033,7 @@ public class DatabaseManager {
             }
         }
         long took = System.currentTimeMillis() - started;
-        debugLiteBans("LiteBans query by UUID rows=" + list.size() + " tookMs=" + took);
+        litebansDebug("[LiteBansDBG] query UUID rows=" + list.size() + " tookMs=" + took);
         return list;
     }
 
@@ -1006,55 +1074,195 @@ public class DatabaseManager {
             }
         }
         long took = System.currentTimeMillis() - started;
-        debugLiteBans("LiteBans query by UUID(no-dashes) rows=" + list.size() + " tookMs=" + took);
+        litebansDebug("[LiteBansDBG] query UUID(no-dashes) rows=" + list.size() + " tookMs=" + took);
         return list;
     }
 
-    private Connection openLiteBansConnection(String jdbcUrl) {
+    private Connection openLiteBansConnection(String jdbcPrimary, String jdbcFallback) {
         if (!ensureLiteBansDriver()) return null;
-        if (jdbcUrl == null || jdbcUrl.isBlank()) return null;
 
+        Connection c = null;
+
+        if (jdbcPrimary != null && !jdbcPrimary.isBlank()) {
+            c = tryOpenLiteBansConnectionOnce(jdbcPrimary);
+            if (c != null) return c;
+        }
+
+        if (jdbcFallback != null && !jdbcFallback.isBlank()) {
+            c = tryOpenLiteBansConnectionOnce(jdbcFallback);
+            if (c != null) return c;
+        }
+
+        return null;
+    }
+
+    private Connection tryOpenLiteBansConnectionOnce(String jdbcUrl) {
         try {
-            Connection c = DriverManager.getConnection(jdbcUrl, "", "");
+            Properties props = new Properties();
+            props.setProperty("user", "");
+            props.setProperty("password", "");
+
+            Driver d = litebansShimDriver;
+            Connection c = null;
+
+            if (d != null) {
+                c = d.connect(jdbcUrl, props);
+            } else {
+                c = DriverManager.getConnection(jdbcUrl, "", "");
+            }
+
+            if (c == null) return null;
+
             try {
                 c.setReadOnly(true);
             } catch (Exception ignored) {
             }
             c.setAutoCommit(true);
-            debugLiteBans("LiteBans connection OK");
+
+            litebansDebug("[LiteBansDBG] connection OK url=" + jdbcUrl);
             return c;
         } catch (Exception e) {
-            warnLiteBans("LiteBans DB connection failed: " + e.getMessage());
+            litebansWarn("[LiteBansDBG] connection FAIL url=" + jdbcUrl + " err=" + e.getMessage());
             return null;
         }
     }
 
-    private String buildLiteBansJdbcUrl() {
-        File f = new File(LITEBANS_DB_FILE);
-        if (!f.exists() || !f.isFile()) {
-            warnLiteBans("LiteBans DB file missing: " + f.getAbsolutePath());
+    private LiteBansPaths resolveLiteBansPaths() {
+        LiteBansPaths cached = litebansPaths;
+        if (cached != null && cached.dbFile() != null && cached.h2Jar() != null) return cached;
+
+        File pluginsFolder = null;
+        try {
+            pluginsFolder = plugin.getDataFolder() != null ? plugin.getDataFolder().getParentFile() : null;
+        } catch (Exception ignored) {
+        }
+        if (pluginsFolder == null) pluginsFolder = new File("plugins");
+
+        File liteBansFolder = new File(pluginsFolder, "LiteBans");
+        if (!liteBansFolder.exists() || !liteBansFolder.isDirectory()) {
+            liteBansFolder = new File("plugins/LiteBans");
+        }
+
+        File db = null;
+        File db1 = new File(liteBansFolder, "litebans.mv.db");
+        if (db1.exists() && db1.isFile()) db = db1;
+
+        if (db == null) {
+            File[] list = liteBansFolder.listFiles();
+            if (list != null) {
+                for (File f : list) {
+                    if (f == null) continue;
+                    String n = f.getName();
+                    if (n == null) continue;
+                    String nl = n.toLowerCase(Locale.ROOT);
+                    if (nl.endsWith(".mv.db") && nl.contains("litebans") && f.isFile()) {
+                        db = f;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (db == null) {
+            File[] list = liteBansFolder.listFiles();
+            if (list != null) {
+                for (File f : list) {
+                    if (f == null) continue;
+                    String n = f.getName();
+                    if (n == null) continue;
+                    String nl = n.toLowerCase(Locale.ROOT);
+                    if (nl.endsWith(".mv.db") && f.isFile()) {
+                        db = f;
+                        break;
+                    }
+                }
+            }
+        }
+
+        File lib = new File(liteBansFolder, "lib");
+        if (!lib.exists() || !lib.isDirectory()) lib = new File("plugins/LiteBans/lib");
+
+        File h2 = null;
+        if (lib.exists() && lib.isDirectory()) {
+            File[] jars = lib.listFiles();
+            if (jars != null) {
+                for (File f : jars) {
+                    if (f == null || !f.isFile()) continue;
+                    String n = f.getName();
+                    if (n == null) continue;
+                    String nl = n.toLowerCase(Locale.ROOT);
+                    if (nl.startsWith("h2-") && nl.endsWith(".jar")) {
+                        if (h2 == null || n.compareToIgnoreCase(h2.getName()) > 0) h2 = f;
+                    }
+                }
+            }
+        }
+
+        if (h2 == null) {
+            File h2Fallback = new File(lib, "h2-1.4.197.jar");
+            if (h2Fallback.exists() && h2Fallback.isFile()) h2 = h2Fallback;
+        }
+
+        if (db == null || h2 == null) {
+            litebansPaths = null;
+            litebansWarn("[LiteBansDBG] resolve paths FAILED pluginsFolder=" + safePath(pluginsFolder) +
+                    " liteBansFolder=" + safePath(liteBansFolder) +
+                    " db=" + safePath(db) +
+                    " jar=" + safePath(h2));
             return null;
         }
 
-        String base = LITEBANS_DB_FILE.trim();
-        if (base.endsWith(".mv.db")) base = base.substring(0, base.length() - 6);
-        else if (base.endsWith(".h2.db")) base = base.substring(0, base.length() - 6);
-        else if (base.endsWith(".db")) base = base.substring(0, base.length() - 3);
+        LiteBansPaths out = new LiteBansPaths(db, h2);
+        litebansPaths = out;
+        litebansWarn("[LiteBansDBG] resolved db=" + safePath(db) + " jar=" + safePath(h2));
+        return out;
+    }
+
+    private String buildLiteBansJdbcUrl(File dbFile, boolean withReadOnlyParams) {
+        if (dbFile == null) return null;
+        if (!dbFile.exists() || !dbFile.isFile()) return null;
+
+        String base;
+        try {
+            base = dbFile.getAbsolutePath();
+        } catch (Exception e) {
+            base = dbFile.getPath();
+        }
+
+        String lower = base.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".mv.db")) base = base.substring(0, base.length() - 6);
+        else if (lower.endsWith(".h2.db")) base = base.substring(0, base.length() - 6);
+        else if (lower.endsWith(".db")) base = base.substring(0, base.length() - 3);
 
         String jdbc = "jdbc:h2:" + base;
-        if (LITEBANS_DB_PARAMS != null && !LITEBANS_DB_PARAMS.isBlank()) jdbc = jdbc + ";" + LITEBANS_DB_PARAMS;
+        if (withReadOnlyParams) {
+            jdbc = jdbc + ";IFEXISTS=TRUE;ACCESS_MODE_DATA=r";
+        } else {
+            jdbc = jdbc + ";IFEXISTS=TRUE";
+        }
         return jdbc;
     }
 
     private boolean ensureLiteBansDriver() {
-        if (litebansDriverReady) return true;
+        LiteBansPaths p = resolveLiteBansPaths();
+        if (p == null) return false;
+
+        String jarPath = safePath(p.h2Jar());
+        if (jarPath == null || jarPath.equals("null")) return false;
+
+        if (litebansDriverReady && jarPath.equals(litebansLoadedJarPath)) return true;
 
         synchronized (litebansDriverLock) {
-            if (litebansDriverReady) return true;
+            if (litebansDriverReady && jarPath.equals(litebansLoadedJarPath)) return true;
 
-            File jar = new File(LITEBANS_H2_JAR);
+            tryDeregisterLiteBansDriver();
+            tryCloseLiteBansClassLoader();
+            litebansDriverReady = false;
+            litebansLoadedJarPath = null;
+
+            File jar = p.h2Jar();
             if (!jar.exists() || !jar.isFile()) {
-                warnLiteBans("LiteBans H2 jar not found: " + jar.getAbsolutePath());
+                litebansWarn("[LiteBansDBG] H2 jar not found: " + safePath(jar));
                 return false;
             }
 
@@ -1068,32 +1276,34 @@ public class DatabaseManager {
 
                 litebansH2ClassLoader = cl;
                 litebansShimDriver = shim;
+                litebansLoadedJarPath = jarPath;
                 litebansDriverReady = true;
 
-                debugLiteBans("LiteBans H2 driver loaded from " + jar.getAbsolutePath());
+                litebansWarn("[LiteBansDBG] H2 driver loaded jar=" + jarPath);
                 return true;
             } catch (Exception e) {
-                warnLiteBans("Failed to load LiteBans H2 driver: " + e.getMessage());
+                litebansWarn("[LiteBansDBG] failed to load H2 driver: " + e.getMessage());
                 tryCloseLiteBansClassLoader();
                 litebansShimDriver = null;
                 litebansDriverReady = false;
+                litebansLoadedJarPath = null;
                 return false;
             }
         }
     }
 
-    private void warnLiteBans(String msg) {
+    private void litebansWarn(String msg) {
         long now = System.currentTimeMillis();
-        if ((now - litebansLastWarnAt) < 15_000L) return;
+        if ((now - litebansLastWarnAt) < 1000L) return;
         litebansLastWarnAt = now;
         plugin.getLogManager().warn(msg);
     }
 
-    private void debugLiteBans(String msg) {
+    private void litebansDebug(String msg) {
         long now = System.currentTimeMillis();
-        if ((now - litebansLastDebugAt) < 5_000L) return;
+        if ((now - litebansLastDebugAt) < 2000L) return;
         litebansLastDebugAt = now;
-        plugin.getLogManager().info(msg);
+        plugin.getLogManager().warn(msg);
     }
 
     private void tryDeregisterLiteBansDriver() {
@@ -2113,6 +2323,9 @@ public class DatabaseManager {
     }
 
     private record LiteBansBansCacheEntry(long fetchedAt, List<LiteBansBan> bans) {
+    }
+
+    private record LiteBansPaths(File dbFile, File h2Jar) {
     }
 
     private record LiteBansBan(
