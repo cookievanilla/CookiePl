@@ -7,11 +7,9 @@ import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.entity.Player;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetSocketAddress;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
@@ -23,6 +21,7 @@ public class WebServerManager {
     private HttpServer server;
     private final int port;
     private final boolean corsEnabled;
+    private final String adminToken;
 
     private WrappedTask updateTask;
     private volatile String cachedServerInfoJson = "{}";
@@ -32,6 +31,7 @@ public class WebServerManager {
         this.databaseManager = databaseManager;
         this.port = plugin.getConfig().getInt("modules.web-server.port", 8080);
         this.corsEnabled = plugin.getConfig().getBoolean("modules.web-server.cors-enabled", true);
+        this.adminToken = plugin.getConfig().getString("modules.web-server.admin-token", "");
     }
 
     public void start() {
@@ -67,7 +67,7 @@ public class WebServerManager {
 
     private void updateCache() {
         try {
-            com.google.gson.JsonObject json = new com.google.gson.JsonObject();
+            var json = databaseManager.newJsonObject();
             json.addProperty("online", plugin.getServer().getOnlinePlayers().size());
 
             String playersList = plugin.getServer().getOnlinePlayers().stream()
@@ -78,13 +78,13 @@ public class WebServerManager {
             json.addProperty("max_players", plugin.getServer().getMaxPlayers());
 
             long uptimeMillis = ManagementFactory.getRuntimeMXBean().getUptime();
-            long uptimeHours = uptimeMillis / (1000 * 60 * 60);
+            long uptimeHours = uptimeMillis / (1000L * 60L * 60L);
             json.addProperty("uptime", uptimeHours);
 
             json.addProperty("version", plugin.getServer().getBukkitVersion());
             json.addProperty("server", plugin.getServer().getName());
 
-            this.cachedServerInfoJson = json.toString();
+            this.cachedServerInfoJson = databaseManager.toJsonString(json);
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update web server cache: " + e.getMessage());
         }
@@ -134,142 +134,39 @@ public class WebServerManager {
         }
 
         String path = exchange.getRequestURI().getPath();
-        if (path == null) {
-            sendResponse(exchange, 400, "{\"error\":\"Bad request\"}");
-            return;
-        }
-
         String[] segments = path.split("/");
         if (segments.length < 4) {
             sendResponse(exchange, 400, "{\"error\":\"Bad request\"}");
             return;
         }
 
-        String id = segments[3];
-        if (id == null || id.trim().isEmpty()) {
-            sendResponse(exchange, 400, "{\"error\":\"Bad request\"}");
+        String query = segments[3];
+
+        if (exchange.getRequestMethod().equalsIgnoreCase("GET")) {
+            DatabaseManager.AdminResponse r = databaseManager.adminGetFlex(query);
+            sendResponse(exchange, r.status(), r.body());
             return;
         }
 
-        String method = exchange.getRequestMethod();
-
-        if (method.equalsIgnoreCase("GET")) {
-            String flex = databaseManager.getFlexJsonById(id);
-            if (flex == null || flex.isBlank()) {
-                sendResponse(exchange, 404, "{\"error\":\"Player not found\"}");
-                return;
-            }
-            sendResponse(exchange, 200, flex);
-            return;
-        }
-
-        if (method.equalsIgnoreCase("POST")) {
-            String body = readBody(exchange);
-            String token = extractToken(exchange, body);
-            String required = getAdminToken();
-
-            if (required == null || required.isBlank() || token == null || token.isBlank() || !required.equals(token)) {
-                sendResponse(exchange, 403, "{\"error\":\"Forbidden\"}");
-                return;
-            }
-
-            try {
-                String updated = databaseManager.updateFlexJsonById(id, body);
-                if (updated == null || updated.isBlank()) {
-                    sendResponse(exchange, 404, "{\"error\":\"Player not found\"}");
+        if (exchange.getRequestMethod().equalsIgnoreCase("POST")) {
+            String token = exchange.getRequestHeaders().getFirst("token");
+            if (adminToken != null && !adminToken.isBlank()) {
+                if (token == null || !token.equals(adminToken)) {
+                    sendResponse(exchange, 401, "{\"error\":\"Unauthorized\"}");
                     return;
                 }
-                sendResponse(exchange, 200, updated);
-            } catch (IllegalArgumentException e) {
-                sendResponse(exchange, 400, "{\"error\":\"Invalid JSON\"}");
-            } catch (Exception e) {
-                sendResponse(exchange, 500, "{\"error\":\"Server error\"}");
+            } else {
+                sendResponse(exchange, 500, "{\"error\":\"Admin token is not configured\"}");
+                return;
             }
+
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            DatabaseManager.AdminResponse r = databaseManager.adminPostFlex(query, body);
+            sendResponse(exchange, r.status(), r.body());
             return;
         }
 
         sendResponse(exchange, 405, "{\"error\":\"Method not allowed\"}");
-    }
-
-    private String getAdminToken() {
-        String t = plugin.getConfig().getString("modules.web-server.admin.token", null);
-        if (t == null || t.isBlank()) t = plugin.getConfig().getString("modules.web-server.admin-token", null);
-        if (t == null || t.isBlank()) t = plugin.getConfig().getString("modules.web-server.token", null);
-        if (t == null || t.isBlank()) t = "CHANGE_ME";
-        return t.trim();
-    }
-
-    private String extractToken(HttpExchange exchange, String body) {
-        try {
-            String t = exchange.getRequestHeaders().getFirst("token");
-            if (t != null && !t.isBlank()) return t.trim();
-
-            t = exchange.getRequestHeaders().getFirst("Token");
-            if (t != null && !t.isBlank()) return t.trim();
-
-            t = exchange.getRequestHeaders().getFirst("X-Token");
-            if (t != null && !t.isBlank()) return t.trim();
-
-            String auth = exchange.getRequestHeaders().getFirst("Authorization");
-            if (auth != null && !auth.isBlank()) {
-                String a = auth.trim();
-                if (a.regionMatches(true, 0, "Bearer ", 0, 7)) {
-                    String b = a.substring(7).trim();
-                    if (!b.isBlank()) return b;
-                }
-            }
-
-            String q = exchange.getRequestURI() != null ? exchange.getRequestURI().getRawQuery() : null;
-            if (q != null && !q.isBlank()) {
-                String token = getQueryParam(q, "token");
-                if (token != null && !token.isBlank()) return token.trim();
-            }
-
-            if (body != null && !body.isBlank()) {
-                try {
-                    com.google.gson.JsonElement el = com.google.gson.JsonParser.parseString(body.trim());
-                    if (el.isJsonObject()) {
-                        com.google.gson.JsonObject obj = el.getAsJsonObject();
-                        if (obj.has("token") && !obj.get("token").isJsonNull()) {
-                            String bt = obj.get("token").getAsString();
-                            if (bt != null && !bt.isBlank()) return bt.trim();
-                        }
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
-    private String getQueryParam(String rawQuery, String key) {
-        if (rawQuery == null || rawQuery.isBlank() || key == null || key.isBlank()) return null;
-        String[] parts = rawQuery.split("&");
-        for (String p : parts) {
-            if (p == null || p.isBlank()) continue;
-            int idx = p.indexOf('=');
-            String k = idx >= 0 ? p.substring(0, idx) : p;
-            String v = idx >= 0 ? p.substring(idx + 1) : "";
-            try {
-                String kk = URLDecoder.decode(k, StandardCharsets.UTF_8);
-                if (!key.equals(kk)) continue;
-                return URLDecoder.decode(v, StandardCharsets.UTF_8);
-            } catch (Exception ignored) {
-            }
-        }
-        return null;
-    }
-
-    private String readBody(HttpExchange exchange) throws IOException {
-        try (InputStream is = exchange.getRequestBody()) {
-            if (is == null) return "";
-            byte[] data = is.readAllBytes();
-            if (data == null || data.length == 0) return "";
-            return new String(data, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            return "";
-        }
     }
 
     private String getClientIp(HttpExchange exchange) {
@@ -309,12 +206,11 @@ public class WebServerManager {
         if (corsEnabled) {
             exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
             exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization,token,Token,X-Token");
+            exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization,token");
         }
     }
 
     private void sendResponse(HttpExchange exchange, int statusCode, String response) throws IOException {
-        if (response == null) response = "";
         byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
         exchange.sendResponseHeaders(statusCode, bytes.length);

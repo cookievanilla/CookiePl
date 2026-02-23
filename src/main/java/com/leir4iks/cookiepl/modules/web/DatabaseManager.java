@@ -1,9 +1,6 @@
 package com.leir4iks.cookiepl.modules.web;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import com.google.gson.*;
 import com.google.gson.stream.JsonReader;
 import com.leir4iks.cookiepl.CookiePl;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
@@ -30,25 +27,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.Statement;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.PriorityQueue;
-import java.util.Scanner;
-import java.util.Set;
-import java.util.UUID;
+import java.sql.*;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -61,6 +41,8 @@ public class DatabaseManager {
     private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
+
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private final CookiePl plugin;
     private final File discordSrvFolder;
@@ -180,297 +162,88 @@ public class DatabaseManager {
         dbReady = false;
     }
 
-    public String getFlexJsonById(String query) {
-        if (!dbReady) return null;
-        String q = query == null ? "" : query.trim();
-        if (q.isEmpty()) return null;
-        String discordId = resolveDiscordIdForQuery(q);
-        if (discordId == null || discordId.isBlank()) return null;
-        JsonObject flex = ensureFlexForDiscordId(discordId);
-        return flex == null ? null : flex.toString();
+    public JsonObject newJsonObject() {
+        return new JsonObject();
     }
 
-    public String updateFlexJsonById(String query, String body) {
-        if (!dbReady) return null;
-        String q = query == null ? "" : query.trim();
-        if (q.isEmpty()) return null;
+    public String toJsonString(JsonElement el) {
+        return GSON.toJson(el);
+    }
 
-        String discordId = resolveDiscordIdForQuery(q);
-        if (discordId == null || discordId.isBlank()) return null;
-
-        JsonObject patch = parseFlexPatch(body);
-        if (patch == null) throw new IllegalArgumentException("invalid_json");
-
-        JsonObject current = ensureFlexForDiscordId(discordId);
-        if (current == null) return null;
-
-        JsonObject updated = applyFlexPatch(current, patch);
-        updated = normalizeFlex(updated);
-
-        Connection c = null;
-        try {
-            c = pool.borrow();
-            try (PreparedStatement ps = c.prepareStatement("UPDATE players SET flex_json=? WHERE discord_id=?")) {
-                ps.setString(1, updated.toString());
-                ps.setString(2, discordId);
-                ps.executeUpdate();
-            }
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update flex in H2: " + e.getMessage());
-            return null;
-        } finally {
-            pool.release(c);
+    private void initH2() {
+        boolean enabled = plugin.getConfig().getBoolean("modules.web-server.enabled", true);
+        if (!enabled) {
+            dbReady = false;
+            return;
         }
 
-        return updated.toString();
-    }
+        String fileName = plugin.getConfig().getString("modules.web-server.h2.file", "webdb");
+        if (fileName == null || fileName.isBlank()) fileName = "webdb";
 
-    private String resolveDiscordIdForQuery(String q) {
-        String discordId = q;
-        String uuid = q;
-        String nameLc = q.toLowerCase(Locale.ROOT);
-
-        Connection c = null;
+        File dbFile = new File(plugin.getDataFolder(), fileName);
         try {
-            c = pool.borrow();
-            try (PreparedStatement ps = c.prepareStatement("SELECT discord_id FROM players WHERE discord_id=? OR minecraft_uuid=? OR minecraft_name_lc=? LIMIT 1")) {
-                ps.setString(1, discordId);
-                ps.setString(2, uuid);
-                ps.setString(3, nameLc);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String did = rs.getString(1);
-                        return did == null ? null : did.trim();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to resolve discord_id in H2: " + e.getMessage());
-        } finally {
-            pool.release(c);
-        }
-        return null;
-    }
-
-    private JsonObject ensureFlexForDiscordId(String discordId) {
-        Connection c = null;
-        try {
-            c = pool.borrow();
-            String existing = null;
-            boolean rowExists = false;
-
-            try (PreparedStatement ps = c.prepareStatement("SELECT flex_json FROM players WHERE discord_id=? LIMIT 1")) {
-                ps.setString(1, discordId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        rowExists = true;
-                        existing = rs.getString(1);
-                    }
-                }
-            }
-
-            if (!rowExists) return defaultFlex();
-
-            JsonObject parsed = parseFlexObject(existing);
-            JsonObject normalized = normalizeFlex(parsed == null ? defaultFlex() : parsed);
-
-            if (existing == null || existing.isBlank() || parsed == null || !normalized.toString().equals(existing)) {
-                try (PreparedStatement ups = c.prepareStatement("UPDATE players SET flex_json=? WHERE discord_id=?")) {
-                    ups.setString(1, normalized.toString());
-                    ups.setString(2, discordId);
-                    ups.executeUpdate();
-                }
-            }
-
-            return normalized;
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to ensure flex in H2: " + e.getMessage());
-            return defaultFlex();
-        } finally {
-            pool.release(c);
-        }
-    }
-
-    private JsonObject parseFlexPatch(String body) {
-        if (body == null) return null;
-        String t = body.trim();
-        if (t.isEmpty()) return null;
-        try {
-            JsonElement el = JsonParser.parseString(t);
-            if (!el.isJsonObject()) return null;
-            JsonObject obj = el.getAsJsonObject();
-            if (obj.has("flex") && obj.get("flex").isJsonObject()) return obj.getAsJsonObject("flex");
-            return obj;
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private JsonObject parseFlexObject(String json) {
-        if (json == null || json.isBlank()) return null;
-        try {
-            JsonElement el = JsonParser.parseString(json);
-            if (el != null && el.isJsonObject()) return el.getAsJsonObject();
+            File parent = dbFile.getParentFile();
+            if (parent != null) parent.mkdirs();
         } catch (Exception ignored) {
         }
-        return null;
-    }
 
-    private JsonObject applyFlexPatch(JsonObject base, JsonObject patch) {
-        JsonObject out = base == null ? new JsonObject() : base.deepCopy();
-        if (patch == null) return out;
+        String abs = dbFile.getAbsolutePath();
+        String url = "jdbc:h2:file:" + abs + ";MODE=MySQL;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1";
 
-        if (patch.has("bank") && !patch.get("bank").isJsonNull()) {
+        try {
+            Class.forName("org.h2.Driver");
+
+            this.pool = new ConnectionPool(url, "sa", "", Math.max(2, plugin.getConfig().getInt("modules.web-server.h2.pool-size", 10)));
+
+            Connection c = null;
             try {
-                long bank = patch.get("bank").getAsLong();
-                if (bank < 0) bank = 0;
-                out.addProperty("bank", bank);
-            } catch (Exception ignored) {
-            }
-        }
+                c = pool.borrow();
+                try (Statement st = c.createStatement()) {
+                    st.execute("CREATE TABLE IF NOT EXISTS players (" +
+                            "discord_id VARCHAR(32) PRIMARY KEY," +
+                            "minecraft_uuid CHAR(36) NOT NULL," +
+                            "minecraft_name VARCHAR(32) NOT NULL," +
+                            "minecraft_name_lc VARCHAR(32) NOT NULL," +
+                            "skin_url CLOB," +
+                            "head_url CLOB," +
+                            "is_online BOOLEAN NOT NULL DEFAULT FALSE," +
+                            "play_time_hours DOUBLE NOT NULL DEFAULT 0," +
+                            "summary_json CLOB," +
+                            "full_json CLOB," +
+                            "summary_updated_at BIGINT NOT NULL DEFAULT 0," +
+                            "full_updated_at BIGINT NOT NULL DEFAULT 0," +
+                            "stats_mtime BIGINT NOT NULL DEFAULT 0" +
+                            ")");
+                    try { st.execute("CREATE INDEX idx_uuid ON players (minecraft_uuid)"); } catch (Exception ignored) {}
+                    try { st.execute("CREATE INDEX idx_name_lc ON players (minecraft_name_lc)"); } catch (Exception ignored) {}
 
-        if (patch.has("color") && !patch.get("color").isJsonNull()) {
-            try {
-                String color = patch.get("color").getAsString();
-                if (color != null) out.addProperty("color", color);
-            } catch (Exception ignored) {
-            }
-        }
+                    st.execute("CREATE TABLE IF NOT EXISTS meta (" +
+                            "k VARCHAR(64) PRIMARY KEY," +
+                            "v CLOB," +
+                            "updated_at BIGINT NOT NULL DEFAULT 0" +
+                            ")");
 
-        if (patch.has("command") && !patch.get("command").isJsonNull()) {
-            try {
-                String cmd = patch.get("command").getAsString();
-                if (cmd != null) out.addProperty("command", cmd);
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (patch.has("subscription") && !patch.get("subscription").isJsonNull()) {
-            JsonElement sub = patch.get("subscription");
-            JsonArray arr = new JsonArray();
-
-            try {
-                if (sub.isJsonArray()) {
-                    for (JsonElement e : sub.getAsJsonArray()) {
-                        if (e == null || e.isJsonNull()) continue;
-                        try {
-                            String s = e.getAsString();
-                            if (s != null && !s.isBlank()) arr.add(s);
-                        } catch (Exception ignored) {
-                        }
-                    }
-                } else {
-                    String single = sub.getAsString();
-                    if (single != null && !single.isBlank()) arr.add(single);
+                    st.execute("CREATE TABLE IF NOT EXISTS flex (" +
+                            "discord_id VARCHAR(32) PRIMARY KEY," +
+                            "bank BIGINT NOT NULL DEFAULT 0," +
+                            "color VARCHAR(256) NOT NULL DEFAULT ''," +
+                            "subscription CLOB," +
+                            "command VARCHAR(256) NOT NULL DEFAULT ''" +
+                            ")");
                 }
-            } catch (Exception ignored) {
+            } finally {
+                pool.release(c);
             }
 
-            out.add("subscription", arr);
+            dbReady = true;
+            String cachedPlayers = readMeta("players_summary_json");
+            if (cachedPlayers != null && !cachedPlayers.isBlank()) playersSummaryListCache = cachedPlayers;
+
+        } catch (Exception e) {
+            dbReady = false;
+            pool = null;
+            plugin.getLogManager().warn("H2 init failed: " + e.getMessage());
         }
-
-        return out;
-    }
-
-    private JsonObject normalizeFlex(JsonObject in) {
-        JsonObject out = in == null ? new JsonObject() : in.deepCopy();
-
-        long bank = 1500L;
-        if (out.has("bank") && !out.get("bank").isJsonNull()) {
-            try {
-                bank = out.get("bank").getAsLong();
-                if (bank < 0) bank = 0;
-            } catch (Exception ignored) {
-                bank = 1500L;
-            }
-        }
-        out.addProperty("bank", bank);
-
-        String color = "<gradient:#54daf4:#545eb6>";
-        if (out.has("color") && !out.get("color").isJsonNull()) {
-            try {
-                String v = out.get("color").getAsString();
-                if (v != null && !v.isBlank()) color = v;
-            } catch (Exception ignored) {
-            }
-        }
-        out.addProperty("color", color);
-
-        JsonArray subs = new JsonArray();
-        boolean hasSubs = false;
-        if (out.has("subscription") && !out.get("subscription").isJsonNull()) {
-            try {
-                JsonElement el = out.get("subscription");
-                if (el.isJsonArray()) {
-                    for (JsonElement e : el.getAsJsonArray()) {
-                        if (e == null || e.isJsonNull()) continue;
-                        try {
-                            String s = e.getAsString();
-                            if (s != null && !s.isBlank()) subs.add(s);
-                        } catch (Exception ignored) {
-                        }
-                    }
-                    hasSubs = true;
-                } else {
-                    String s = el.getAsString();
-                    if (s != null && !s.isBlank()) subs.add(s);
-                    hasSubs = true;
-                }
-            } catch (Exception ignored) {
-            }
-        }
-        if (!hasSubs || subs.size() == 0) {
-            subs.add("color");
-            subs.add("resize");
-        }
-        out.add("subscription", subs);
-
-        String command = "skin set player";
-        if (out.has("command") && !out.get("command").isJsonNull()) {
-            try {
-                String v = out.get("command").getAsString();
-                if (v != null && !v.isBlank()) command = v;
-            } catch (Exception ignored) {
-            }
-        }
-        out.addProperty("command", command);
-
-        return out;
-    }
-
-    private JsonObject defaultFlex() {
-        JsonObject o = new JsonObject();
-        o.addProperty("bank", 1500L);
-        o.addProperty("color", "<gradient:#54daf4:#545eb6>");
-        JsonArray arr = new JsonArray();
-        arr.add("color");
-        arr.add("resize");
-        o.add("subscription", arr);
-        o.addProperty("command", "skin set player");
-        return o;
-    }
-
-    private JsonObject injectFlexOrdered(JsonObject obj, JsonObject flex) {
-        if (obj == null) obj = new JsonObject();
-        JsonObject out = new JsonObject();
-        boolean inserted = false;
-
-        for (Map.Entry<String, JsonElement> e : obj.entrySet()) {
-            if (e == null || e.getKey() == null) continue;
-            String k = e.getKey();
-            if ("flex".equals(k)) continue;
-            out.add(k, e.getValue());
-            if (!inserted && "is_online".equals(k)) {
-                out.add("flex", flex == null ? defaultFlex() : flex);
-                inserted = true;
-            }
-        }
-
-        if (!inserted) {
-            out.add("flex", flex == null ? defaultFlex() : flex);
-        }
-
-        return out;
     }
 
     private LuckPerms getLuckPerms() {
@@ -548,97 +321,6 @@ public class DatabaseManager {
             this.statsFolders = folders;
         } catch (Exception ignored) {
             this.statsFolders = List.of();
-        }
-    }
-
-    private void initH2() {
-        boolean enabled = plugin.getConfig().getBoolean("modules.web-server.h2.enabled", true);
-        if (!enabled) {
-            dbReady = false;
-            return;
-        }
-
-        try {
-            Class.forName("org.h2.Driver");
-        } catch (Exception e) {
-            dbReady = false;
-            pool = null;
-            plugin.getLogManager().warn("H2 driver not found: " + e.getMessage());
-            return;
-        }
-
-        String fileName = plugin.getConfig().getString("modules.web-server.h2.file", "webdb");
-        String user = plugin.getConfig().getString("modules.web-server.h2.user", "sa");
-        String password = plugin.getConfig().getString("modules.web-server.h2.password", "");
-        int poolSize = Math.max(2, plugin.getConfig().getInt("modules.web-server.h2.pool-size", 10));
-
-        if (fileName == null || fileName.isBlank()) fileName = "webdb";
-        if (user == null) user = "sa";
-        if (password == null) password = "";
-
-        try {
-            if (!plugin.getDataFolder().exists()) plugin.getDataFolder().mkdirs();
-        } catch (Exception ignored) {
-        }
-
-        File dbFileBase = new File(plugin.getDataFolder(), fileName);
-        String abs = dbFileBase.getAbsolutePath();
-
-        String url = "jdbc:h2:file:" + abs + ";MODE=MySQL;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1";
-
-        try {
-            this.pool = new ConnectionPool(url, user, password, poolSize);
-
-            Connection c = null;
-            try {
-                c = pool.borrow();
-                try (Statement st = c.createStatement()) {
-                    st.execute("CREATE TABLE IF NOT EXISTS players (" +
-                            "discord_id VARCHAR(32) PRIMARY KEY," +
-                            "minecraft_uuid VARCHAR(36) NOT NULL," +
-                            "minecraft_name VARCHAR(32) NOT NULL," +
-                            "minecraft_name_lc VARCHAR(32) NOT NULL," +
-                            "skin_url CLOB," +
-                            "head_url CLOB," +
-                            "is_online BOOLEAN NOT NULL DEFAULT FALSE," +
-                            "play_time_hours DOUBLE NOT NULL DEFAULT 0," +
-                            "flex_json CLOB," +
-                            "summary_json CLOB," +
-                            "full_json CLOB," +
-                            "summary_updated_at BIGINT NOT NULL DEFAULT 0," +
-                            "full_updated_at BIGINT NOT NULL DEFAULT 0," +
-                            "stats_mtime BIGINT NOT NULL DEFAULT 0" +
-                            ")");
-                    st.execute("CREATE TABLE IF NOT EXISTS meta (" +
-                            "k VARCHAR(64) PRIMARY KEY," +
-                            "v CLOB," +
-                            "updated_at BIGINT NOT NULL DEFAULT 0" +
-                            ")");
-                }
-
-                try (Statement st = c.createStatement()) {
-                    try {
-                        st.execute("CREATE INDEX IF NOT EXISTS idx_uuid ON players(minecraft_uuid)");
-                    } catch (Exception ignored) {
-                    }
-                    try {
-                        st.execute("CREATE INDEX IF NOT EXISTS idx_name_lc ON players(minecraft_name_lc)");
-                    } catch (Exception ignored) {
-                    }
-                }
-
-            } finally {
-                pool.release(c);
-            }
-
-            dbReady = true;
-            String cachedPlayers = readMeta("players_summary_json");
-            if (cachedPlayers != null && !cachedPlayers.isBlank()) playersSummaryListCache = cachedPlayers;
-
-        } catch (Exception e) {
-            dbReady = false;
-            pool = null;
-            plugin.getLogManager().warn("H2 init failed: " + e.getMessage());
         }
     }
 
@@ -1050,15 +732,15 @@ public class DatabaseManager {
                         skinLinks.headUrl(),
                         isOnline,
                         playTimeHours,
-                        summary.toString(),
-                        full.toString(),
+                        GSON.toJson(summary),
+                        GSON.toJson(full),
                         now,
                         now,
                         snapshot.mtime()
                 ));
             }
 
-            String summaryStr = summaryArray.toString();
+            String summaryStr = GSON.toJson(summaryArray);
             synchronized (summaryLock) {
                 summaryByDiscordId = newSummaryMap;
                 summaryOrder = List.copyOf(newOrder);
@@ -1096,7 +778,7 @@ public class DatabaseManager {
         if (q.isEmpty()) {
             JsonObject errorObj = new JsonObject();
             errorObj.addProperty("error", "Player not found");
-            return errorObj.toString();
+            return GSON.toJson(errorObj);
         }
 
         boolean allowed = isIpAllowed(remoteIp);
@@ -1111,23 +793,18 @@ public class DatabaseManager {
         if (baseJson == null) {
             JsonObject errorObj = new JsonObject();
             errorObj.addProperty("error", "Player not found");
-            return errorObj.toString();
+            return GSON.toJson(errorObj);
         }
 
         try {
             JsonObject obj = JsonParser.parseString(baseJson).getAsJsonObject();
+
             if (obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull()) {
                 String uuid = obj.get("minecraft_uuid").getAsString();
                 obj.addProperty("is_online", onlineUuids.contains(uuid));
             }
 
             String discordId = obj.has("id") && !obj.get("id").isJsonNull() ? obj.get("id").getAsString() : null;
-
-            JsonObject flex = (dbReady && discordId != null && !discordId.isBlank())
-                    ? ensureFlexForDiscordId(discordId)
-                    : defaultFlex();
-
-            obj = injectFlexOrdered(obj, flex);
 
             if (!allowed) {
                 obj.addProperty("tickets", "not allowed");
@@ -1165,64 +842,282 @@ public class DatabaseManager {
             }
             obj.add("litebans", liteBansBridge.getLiteBansJson(mcUuid, allowed, remoteIp));
 
-            return obj.toString();
+            JsonObject flexObj = buildFlexJsonForDiscordId(discordId);
+            obj = reorderWithFlex(obj, flexObj);
+
+            return GSON.toJson(obj);
         } catch (Exception e) {
             return baseJson;
         }
     }
 
-    private void handleOnlineChange(String uuid, boolean isOnline) {
-        if (uuid == null || uuid.isBlank()) return;
+    private JsonObject reorderWithFlex(JsonObject src, JsonObject flexObj) {
+        JsonObject out = new JsonObject();
 
-        if (isOnline) onlineUuids.add(uuid);
-        else onlineUuids.remove(uuid);
+        copyIfPresent(src, out, "id");
+        copyIfPresent(src, out, "minecraft_name");
+        copyIfPresent(src, out, "minecraft_uuid");
+        copyIfPresent(src, out, "skinUrl");
+        copyIfPresent(src, out, "headUrl");
+        copyIfPresent(src, out, "is_online");
 
-        String discordId = discordIdByUuid.get(uuid);
-        if (discordId == null || discordId.isBlank()) return;
+        out.add("flex", flexObj == null ? emptyFlexJson() : flexObj);
 
-        boolean changed = false;
+        copyIfPresent(src, out, "luckperms");
+        copyIfPresent(src, out, "stats");
+        copyIfPresent(src, out, "tickets");
+        copyIfPresent(src, out, "litebans");
 
-        synchronized (summaryLock) {
-            JsonObject obj = summaryByDiscordId.get(discordId);
-            if (obj == null) return;
+        Set<String> used = new HashSet<>();
+        used.add("id");
+        used.add("minecraft_name");
+        used.add("minecraft_uuid");
+        used.add("skinUrl");
+        used.add("headUrl");
+        used.add("is_online");
+        used.add("flex");
+        used.add("luckperms");
+        used.add("stats");
+        used.add("tickets");
+        used.add("litebans");
 
-            boolean wasOnline = obj.has("is_online") && !obj.get("is_online").isJsonNull() && obj.get("is_online").getAsBoolean();
-            if (wasOnline != isOnline) {
-                obj.addProperty("is_online", isOnline);
-                changed = true;
-            }
-
-            if (changed) {
-                JsonArray arr = new JsonArray();
-                for (String id : summaryOrder) {
-                    JsonObject o = summaryByDiscordId.get(id);
-                    if (o != null) arr.add(o);
-                }
-                playersSummaryListCache = arr.toString();
-            }
+        for (Map.Entry<String, JsonElement> e : src.entrySet()) {
+            if (e.getKey() == null) continue;
+            if (used.contains(e.getKey())) continue;
+            out.add(e.getKey(), e.getValue());
         }
 
-        if (changed && dbReady) {
-            boolean onlineValue = isOnline;
-            String did = discordId;
-            plugin.getFoliaLib().getScheduler().runAsync(task -> updateSingleOnlineInDb(did, onlineValue));
-        }
+        return out;
     }
 
-    private void updateSingleOnlineInDb(String discordId, boolean online) {
+    private void copyIfPresent(JsonObject src, JsonObject dst, String key) {
+        if (src.has(key)) dst.add(key, src.get(key));
+    }
+
+    private JsonObject buildFlexJsonForDiscordId(String discordId) {
+        FlexData d = (dbReady && discordId != null && !discordId.isBlank()) ? readFlex(discordId) : FlexData.empty();
+        JsonObject o = new JsonObject();
+        o.addProperty("bank", d.bank());
+        o.addProperty("color", d.color() == null ? "" : d.color());
+        JsonArray arr = new JsonArray();
+        if (d.subscription() != null) {
+            for (String s : d.subscription()) {
+                if (s != null) arr.add(s);
+            }
+        }
+        o.add("subscription", arr);
+        o.addProperty("command", d.command() == null ? "" : d.command());
+        return o;
+    }
+
+    private JsonObject emptyFlexJson() {
+        JsonObject o = new JsonObject();
+        o.addProperty("bank", 0L);
+        o.addProperty("color", "");
+        o.add("subscription", new JsonArray());
+        o.addProperty("command", "");
+        return o;
+    }
+
+    public record AdminResponse(int status, String body) {}
+
+    public AdminResponse adminGetFlex(String query) {
+        String did = resolveDiscordIdFromAny(query);
+        if (did == null) {
+            return new AdminResponse(404, "{\"error\":\"Player not found\"}");
+        }
+        JsonObject flex = buildFlexJsonForDiscordId(did);
+        return new AdminResponse(200, GSON.toJson(flex));
+    }
+
+    public AdminResponse adminPostFlex(String query, String body) {
+        String did = resolveDiscordIdFromAny(query);
+        if (did == null) {
+            return new AdminResponse(404, "{\"error\":\"Player not found\"}");
+        }
+
+        JsonObject patch;
+        try {
+            JsonElement el = JsonParser.parseString(body == null ? "" : body);
+            if (el == null || !el.isJsonObject()) return new AdminResponse(400, "{\"error\":\"Invalid JSON\"}");
+            patch = el.getAsJsonObject();
+        } catch (Exception e) {
+            return new AdminResponse(400, "{\"error\":\"Invalid JSON\"}");
+        }
+
+        FlexData current = readFlex(did);
+        FlexData merged = mergeFlex(current, patch);
+
+        try {
+            upsertFlex(did, merged);
+        } catch (Exception e) {
+            return new AdminResponse(500, "{\"error\":\"Failed to save\"}");
+        }
+
+        JsonObject flex = buildFlexJsonForDiscordId(did);
+        return new AdminResponse(200, GSON.toJson(flex));
+    }
+
+    private FlexData mergeFlex(FlexData current, JsonObject patch) {
+        long bank = current.bank();
+        String color = current.color();
+        List<String> sub = current.subscription();
+        String command = current.command();
+
+        if (patch.has("bank") && !patch.get("bank").isJsonNull()) {
+            try { bank = patch.get("bank").getAsLong(); } catch (Exception ignored) {}
+            if (bank < 0) bank = 0;
+        }
+
+        if (patch.has("color") && !patch.get("color").isJsonNull()) {
+            try { color = patch.get("color").getAsString(); } catch (Exception ignored) {}
+            if (color == null) color = "";
+        }
+
+        if (patch.has("command") && !patch.get("command").isJsonNull()) {
+            try { command = patch.get("command").getAsString(); } catch (Exception ignored) {}
+            if (command == null) command = "";
+        }
+
+        if (patch.has("subscription") && !patch.get("subscription").isJsonNull()) {
+            List<String> list = new ArrayList<>();
+            try {
+                JsonElement el = patch.get("subscription");
+                if (el.isJsonArray()) {
+                    for (JsonElement it : el.getAsJsonArray()) {
+                        if (it == null || it.isJsonNull()) continue;
+                        try {
+                            String v = it.getAsString();
+                            if (v != null) list.add(v);
+                        } catch (Exception ignored) {}
+                    }
+                } else if (el.isJsonPrimitive()) {
+                    String v = el.getAsString();
+                    if (v != null) list.add(v);
+                }
+            } catch (Exception ignored) {}
+            sub = List.copyOf(list);
+        }
+
+        return new FlexData(bank, color == null ? "" : color, sub == null ? List.of() : sub, command == null ? "" : command);
+    }
+
+    private void upsertFlex(String discordId, FlexData data) throws Exception {
+        String subJson;
+        try {
+            JsonArray arr = new JsonArray();
+            if (data.subscription() != null) {
+                for (String s : data.subscription()) {
+                    if (s != null) arr.add(s);
+                }
+            }
+            subJson = GSON.toJson(arr);
+        } catch (Exception e) {
+            subJson = "[]";
+        }
+
         Connection c = null;
         try {
             c = pool.borrow();
-            try (PreparedStatement ps = c.prepareStatement("UPDATE players SET is_online=? WHERE discord_id=?")) {
-                ps.setBoolean(1, online);
-                ps.setString(2, discordId);
+            try (PreparedStatement ps = c.prepareStatement("MERGE INTO flex (discord_id,bank,color,subscription,command) KEY(discord_id) VALUES (?,?,?,?,?)")) {
+                ps.setString(1, discordId);
+                ps.setLong(2, data.bank());
+                ps.setString(3, data.color() == null ? "" : data.color());
+                ps.setString(4, subJson);
+                ps.setString(5, data.command() == null ? "" : data.command());
                 ps.executeUpdate();
             }
-        } catch (Exception e) {
-            plugin.getLogManager().warn("Failed to update is_online in H2: " + e.getMessage());
         } finally {
             pool.release(c);
         }
+    }
+
+    private FlexData readFlex(String discordId) {
+        if (discordId == null || discordId.isBlank() || !dbReady) return FlexData.empty();
+
+        Connection c = null;
+        try {
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement("SELECT bank,color,subscription,command FROM flex WHERE discord_id=? LIMIT 1")) {
+                ps.setString(1, discordId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return FlexData.empty();
+                    long bank = rs.getLong(1);
+                    String color = rs.getString(2);
+                    String subStr = rs.getString(3);
+                    String command = rs.getString(4);
+
+                    List<String> subs = List.of();
+                    if (subStr != null && !subStr.isBlank()) {
+                        try {
+                            JsonElement el = JsonParser.parseString(subStr);
+                            if (el != null && el.isJsonArray()) {
+                                ArrayList<String> tmp = new ArrayList<>();
+                                for (JsonElement it : el.getAsJsonArray()) {
+                                    if (it == null || it.isJsonNull()) continue;
+                                    try {
+                                        String v = it.getAsString();
+                                        if (v != null) tmp.add(v);
+                                    } catch (Exception ignored) {}
+                                }
+                                subs = List.copyOf(tmp);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    if (bank < 0) bank = 0;
+                    if (color == null) color = "";
+                    if (command == null) command = "";
+
+                    return new FlexData(bank, color, subs, command);
+                }
+            }
+        } catch (Exception ignored) {
+            return FlexData.empty();
+        } finally {
+            pool.release(c);
+        }
+    }
+
+    private String resolveDiscordIdFromAny(String q) {
+        String query = q == null ? "" : q.trim();
+        if (query.isEmpty()) return null;
+
+        if (dbReady) {
+            Connection c = null;
+            try {
+                c = pool.borrow();
+                try (PreparedStatement ps = c.prepareStatement("SELECT discord_id FROM players WHERE discord_id=? OR minecraft_uuid=? OR minecraft_name_lc=? LIMIT 1")) {
+                    ps.setString(1, query);
+                    ps.setString(2, query);
+                    ps.setString(3, query.toLowerCase(Locale.ROOT));
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            String did = rs.getString(1);
+                            if (did != null && !did.isBlank()) return did;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                pool.release(c);
+            }
+        }
+
+        List<AccountEntry> accounts = loadAccountsIfChanged();
+        Map<String, String> userCache = loadUserCacheIfChanged();
+        String nq = query.toLowerCase(Locale.ROOT);
+
+        for (AccountEntry entry : accounts) {
+            String discordId = entry.discordId();
+            String minecraftUuid = entry.minecraftUuid();
+            String minecraftName = resolveMinecraftName(discordId, minecraftUuid, userCache);
+            if (discordId != null && discordId.equalsIgnoreCase(nq)) return discordId;
+            if (minecraftUuid != null && minecraftUuid.equalsIgnoreCase(nq)) return discordId;
+            if (minecraftName != null && minecraftName.equalsIgnoreCase(nq)) return discordId;
+        }
+
+        return null;
     }
 
     private String findFullJsonInDb(String q) {
@@ -1287,24 +1182,39 @@ public class DatabaseManager {
                 full.add("luckperms", getLuckPermsGroups(uuid));
                 full.add("stats", statsObj);
 
-                return full.toString();
+                return GSON.toJson(full);
             }
         }
 
         return null;
     }
 
+    private void updateSingleOnlineInDb(String discordId, boolean online) {
+        Connection c = null;
+        try {
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement("UPDATE players SET is_online=? WHERE discord_id=?")) {
+                ps.setBoolean(1, online);
+                ps.setString(2, discordId);
+                ps.executeUpdate();
+            }
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update is_online in H2: " + e.getMessage());
+        } finally {
+            pool.release(c);
+        }
+    }
+
     private void upsertPlayers(List<PlayerUpsertRow> rows) {
         if (rows.isEmpty()) return;
-
-        String sql = "MERGE INTO players (" +
-                "discord_id,minecraft_uuid,minecraft_name,minecraft_name_lc,skin_url,head_url,is_online,play_time_hours,summary_json,full_json,summary_updated_at,full_updated_at,stats_mtime" +
-                ") KEY(discord_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
         Connection c = null;
         try {
             c = pool.borrow();
-            try (PreparedStatement ps = c.prepareStatement(sql)) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "MERGE INTO players (discord_id,minecraft_uuid,minecraft_name,minecraft_name_lc,skin_url,head_url,is_online,play_time_hours,summary_json,full_json,summary_updated_at,full_updated_at,stats_mtime) " +
+                            "KEY(discord_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            )) {
                 int batch = 0;
                 for (PlayerUpsertRow r : rows) {
                     ps.setString(1, r.discordId());
@@ -1369,6 +1279,44 @@ public class DatabaseManager {
             pool.release(c);
         }
         return null;
+    }
+
+    private void handleOnlineChange(String uuid, boolean isOnline) {
+        if (uuid == null || uuid.isBlank()) return;
+
+        if (isOnline) onlineUuids.add(uuid);
+        else onlineUuids.remove(uuid);
+
+        String discordId = discordIdByUuid.get(uuid);
+        if (discordId == null || discordId.isBlank()) return;
+
+        boolean changed = false;
+
+        synchronized (summaryLock) {
+            JsonObject obj = summaryByDiscordId.get(discordId);
+            if (obj == null) return;
+
+            boolean wasOnline = obj.has("is_online") && !obj.get("is_online").isJsonNull() && obj.get("is_online").getAsBoolean();
+            if (wasOnline != isOnline) {
+                obj.addProperty("is_online", isOnline);
+                changed = true;
+            }
+
+            if (changed) {
+                JsonArray arr = new JsonArray();
+                for (String id : summaryOrder) {
+                    JsonObject o = summaryByDiscordId.get(id);
+                    if (o != null) arr.add(o);
+                }
+                playersSummaryListCache = GSON.toJson(arr);
+            }
+        }
+
+        if (changed && dbReady) {
+            boolean onlineValue = isOnline;
+            String did = discordId;
+            plugin.getFoliaLib().getScheduler().runAsync(task -> updateSingleOnlineInDb(did, onlineValue));
+        }
     }
 
     private List<AccountEntry> loadAccountsIfChanged() {
@@ -1536,22 +1484,6 @@ public class DatabaseManager {
         return "Unknown";
     }
 
-    private SkinLinks getSkinLinksForPlayer(String minecraftUuid, String minecraftName) {
-        String uuidKey = normalizeUuidKey(minecraftUuid);
-        String nameKey = minecraftName == null ? "" : minecraftName.toLowerCase(Locale.ROOT);
-
-        String skinUrl = skinsSkinUrlCache.get(uuidKey);
-        String headUrl = skinsHeadUrlCache.get(uuidKey);
-
-        if ((skinUrl == null || skinUrl.isBlank()) && !nameKey.isBlank()) skinUrl = skinsNameSkinUrlCache.get(nameKey);
-        if ((headUrl == null || headUrl.isBlank()) && !nameKey.isBlank()) headUrl = skinsNameHeadUrlCache.get(nameKey);
-
-        if (skinUrl == null || skinUrl.isBlank()) skinUrl = buildFallbackSkinUrl(minecraftUuid, minecraftName);
-        if (headUrl == null || headUrl.isBlank()) headUrl = buildFallbackHeadUrl(minecraftUuid, minecraftName);
-
-        return new SkinLinks(skinUrl, headUrl);
-    }
-
     private void updateSkinsData() {
         try {
             URL url = new URL(SKINS_DATABASE_URL);
@@ -1617,6 +1549,22 @@ public class DatabaseManager {
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update skins database: " + e.getMessage());
         }
+    }
+
+    private SkinLinks getSkinLinksForPlayer(String minecraftUuid, String minecraftName) {
+        String uuidKey = normalizeUuidKey(minecraftUuid);
+        String nameKey = minecraftName == null ? "" : minecraftName.toLowerCase(Locale.ROOT);
+
+        String skinUrl = skinsSkinUrlCache.get(uuidKey);
+        String headUrl = skinsHeadUrlCache.get(uuidKey);
+
+        if ((skinUrl == null || skinUrl.isBlank()) && !nameKey.isBlank()) skinUrl = skinsNameSkinUrlCache.get(nameKey);
+        if ((headUrl == null || headUrl.isBlank()) && !nameKey.isBlank()) headUrl = skinsNameHeadUrlCache.get(nameKey);
+
+        if (skinUrl == null || skinUrl.isBlank()) skinUrl = buildFallbackSkinUrl(minecraftUuid, minecraftName);
+        if (headUrl == null || headUrl.isBlank()) headUrl = buildFallbackHeadUrl(minecraftUuid, minecraftName);
+
+        return new SkinLinks(skinUrl, headUrl);
     }
 
     private SkinLinks resolveSkinLinksFromEntry(JsonObject entry, String playerUuid) {
@@ -2057,11 +2005,9 @@ public class DatabaseManager {
         }
     }
 
-    private record AccountEntry(String discordId, String minecraftUuid) {
-    }
+    private record AccountEntry(String discordId, String minecraftUuid) {}
 
-    private record SkinLinks(String skinUrl, String headUrl) {
-    }
+    private record SkinLinks(String skinUrl, String headUrl) {}
 
     private record PlayerUpsertRow(
             String discordId,
@@ -2077,14 +2023,11 @@ public class DatabaseManager {
             long summaryUpdatedAt,
             long fullUpdatedAt,
             long statsMtime
-    ) {
-    }
+    ) {}
 
-    private record StatsFileRef(Path path, long mtime) {
-    }
+    private record StatsFileRef(Path path, long mtime) {}
 
-    private record StatsCacheEntry(long mtime, StatsSnapshot snapshot) {
-    }
+    private record StatsCacheEntry(long mtime, StatsSnapshot snapshot) {}
 
     private record StatsSnapshot(
             long mtime,
@@ -2144,7 +2087,12 @@ public class DatabaseManager {
         }
     }
 
-    private record TicketInfo(String moderatorId, String ticketId, JsonObject ticket, String timeKey) {
+    private record TicketInfo(String moderatorId, String ticketId, JsonObject ticket, String timeKey) {}
+
+    private record FlexData(long bank, String color, List<String> subscription, String command) {
+        static FlexData empty() {
+            return new FlexData(0L, "", List.of(), "");
+        }
     }
 
     private record IpRule(int network, int maskBits, int mask) {
@@ -2266,9 +2214,7 @@ public class DatabaseManager {
             if (created.get() < max) {
                 int n = created.incrementAndGet();
                 if (n <= max) {
-                    Connection nc = (user == null || user.isBlank())
-                            ? DriverManager.getConnection(url)
-                            : DriverManager.getConnection(url, user, pass);
+                    Connection nc = DriverManager.getConnection(url, user, pass);
                     nc.setAutoCommit(true);
                     return nc;
                 } else {

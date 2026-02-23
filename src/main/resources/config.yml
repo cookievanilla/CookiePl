@@ -214,6 +214,9 @@ modules:
     enabled: true
     port: 8080
     cors-enabled: true
+    h2:
+      file: "webdb"
+    admin-token: "CHANGE_ME"
 
 logging:
   enabled: true
