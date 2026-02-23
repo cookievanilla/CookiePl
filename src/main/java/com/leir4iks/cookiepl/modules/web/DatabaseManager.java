@@ -584,7 +584,7 @@ public class DatabaseManager {
         File dbFileBase = new File(plugin.getDataFolder(), fileName);
         String abs = dbFileBase.getAbsolutePath();
 
-        String url = "jdbc:h2:file:" + abs + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1";
+        String url = "jdbc:h2:file:" + abs + ";MODE=MySQL;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1";
 
         try {
             this.pool = new ConnectionPool(url, user, password, poolSize);
