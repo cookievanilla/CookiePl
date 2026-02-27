@@ -11,36 +11,35 @@ import java.lang.reflect.Method;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class LiteBansBridge {
+    private static final long CACHE_MS = 15000L, API_RETRY_MS = 10000L;
+    private static final int LIMIT = 5000;
 
-    private static final long CACHE_MS = 15000L;
-    private static final long API_RETRY_MS = 10000L;
-    private static final int LIMIT = 50;
+    private static final String[][] STR = {
+            {"uuid", "UUID"}, {"reason", "REASON"},
+            {"banned_by_uuid", "BANNED_BY_UUID"}, {"banned_by_name", "BANNED_BY_NAME"},
+            {"removed_by_uuid", "REMOVED_BY_UUID"}, {"removed_by_name", "REMOVED_BY_NAME"},
+            {"removed_by_reason", "REMOVED_BY_REASON"}, {"removed_by_date", "REMOVED_BY_DATE"},
+            {"server_scope", "SERVER_SCOPE"}, {"server_origin", "SERVER_ORIGIN"}
+    };
+    private static final String[][] LNG = {{"id", "ID"}, {"time", "TIME"}, {"until", "UNTIL"}};
+    private static final String[][] BOOL = {
+            {"active", "ACTIVE"}, {"silent", "SILENT"}, {"ipban", "IPBAN"}, {"ipban_wildcard", "IPBAN_WILDCARD"}, {"warned", "WARNED"}
+    };
 
-    private final CookiePl plugin;
+    public LiteBansBridge(CookiePl plugin) {}
+
     private final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> throttle = new ConcurrentHashMap<>();
-
     private volatile Api api;
-    private volatile long lastApiAttemptMs = 0L;
+    private volatile long lastApiAttemptMs;
 
-    public LiteBansBridge(CookiePl plugin) {
-        this.plugin = plugin;
-    }
-
-    public void warmup() {
-        ensureApi(true);
-    }
+    public void warmup() { ensureApi(); }
 
     public void close() {
         cache.clear();
-        throttle.clear();
         api = null;
         lastApiAttemptMs = 0L;
     }
@@ -49,68 +48,83 @@ public final class LiteBansBridge {
         JsonObject out = new JsonObject();
         if (uuid == null) {
             out.add("bans", new JsonArray());
-            dbgOnce("lb:nullUuid", 5000L, "[DBG][LB] uuid=null remoteIp=" + safe(remoteIp));
+            out.add("mutes", new JsonArray());
+            out.add("warnings", new JsonArray());
+            out.add("kicks", new JsonArray());
+            out.add("history", new JsonArray());
             return out;
         }
 
-        long now = System.currentTimeMillis();
-        String key = uuid.toString().toLowerCase(Locale.ROOT);
-
-        CacheEntry ce = cache.get(key);
-        if (ce == null || (now - ce.cachedAtMs) > CACHE_MS) {
-            CacheEntry fresh = fetch(uuid, remoteIp);
-            cache.put(key, fresh);
-            ce = fresh;
-        }
-
-        JsonArray bans = ipAllowed ? ce.bans : redactIps(ce.bans);
-        out.add("bans", bans);
-
-        dbgOnce("lb:req:" + key, 3000L,
-                "[DBG][LB] uuid=" + uuid +
-                        " remoteIp=" + safe(remoteIp) +
-                        " ipAllowed=" + ipAllowed +
-                        " source=" + ce.source +
-                        " bans=" + (bans == null ? 0 : bans.size()) +
-                        " latestIp=" + (ce.latestIp == null || ce.latestIp.isBlank() ? "none" : "present"));
-
+        CacheEntry ce = get(uuid);
+        out.add("bans", ipAllowed ? ce.bans : redactIps(ce.bans));
+        out.add("mutes", ipAllowed ? ce.mutes : redactIps(ce.mutes));
+        out.add("warnings", ipAllowed ? ce.warnings : redactIps(ce.warnings));
+        out.add("kicks", ipAllowed ? ce.kicks : redactIps(ce.kicks));
+        out.add("history", ipAllowed ? ce.history : redactIps(ce.history));
         return out;
     }
 
-    private CacheEntry fetch(UUID uuid, String remoteIp) {
-        Api a = ensureApi(true);
-        if (a == null) {
-            return new CacheEntry(System.currentTimeMillis(), new JsonArray(), null, "no_api");
-        }
+    private CacheEntry get(UUID uuid) {
+        long now = System.currentTimeMillis();
+        String key = uuid.toString().toLowerCase(Locale.ROOT);
+        return cache.compute(key, (k, old) -> (old == null || now - old.cachedAtMs > CACHE_MS) ? fetch(uuid) : old);
+    }
 
-        String u1 = uuid.toString();
-        String u2 = u1.replace("-", "");
+    private CacheEntry fetch(UUID uuid) {
+        Api a = ensureApi();
+        if (a == null) return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null);
 
-        String latestIp = null;
-        JsonArray bans = new JsonArray();
-
+        String u1 = uuid.toString(), u2 = u1.replace("-", "");
         try {
             Object db = a.dbGet.invoke(null);
-            if (db == null) {
-                dbgOnce("lb:dbnull", 5000L, "[DBG][LB] Database.get() returned null");
-                return new CacheEntry(System.currentTimeMillis(), bans, null, "api_db_null");
-            }
+            if (db == null) return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null);
 
-            latestIp = queryLatestIp(a, db, u1, u2);
-            bans = queryBans(a, db, u1, u2, latestIp);
+            String latestIp = queryLatestIp(a, db, u1, u2);
 
-            if (bans.size() == 0) {
-                long active = queryActiveCount(a, db, u1, u2);
-                dbgOnce("lb:empty:" + u1, 3000L,
-                        "[DBG][LB] bans=0 uuid=" + u1 + " activeCount=" + active + " remoteIp=" + safe(remoteIp));
-            }
+            JsonArray bans = queryTable(a, db, "{bans}", u1, u2, latestIp);
+            JsonArray mutes = queryTable(a, db, "{mutes}", u1, u2, latestIp);
+            JsonArray warnings = queryTable(a, db, "{warnings}", u1, u2, latestIp);
+            JsonArray kicks = queryTable(a, db, "{kicks}", u1, u2, latestIp);
 
-            return new CacheEntry(System.currentTimeMillis(), bans, latestIp, "api");
-        } catch (Exception e) {
-            dbgOnce("lb:fetcherr:" + u1, 3000L,
-                    "[DBG][LB] fetch error uuid=" + u1 + " err=" + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
-            return new CacheEntry(System.currentTimeMillis(), new JsonArray(), latestIp, "api_error");
+            JsonArray history = mergeHistory(bans, mutes, warnings, kicks);
+
+            return new CacheEntry(System.currentTimeMillis(), bans, mutes, warnings, kicks, history, latestIp);
+        } catch (Exception ignored) {
+            return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null);
         }
+    }
+
+    private JsonArray mergeHistory(JsonArray bans, JsonArray mutes, JsonArray warnings, JsonArray kicks) {
+        ArrayList<JsonObject> all = new ArrayList<>(
+                (bans == null ? 0 : bans.size()) + (mutes == null ? 0 : mutes.size()) +
+                        (warnings == null ? 0 : warnings.size()) + (kicks == null ? 0 : kicks.size())
+        );
+
+        addTyped(all, bans, "ban");
+        addTyped(all, mutes, "mute");
+        addTyped(all, warnings, "warn");
+        addTyped(all, kicks, "kick");
+
+        all.sort((a, b) -> Long.compare(getLongProp(b, "time"), getLongProp(a, "time")));
+
+        JsonArray out = new JsonArray();
+        for (JsonObject o : all) out.add(o);
+        return out;
+    }
+
+    private void addTyped(List<JsonObject> out, JsonArray arr, String type) {
+        if (arr == null || arr.isEmpty()) return;
+        for (JsonElement el : arr) {
+            if (el == null || !el.isJsonObject()) continue;
+            JsonObject o = el.getAsJsonObject().deepCopy();
+            o.addProperty("type", type);
+            out.add(o);
+        }
+    }
+
+    private long getLongProp(JsonObject o, String key) {
+        try { return o != null && o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsLong() : 0L; }
+        catch (Exception ignored) { return 0L; }
     }
 
     private String queryLatestIp(Api a, Object db, String u1, String u2) {
@@ -121,112 +135,65 @@ public final class LiteBansBridge {
             try (ResultSet rs = st.executeQuery()) {
                 if (!rs.next()) return null;
                 String ip = rs.getString(1);
-                return ip == null ? null : ip.trim();
+                return (ip == null) ? null : ip.trim();
             }
-        } catch (Exception e) {
-            dbgOnce("lb:iperr:" + u1, 3000L,
-                    "[DBG][LB] latest ip query error uuid=" + u1 + " err=" + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
+        } catch (Exception ignored) {
             return null;
         }
     }
 
-    private long queryActiveCount(Api a, Object db, String u1, String u2) {
-        String sql = "SELECT COUNT(*) FROM {bans} WHERE (uuid=? OR uuid=?) AND active=TRUE";
+    private JsonArray queryTable(Api a, Object db, String table, String u1, String u2, String latestIp) throws Exception {
+        String sql = "SELECT * FROM " + table + " WHERE uuid=? OR uuid=? ORDER BY time DESC" + (LIMIT > 0 ? " LIMIT " + LIMIT : "");
         try (PreparedStatement st = (PreparedStatement) a.prepareStatement.invoke(db, sql)) {
             st.setString(1, u1);
             st.setString(2, u2);
-            try (ResultSet rs = st.executeQuery()) {
-                if (!rs.next()) return 0L;
-                return rs.getLong(1);
-            }
-        } catch (Exception ignored) {
-            return 0L;
-        }
-    }
-
-    private JsonArray queryBans(Api a, Object db, String u1, String u2, String latestIp) throws Exception {
-        String sql = "SELECT * FROM {bans} WHERE uuid=? OR uuid=? ORDER BY time DESC LIMIT " + LIMIT;
-        try (PreparedStatement st = (PreparedStatement) a.prepareStatement.invoke(db, sql)) {
-            st.setString(1, u1);
-            st.setString(2, u2);
-
             try (ResultSet rs = st.executeQuery()) {
                 ResultSetMetaData md = rs.getMetaData();
                 Map<String, Integer> idx = buildIndex(md);
-
                 JsonArray arr = new JsonArray();
+
                 while (rs.next()) {
-                    JsonObject ban = new JsonObject();
+                    JsonObject o = new JsonObject();
+                    for (String[] m : LNG) o.addProperty(m[0], optLong(rs, idx, m[1]));
+                    for (String[] m : STR) o.addProperty(m[0], optStr(rs, idx, m[1]));
+                    for (String[] m : BOOL) o.addProperty(m[0], optBool(rs, idx, m[1]));
 
-                    putLong(ban, "id", rs, idx, "ID");
-                    putString(ban, "uuid", rs, idx, "UUID");
-                    putString(ban, "reason", rs, idx, "REASON");
-                    putLong(ban, "time", rs, idx, "TIME");
-                    putLong(ban, "until", rs, idx, "UNTIL");
-                    putBool(ban, "active", rs, idx, "ACTIVE");
+                    String ip = rawStr(rs, idx, "IP");
+                    if (isBlank(ip)) ip = latestIp;
+                    o.addProperty("ip", isBlank(ip) ? "" : ip);
 
-                    putString(ban, "banned_by_uuid", rs, idx, "BANNED_BY_UUID");
-                    putString(ban, "banned_by_name", rs, idx, "BANNED_BY_NAME");
-
-                    putString(ban, "removed_by_uuid", rs, idx, "REMOVED_BY_UUID");
-                    putString(ban, "removed_by_name", rs, idx, "REMOVED_BY_NAME");
-                    putString(ban, "removed_by_reason", rs, idx, "REMOVED_BY_REASON");
-                    putString(ban, "removed_by_date", rs, idx, "REMOVED_BY_DATE");
-
-                    putString(ban, "server_scope", rs, idx, "SERVER_SCOPE");
-                    putString(ban, "server_origin", rs, idx, "SERVER_ORIGIN");
-
-                    putBool(ban, "silent", rs, idx, "SILENT");
-                    putBool(ban, "ipban", rs, idx, "IPBAN");
-                    putBool(ban, "ipban_wildcard", rs, idx, "IPBAN_WILDCARD");
-
-                    String ip = getString(rs, idx, "IP");
-                    if (ip == null || ip.isBlank()) ip = latestIp;
-                    ban.addProperty("ip", ip == null ? "" : ip);
-
-                    arr.add(ban);
+                    arr.add(o);
                 }
                 return arr;
             }
         }
     }
 
-    private Api ensureApi(boolean log) {
+    private Api ensureApi() {
         Api existing = api;
         if (existing != null) return existing;
 
         long now = System.currentTimeMillis();
-        if ((now - lastApiAttemptMs) < API_RETRY_MS) return null;
+        if (now - lastApiAttemptMs < API_RETRY_MS) return null;
         lastApiAttemptMs = now;
 
         Plugin lb = Bukkit.getPluginManager().getPlugin("LiteBans");
-        if (lb == null || !lb.isEnabled()) {
-            if (log) dbgOnce("lb:noplugin", 5000L, "[DBG][LB] LiteBans plugin not found/enabled");
-            return null;
-        }
+        if (lb == null || !lb.isEnabled()) return null;
 
         try {
             ClassLoader cl = lb.getClass().getClassLoader();
             Class<?> dbClass = Class.forName("litebans.api.Database", true, cl);
-
-            Method get = dbClass.getMethod("get");
-            Method ps = dbClass.getMethod("prepareStatement", String.class);
-
-            Api a = new Api(get, ps);
+            Api a = new Api(dbClass.getMethod("get"), dbClass.getMethod("prepareStatement", String.class));
             api = a;
-
-            if (log) dbgOnce("lb:ready", 5000L, "[DBG][LB] LiteBansAPI ready (loaded via LiteBans classloader)");
             return a;
-        } catch (Exception e) {
-            if (log) dbgOnce("lb:apierr", 5000L,
-                    "[DBG][LB] LiteBansAPI load error " + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
+        } catch (Exception ignored) {
             return null;
         }
     }
 
     private JsonArray redactIps(JsonArray in) {
-        if (in == null || in.isEmpty()) return new JsonArray();
         JsonArray out = new JsonArray();
+        if (in == null || in.isEmpty()) return out;
         for (JsonElement el : in) {
             if (el == null || !el.isJsonObject()) continue;
             JsonObject copy = el.getAsJsonObject().deepCopy();
@@ -240,84 +207,48 @@ public final class LiteBansBridge {
         int n = md.getColumnCount();
         Map<String, Integer> idx = new HashMap<>(Math.max(16, n * 2));
         for (int i = 1; i <= n; i++) {
-            String label = md.getColumnLabel(i);
-            String name = md.getColumnName(i);
-            if (label != null && !label.isBlank()) idx.put(label.toUpperCase(Locale.ROOT), i);
-            if (name != null && !name.isBlank()) idx.putIfAbsent(name.toUpperCase(Locale.ROOT), i);
+            String a = md.getColumnLabel(i), b = md.getColumnName(i);
+            if (!isBlank(a)) idx.put(a.toUpperCase(Locale.ROOT), i);
+            if (!isBlank(b)) idx.putIfAbsent(b.toUpperCase(Locale.ROOT), i);
         }
         return idx;
     }
 
-    private String getString(ResultSet rs, Map<String, Integer> idx, String key) {
+    private String rawStr(ResultSet rs, Map<String, Integer> idx, String key) {
         Integer i = idx.get(key);
         if (i == null) return null;
-        try {
-            String s = rs.getString(i);
-            return s == null ? null : s;
-        } catch (Exception ignored) {
-            return null;
-        }
+        try { return rs.getString(i); } catch (Exception ignored) { return null; }
     }
 
-    private Long getLong(ResultSet rs, Map<String, Integer> idx, String key) {
+    private String optStr(ResultSet rs, Map<String, Integer> idx, String key) {
+        String s = rawStr(rs, idx, key);
+        return s == null ? "" : s;
+    }
+
+    private long optLong(ResultSet rs, Map<String, Integer> idx, String key) {
         Integer i = idx.get(key);
-        if (i == null) return null;
+        if (i == null) return 0L;
         try {
             long v = rs.getLong(i);
-            if (rs.wasNull()) return null;
-            return v;
+            return rs.wasNull() ? 0L : v;
         } catch (Exception ignored) {
-            return null;
+            return 0L;
         }
     }
 
-    private Boolean getBool(ResultSet rs, Map<String, Integer> idx, String key) {
+    private boolean optBool(ResultSet rs, Map<String, Integer> idx, String key) {
         Integer i = idx.get(key);
-        if (i == null) return null;
+        if (i == null) return false;
         try {
             boolean v = rs.getBoolean(i);
-            if (rs.wasNull()) return null;
-            return v;
+            return !rs.wasNull() && v;
         } catch (Exception ignored) {
-            return null;
+            return false;
         }
     }
 
-    private void putString(JsonObject o, String outKey, ResultSet rs, Map<String, Integer> idx, String col) {
-        String v = getString(rs, idx, col);
-        if (v == null) o.addProperty(outKey, "");
-        else o.addProperty(outKey, v);
-    }
+    private boolean isBlank(String s) { return s == null || s.isBlank(); }
 
-    private void putLong(JsonObject o, String outKey, ResultSet rs, Map<String, Integer> idx, String col) {
-        Long v = getLong(rs, idx, col);
-        if (v == null) o.addProperty(outKey, 0L);
-        else o.addProperty(outKey, v);
-    }
-
-    private void putBool(JsonObject o, String outKey, ResultSet rs, Map<String, Integer> idx, String col) {
-        Boolean v = getBool(rs, idx, col);
-        if (v == null) o.addProperty(outKey, false);
-        else o.addProperty(outKey, v);
-    }
-
-    private void dbgOnce(String key, long ms, String msg) {
-        long now = System.currentTimeMillis();
-        Long prev = throttle.put(key, now);
-        if (prev != null && (now - prev) < ms) return;
-        plugin.getLogger().info(msg);
-    }
-
-    private String safe(String s) {
-        if (s == null) return "null";
-        String t = s.replace("\n", " ").replace("\r", " ").trim();
-        if (t.length() > 300) return t.substring(0, 300);
-        return t;
-    }
-
-    private record Api(Method dbGet, Method prepareStatement) {
-    }
-
-    private record CacheEntry(long cachedAtMs, JsonArray bans, String latestIp, String source) {
-    }
+    private record Api(Method dbGet, Method prepareStatement) {}
+    private record CacheEntry(long cachedAtMs, JsonArray bans, JsonArray mutes, JsonArray warnings, JsonArray kicks, JsonArray history, String latestIp) {}
 }
