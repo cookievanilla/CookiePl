@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class LiteBansBridge {
     private static final long CACHE_MS = 15000L, API_RETRY_MS = 10000L;
-    private static final int LIMIT = 5000;
+    private static final int LIMIT = 0;
 
     private static final String[][] STR = {
             {"uuid", "UUID"}, {"reason", "REASON"},
@@ -30,11 +30,11 @@ public final class LiteBansBridge {
             {"active", "ACTIVE"}, {"silent", "SILENT"}, {"ipban", "IPBAN"}, {"ipban_wildcard", "IPBAN_WILDCARD"}, {"warned", "WARNED"}
     };
 
-    public LiteBansBridge(CookiePl plugin) {}
-
     private final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
     private volatile Api api;
     private volatile long lastApiAttemptMs;
+
+    public LiteBansBridge(CookiePl plugin) {}
 
     public void warmup() { ensureApi(); }
 
@@ -45,17 +45,8 @@ public final class LiteBansBridge {
     }
 
     public JsonObject getLiteBansJson(UUID uuid, boolean ipAllowed, String remoteIp) {
+        CacheEntry ce = (uuid == null) ? CacheEntry.empty() : get(uuid);
         JsonObject out = new JsonObject();
-        if (uuid == null) {
-            out.add("bans", new JsonArray());
-            out.add("mutes", new JsonArray());
-            out.add("warnings", new JsonArray());
-            out.add("kicks", new JsonArray());
-            out.add("history", new JsonArray());
-            return out;
-        }
-
-        CacheEntry ce = get(uuid);
         out.add("bans", ipAllowed ? ce.bans : redactIps(ce.bans));
         out.add("mutes", ipAllowed ? ce.mutes : redactIps(ce.mutes));
         out.add("warnings", ipAllowed ? ce.warnings : redactIps(ce.warnings));
@@ -72,59 +63,28 @@ public final class LiteBansBridge {
 
     private CacheEntry fetch(UUID uuid) {
         Api a = ensureApi();
-        if (a == null) return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null);
+        if (a == null) return CacheEntry.empty();
 
         String u1 = uuid.toString(), u2 = u1.replace("-", "");
-        try {
-            Object db = a.dbGet.invoke(null);
-            if (db == null) return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null);
+        Object db;
+        try { db = a.dbGet.invoke(null); } catch (Exception ignored) { return CacheEntry.empty(); }
+        if (db == null) return CacheEntry.empty();
 
-            String latestIp = queryLatestIp(a, db, u1, u2);
+        String latestIp = queryLatestIp(a, db, u1, u2);
 
-            JsonArray bans = queryTable(a, db, "{bans}", u1, u2, latestIp);
-            JsonArray mutes = queryTable(a, db, "{mutes}", u1, u2, latestIp);
-            JsonArray warnings = queryTable(a, db, "{warnings}", u1, u2, latestIp);
-            JsonArray kicks = queryTable(a, db, "{kicks}", u1, u2, latestIp);
+        JsonArray bans = safeQuery(a, db, "{bans}", u1, u2, latestIp);
+        JsonArray mutes = safeQuery(a, db, "{mutes}", u1, u2, latestIp);
+        JsonArray warnings = safeQuery(a, db, "{warnings}", u1, u2, latestIp);
+        JsonArray kicks = safeQuery(a, db, "{kicks}", u1, u2, latestIp);
 
-            JsonArray history = mergeHistory(bans, mutes, warnings, kicks);
+        JsonArray history = mergeHistory(bans, mutes, warnings, kicks);
 
-            return new CacheEntry(System.currentTimeMillis(), bans, mutes, warnings, kicks, history, latestIp);
-        } catch (Exception ignored) {
-            return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null);
-        }
+        return new CacheEntry(System.currentTimeMillis(), bans, mutes, warnings, kicks, history, latestIp);
     }
 
-    private JsonArray mergeHistory(JsonArray bans, JsonArray mutes, JsonArray warnings, JsonArray kicks) {
-        ArrayList<JsonObject> all = new ArrayList<>(
-                (bans == null ? 0 : bans.size()) + (mutes == null ? 0 : mutes.size()) +
-                        (warnings == null ? 0 : warnings.size()) + (kicks == null ? 0 : kicks.size())
-        );
-
-        addTyped(all, bans, "ban");
-        addTyped(all, mutes, "mute");
-        addTyped(all, warnings, "warn");
-        addTyped(all, kicks, "kick");
-
-        all.sort((a, b) -> Long.compare(getLongProp(b, "time"), getLongProp(a, "time")));
-
-        JsonArray out = new JsonArray();
-        for (JsonObject o : all) out.add(o);
-        return out;
-    }
-
-    private void addTyped(List<JsonObject> out, JsonArray arr, String type) {
-        if (arr == null || arr.isEmpty()) return;
-        for (JsonElement el : arr) {
-            if (el == null || !el.isJsonObject()) continue;
-            JsonObject o = el.getAsJsonObject().deepCopy();
-            o.addProperty("type", type);
-            out.add(o);
-        }
-    }
-
-    private long getLongProp(JsonObject o, String key) {
-        try { return o != null && o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsLong() : 0L; }
-        catch (Exception ignored) { return 0L; }
+    private JsonArray safeQuery(Api a, Object db, String table, String u1, String u2, String latestIp) {
+        try { return queryTable(a, db, table, u1, u2, latestIp); }
+        catch (Exception ignored) { return new JsonArray(); }
     }
 
     private String queryLatestIp(Api a, Object db, String u1, String u2) {
@@ -135,7 +95,7 @@ public final class LiteBansBridge {
             try (ResultSet rs = st.executeQuery()) {
                 if (!rs.next()) return null;
                 String ip = rs.getString(1);
-                return (ip == null) ? null : ip.trim();
+                return ip == null ? null : ip.trim();
             }
         } catch (Exception ignored) {
             return null;
@@ -167,6 +127,36 @@ public final class LiteBansBridge {
                 return arr;
             }
         }
+    }
+
+    private JsonArray mergeHistory(JsonArray bans, JsonArray mutes, JsonArray warnings, JsonArray kicks) {
+        ArrayList<JsonObject> all = new ArrayList<>(
+                (bans == null ? 0 : bans.size()) + (mutes == null ? 0 : mutes.size()) +
+                        (warnings == null ? 0 : warnings.size()) + (kicks == null ? 0 : kicks.size())
+        );
+        addTyped(all, bans, "ban");
+        addTyped(all, mutes, "mute");
+        addTyped(all, warnings, "warn");
+        addTyped(all, kicks, "kick");
+        all.sort((a, b) -> Long.compare(longProp(b, "time"), longProp(a, "time")));
+        JsonArray out = new JsonArray();
+        for (JsonObject o : all) out.add(o);
+        return out;
+    }
+
+    private void addTyped(List<JsonObject> out, JsonArray arr, String type) {
+        if (arr == null || arr.isEmpty()) return;
+        for (JsonElement el : arr) {
+            if (el == null || !el.isJsonObject()) continue;
+            JsonObject o = el.getAsJsonObject().deepCopy();
+            o.addProperty("type", type);
+            out.add(o);
+        }
+    }
+
+    private long longProp(JsonObject o, String k) {
+        try { return o != null && o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsLong() : 0L; }
+        catch (Exception ignored) { return 0L; }
     }
 
     private Api ensureApi() {
@@ -250,5 +240,7 @@ public final class LiteBansBridge {
     private boolean isBlank(String s) { return s == null || s.isBlank(); }
 
     private record Api(Method dbGet, Method prepareStatement) {}
-    private record CacheEntry(long cachedAtMs, JsonArray bans, JsonArray mutes, JsonArray warnings, JsonArray kicks, JsonArray history, String latestIp) {}
+    private record CacheEntry(long cachedAtMs, JsonArray bans, JsonArray mutes, JsonArray warnings, JsonArray kicks, JsonArray history, String latestIp) {
+        static CacheEntry empty() { return new CacheEntry(System.currentTimeMillis(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), new JsonArray(), null); }
+    }
 }
