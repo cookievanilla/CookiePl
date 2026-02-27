@@ -1,5 +1,8 @@
 package com.leir4iks.cookiepl.modules.web;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -39,6 +42,7 @@ public class WebServerManager {
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/players", this::handlePlayers);
             server.createContext("/serverinfo", this::handleServerInfo);
+            server.createContext("/serverstats", this::handleServerStats);
             server.createContext("/admin/players", this::handleAdminPlayers);
 
             server.setExecutor(Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors())));
@@ -66,13 +70,31 @@ public class WebServerManager {
     private void updateCache() {
         try {
             Server s = plugin.getServer();
-            var json = db.newJsonObject();
+            JsonObject json = db.newJsonObject();
             json.addProperty("online", s.getOnlinePlayers().size());
             json.addProperty("online_players", s.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.joining(", ")));
             json.addProperty("max_players", s.getMaxPlayers());
             json.addProperty("uptime", ManagementFactory.getRuntimeMXBean().getUptime() / (1000L * 60L * 60L));
             json.addProperty("version", s.getBukkitVersion());
             json.addProperty("server", s.getName());
+
+            try {
+                String serverStats = db.getServerStatsJson();
+                JsonElement el = JsonParser.parseString(serverStats);
+                if (el != null && el.isJsonObject()) {
+                    JsonObject so = el.getAsJsonObject();
+
+                    JsonObject season = new JsonObject();
+                    if (so.has("season_id") && !so.get("season_id").isJsonNull()) season.addProperty("id", so.get("season_id").getAsString());
+                    if (so.has("season_players_total") && !so.get("season_players_total").isJsonNull()) season.addProperty("players_total", so.get("season_players_total").getAsInt());
+                    if (so.has("season_peak_online") && !so.get("season_peak_online").isJsonNull()) season.addProperty("peak_online", so.get("season_peak_online").getAsInt());
+                    json.add("season", season);
+
+                    if (so.has("stats") && so.get("stats").isJsonObject()) json.add("stats", so.get("stats").getAsJsonObject());
+                }
+            } catch (Exception ignored) {
+            }
+
             cachedServerInfoJson = db.toJsonString(json);
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update web server cache: " + e.getMessage());
@@ -138,6 +160,11 @@ public class WebServerManager {
     private void handleServerInfo(HttpExchange ex) throws IOException {
         if (preflight(ex)) return;
         send(ex, 200, cachedServerInfoJson);
+    }
+
+    private void handleServerStats(HttpExchange ex) throws IOException {
+        if (preflight(ex)) return;
+        send(ex, 200, db.getServerStatsJson());
     }
 
     private boolean preflight(HttpExchange ex) throws IOException {

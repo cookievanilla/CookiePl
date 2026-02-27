@@ -11,6 +11,7 @@ public class WebServerModule implements IModule {
     public void enable(CookiePl plugin) {
         databaseManager = new DatabaseManager(plugin);
         databaseManager.start();
+        plugin.setWebDatabaseManager(databaseManager);
         webServerManager = new WebServerManager(plugin, databaseManager);
         webServerManager.start();
     }
@@ -19,6 +20,7 @@ public class WebServerModule implements IModule {
     public void disable(CookiePl plugin) {
         if (webServerManager != null) webServerManager.stop();
         if (databaseManager != null) databaseManager.stop();
+        plugin.setWebDatabaseManager(null);
         webServerManager = null;
         databaseManager = null;
     }

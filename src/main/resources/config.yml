@@ -214,8 +214,14 @@ modules:
     enabled: true
     port: 8080
     cors-enabled: true
+    season-id: ""
+    external-name-url: "http://212.80.7.211:20081/name"
+    external-stats-url: "http://212.80.7.211:20081/stats"
+    tickets:
+      whitelist-url: "http://212.80.7.211:20081/whitelist"
     h2:
       file: "webdb"
+      pool-size: 10
     admin-token: "CHANGE_ME"
 
 logging:

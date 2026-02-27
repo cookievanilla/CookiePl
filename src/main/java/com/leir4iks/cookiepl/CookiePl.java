@@ -3,6 +3,7 @@ package com.leir4iks.cookiepl;
 import com.leir4iks.cookiepl.commands.MainCommand;
 import com.leir4iks.cookiepl.config.ConfigManager;
 import com.leir4iks.cookiepl.modules.IModule;
+import com.leir4iks.cookiepl.modules.web.DatabaseManager;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.FoliaLib;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -21,6 +22,7 @@ public final class CookiePl extends JavaPlugin {
     private LogManager logManager;
     private FoliaLib foliaLib;
     private ConfigManager configManager;
+    private volatile DatabaseManager webDatabaseManager;
 
     @Override
     public void onEnable() {
@@ -45,6 +47,7 @@ public final class CookiePl extends JavaPlugin {
         if (foliaLib != null) {
             foliaLib.getScheduler().cancelAllTasks();
         }
+        webDatabaseManager = null;
         if (logManager != null) {
             logInfo("CookiePl has been disabled.");
             logManager.close();
@@ -244,5 +247,13 @@ public final class CookiePl extends JavaPlugin {
 
     public FoliaLib getFoliaLib() {
         return foliaLib;
+    }
+
+    public DatabaseManager getWebDatabaseManager() {
+        return webDatabaseManager;
+    }
+
+    public void setWebDatabaseManager(DatabaseManager manager) {
+        this.webDatabaseManager = manager;
     }
 }

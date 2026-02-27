@@ -10,11 +10,14 @@ import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.query.QueryOptions;
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerLoginEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.io.BufferedReader;
@@ -28,6 +31,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.*;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.temporal.WeekFields;
 import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -62,7 +69,10 @@ public class DatabaseManager {
     private volatile List<AccountEntry> accountsList = List.of();
 
     private volatile List<File> statsFolders = List.of();
+    private volatile List<File> advancementsFolders = List.of();
+
     private final Map<String, StatsCacheEntry> statsCache = new ConcurrentHashMap<>();
+    private final Map<String, AdvCacheEntry> advCache = new ConcurrentHashMap<>();
 
     private final Object summaryLock = new Object();
     private volatile Map<String, JsonObject> summaryByDiscordId = Map.of();
@@ -81,11 +91,28 @@ public class DatabaseManager {
     private volatile int lastStatsHash;
 
     private WrappedTask skinsUpdateTask, playersStatsUpdateTask, whitelistUpdateTask, statsUpdateTask, nameUpdateTask;
+    private WrappedTask timeTrackTask, timeFlushTask, extraFlushTask;
     private final OnlineListener onlineListener = new OnlineListener();
 
     private volatile boolean dbReady;
     private ConnectionPool pool;
     private volatile LuckPerms luckPerms;
+
+    private volatile String seasonId = "default";
+    private volatile int seasonPeakOnline;
+
+    private final Set<String> pendingSeasonJoins = ConcurrentHashMap.newKeySet();
+
+    private final Map<String, TimeState> timeByUuid = new ConcurrentHashMap<>();
+    private final Map<String, Long> onlineTickMs = new ConcurrentHashMap<>();
+    private final Set<String> dirtyTimes = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean timeFlushRunning = new AtomicBoolean(false);
+
+    private final Map<String, ExtraState> extraByUuid = new ConcurrentHashMap<>();
+    private final Set<String> dirtyExtra = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean extraFlushRunning = new AtomicBoolean(false);
+
+    private volatile String serverStatsJsonCache = "{}";
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -99,9 +126,21 @@ public class DatabaseManager {
     public void start() {
         loadDataYml();
         buildStatsFolders();
+        buildAdvancementsFolders();
+
         try { Bukkit.getOnlinePlayers().forEach(p -> onlineUuids.add(p.getUniqueId().toString())); } catch (Exception ignored) {}
         try { Bukkit.getPluginManager().registerEvents(onlineListener, plugin); }
         catch (Exception e) { plugin.getLogManager().warn("Failed to register online listener: " + e.getMessage()); }
+
+        try {
+            long now = System.currentTimeMillis();
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                String u = p.getUniqueId().toString();
+                onlineTickMs.put(u, now);
+                ensureTimeStateLoaded(u, now);
+                ensureExtraStateLoaded(u);
+            }
+        } catch (Exception ignored) {}
 
         plugin.getFoliaLib().getScheduler().runAsync(t -> {
             initH2();
@@ -111,7 +150,12 @@ public class DatabaseManager {
             updateExternalStatsData();
             updateSkinsData();
             refreshPlayersData();
+            flushPendingSeasonJoins();
         });
+
+        timeTrackTask = plugin.getFoliaLib().getScheduler().runTimer(this::trackOnlineTimeTick, 20L, 20L);
+        timeFlushTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::flushDirtyTimeRows, 200L, 200L);
+        extraFlushTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::flushDirtyExtraRows, 200L, 200L);
 
         nameUpdateTask = timer(this::updateExternalNameData, 3600L, 3600L);
         skinsUpdateTask = timer(this::updateSkinsData, 300L, 300L);
@@ -121,15 +165,32 @@ public class DatabaseManager {
     }
 
     public void stop() {
+        cancel(timeTrackTask);
+        cancel(timeFlushTask);
+        cancel(extraFlushTask);
+        timeTrackTask = timeFlushTask = extraFlushTask = null;
+
         cancel(nameUpdateTask); cancel(skinsUpdateTask); cancel(playersStatsUpdateTask); cancel(whitelistUpdateTask); cancel(statsUpdateTask);
         nameUpdateTask = skinsUpdateTask = playersStatsUpdateTask = whitelistUpdateTask = statsUpdateTask = null;
+
+        try { flushDirtyTimeRows(); } catch (Exception ignored) {}
+        try { flushDirtyExtraRows(); } catch (Exception ignored) {}
 
         try { HandlerList.unregisterAll(onlineListener); } catch (Exception ignored) {}
 
         if (pool != null) pool.close();
         pool = null;
         dbReady = false;
+
         liteBansBridge.close();
+        onlineUuids.clear();
+        onlineTickMs.clear();
+        dirtyTimes.clear();
+        timeByUuid.clear();
+        dirtyExtra.clear();
+        extraByUuid.clear();
+        pendingSeasonJoins.clear();
+        serverStatsJsonCache = "{}";
     }
 
     public JsonObject newJsonObject() { return new JsonObject(); }
@@ -186,6 +247,7 @@ public class DatabaseManager {
                             "full_updated_at BIGINT NOT NULL DEFAULT 0," +
                             "stats_mtime BIGINT NOT NULL DEFAULT 0" +
                             ")");
+
                     try { st.execute("CREATE INDEX idx_uuid ON players (minecraft_uuid)"); } catch (Exception ignored) {}
                     try { st.execute("CREATE INDEX idx_name_lc ON players (minecraft_name_lc)"); } catch (Exception ignored) {}
 
@@ -202,20 +264,154 @@ public class DatabaseManager {
                             "subscription CLOB," +
                             "command VARCHAR(256) NOT NULL DEFAULT ''" +
                             ")");
+
+                    st.execute("CREATE TABLE IF NOT EXISTS player_time (" +
+                            "minecraft_uuid CHAR(36) PRIMARY KEY," +
+                            "last_join_ms BIGINT NOT NULL DEFAULT 0," +
+                            "last_seen_ms BIGINT NOT NULL DEFAULT 0," +
+                            "active_ms_total BIGINT NOT NULL DEFAULT 0," +
+                            "afk_ms_total BIGINT NOT NULL DEFAULT 0," +
+                            "active_ms_today BIGINT NOT NULL DEFAULT 0," +
+                            "active_ms_week BIGINT NOT NULL DEFAULT 0," +
+                            "active_ms_month BIGINT NOT NULL DEFAULT 0," +
+                            "day_key INT NOT NULL DEFAULT 0," +
+                            "week_key INT NOT NULL DEFAULT 0," +
+                            "month_key INT NOT NULL DEFAULT 0," +
+                            "updated_at BIGINT NOT NULL DEFAULT 0" +
+                            ")");
+
+                    st.execute("CREATE TABLE IF NOT EXISTS player_extra (" +
+                            "minecraft_uuid CHAR(36) PRIMARY KEY," +
+                            "slaps_sent BIGINT NOT NULL DEFAULT 0," +
+                            "slaps_received BIGINT NOT NULL DEFAULT 0," +
+                            "updated_at BIGINT NOT NULL DEFAULT 0" +
+                            ")");
+
+                    st.execute("CREATE TABLE IF NOT EXISTS player_ips (" +
+                            "minecraft_uuid CHAR(36) NOT NULL," +
+                            "ip VARCHAR(64) NOT NULL," +
+                            "first_seen_ms BIGINT NOT NULL DEFAULT 0," +
+                            "last_seen_ms BIGINT NOT NULL DEFAULT 0," +
+                            "cnt BIGINT NOT NULL DEFAULT 0," +
+                            "PRIMARY KEY(minecraft_uuid, ip)" +
+                            ")");
+
+                    try { st.execute("CREATE INDEX idx_player_ips_uuid ON player_ips (minecraft_uuid)"); } catch (Exception ignored) {}
+
+                    st.execute("CREATE TABLE IF NOT EXISTS season_players (" +
+                            "season_id VARCHAR(64) NOT NULL," +
+                            "minecraft_uuid CHAR(36) NOT NULL," +
+                            "joined_at BIGINT NOT NULL DEFAULT 0," +
+                            "PRIMARY KEY(season_id, minecraft_uuid)" +
+                            ")");
+
+                    st.execute("CREATE TABLE IF NOT EXISTS season_meta (" +
+                            "season_id VARCHAR(64) PRIMARY KEY," +
+                            "peak_online INT NOT NULL DEFAULT 0," +
+                            "updated_at BIGINT NOT NULL DEFAULT 0" +
+                            ")");
                 }
             } finally {
                 pool.release(c);
             }
 
             dbReady = true;
+
+            long now = System.currentTimeMillis();
+            String cfgSeason = nz(plugin.getConfig().getString("modules.web-server.season-id")).trim();
+            String metaSeason = nz(readMeta("season_id")).trim();
+            seasonId = !cfgSeason.isEmpty() ? cfgSeason : (!metaSeason.isEmpty() ? metaSeason : "default");
+            writeMeta("season_id", seasonId, now);
+
+            seasonPeakOnline = readSeasonPeakOnline(seasonId);
+            upsertSeasonPeakOnline(seasonId, Math.max(seasonPeakOnline, safeOnlineCount()), now);
+
             String cached = readMeta("players_summary_json");
             if (!isBlank(cached)) playersSummaryListCache = cached;
+
+            String sstats = readMeta("server_stats_json");
+            if (!isBlank(sstats)) serverStatsJsonCache = sstats;
 
         } catch (Exception e) {
             dbReady = false;
             pool = null;
             plugin.getLogManager().warn("H2 init failed: " + e.getMessage());
         }
+    }
+
+    private int safeOnlineCount() {
+        try { return Bukkit.getOnlinePlayers().size(); } catch (Exception ignored) { return 0; }
+    }
+
+    private int readSeasonPeakOnline(String sid) {
+        if (!hasDb() || isBlank(sid)) return 0;
+        return withConn(null, 0, c -> {
+            try (PreparedStatement ps = c.prepareStatement("SELECT peak_online FROM season_meta WHERE season_id=? LIMIT 1")) {
+                ps.setString(1, sid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return 0;
+                    return Math.max(0, rs.getInt(1));
+                }
+            }
+        });
+    }
+
+    private void upsertSeasonPeakOnline(String sid, int peak, long now) {
+        if (!hasDb() || isBlank(sid)) return;
+        withConn(null, null, c -> {
+            try (PreparedStatement ps = c.prepareStatement("MERGE INTO season_meta (season_id,peak_online,updated_at) KEY(season_id) VALUES (?,?,?)")) {
+                ps.setString(1, sid);
+                ps.setInt(2, Math.max(0, peak));
+                ps.setLong(3, now);
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    private void flushPendingSeasonJoins() {
+        if (!hasDb()) return;
+        if (pendingSeasonJoins.isEmpty()) return;
+        ArrayList<String> list = new ArrayList<>(pendingSeasonJoins);
+        pendingSeasonJoins.clear();
+        for (String u : list) markSeasonJoin(u, System.currentTimeMillis());
+    }
+
+    private void markSeasonJoin(String minecraftUuid, long now) {
+        if (!hasDb() || isBlank(seasonId) || isBlank(minecraftUuid)) return;
+        withConn(null, null, c -> {
+            try (PreparedStatement ps = c.prepareStatement("MERGE INTO season_players (season_id,minecraft_uuid,joined_at) KEY(season_id,minecraft_uuid) VALUES (?,?,?)")) {
+                ps.setString(1, seasonId);
+                ps.setString(2, minecraftUuid);
+                ps.setLong(3, now);
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    private int readSeasonPlayersCount() {
+        if (!hasDb() || isBlank(seasonId)) return 0;
+        return withConn(null, 0, c -> {
+            try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM season_players WHERE season_id=?")) {
+                ps.setString(1, seasonId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return 0;
+                    long v = rs.getLong(1);
+                    if (v < 0) v = 0;
+                    if (v > Integer.MAX_VALUE) return Integer.MAX_VALUE;
+                    return (int) v;
+                }
+            }
+        });
+    }
+
+    private void updateSeasonPeakOnlineIfNeeded(int currentOnline) {
+        int cur = Math.max(0, currentOnline);
+        if (cur <= seasonPeakOnline) return;
+        seasonPeakOnline = cur;
+        long now = System.currentTimeMillis();
+        if (hasDb()) upsertSeasonPeakOnline(seasonId, seasonPeakOnline, now);
     }
 
     private LuckPerms getLuckPerms() {
@@ -267,6 +463,16 @@ public class DatabaseManager {
             statsFolders = folders;
         } catch (Exception ignored) {
             statsFolders = List.of();
+        }
+    }
+
+    private void buildAdvancementsFolders() {
+        try {
+            ArrayList<File> folders = new ArrayList<>();
+            Bukkit.getWorlds().forEach(w -> { File wf = w.getWorldFolder(); if (wf != null) folders.add(new File(wf, "advancements")); });
+            advancementsFolders = folders;
+        } catch (Exception ignored) {
+            advancementsFolders = List.of();
         }
     }
 
@@ -521,6 +727,9 @@ public class DatabaseManager {
             HashMap<String, String> newDiscordIdByUuid = new HashMap<>(Math.max(16, accounts.size() * 2));
             JsonArray summaryArray = new JsonArray();
 
+            long sumBlocksPlaced = 0L, sumBlocksBroken = 0L, sumWalkBlocks = 0L, sumSwimBlocks = 0L, sumFlyBlocks = 0L;
+            long sumJumps = 0L, sumAdv = 0L, sumKillsPlayers = 0L, sumDeaths = 0L, sumKillsMobs = 0L, sumSlapsSent = 0L, sumSlapsRecv = 0L, sumCrafted = 0L;
+
             for (AccountEntry entry : accounts) {
                 String discordId = entry.discordId();
                 String minecraftUuid = entry.minecraftUuid();
@@ -533,8 +742,10 @@ public class DatabaseManager {
                 boolean isOnline = onlineUuids.contains(minecraftUuid);
 
                 StatsSnapshot snap = getStatsSnapshot(uuid);
+                AdvSnapshot adv = getAdvSnapshot(uuid);
+
                 double playHours = round1(ticksToHours(snap.playTimeTicks()));
-                JsonObject statsObj = buildStatsJson(snap, isOnline);
+                JsonObject statsObj = buildStatsJson(snap, adv, minecraftUuid, isOnline, false);
                 JsonObject lpGroups = getLuckPermsGroups(uuid);
 
                 JsonObject summary = new JsonObject();
@@ -560,6 +771,25 @@ public class DatabaseManager {
                         GSON.toJson(summary), GSON.toJson(full),
                         now, now, snap.mtime()
                 ));
+
+                sumBlocksPlaced += Math.max(0L, snap.blocksPlaced());
+                sumBlocksBroken += Math.max(0L, snap.blocksBroken());
+                sumWalkBlocks += Math.max(0L, cmToBlocks(snap.walkCm() + snap.sprintCm() + snap.crouchCm() + snap.climbCm()));
+                sumSwimBlocks += Math.max(0L, cmToBlocks(snap.swimCm()));
+                sumFlyBlocks += Math.max(0L, cmToBlocks(snap.flyCm()));
+                sumJumps += Math.max(0L, snap.jumps());
+                sumAdv += Math.max(0L, adv.completed());
+                sumKillsPlayers += Math.max(0L, snap.playerKills());
+                sumDeaths += Math.max(0L, snap.deaths());
+                sumKillsMobs += Math.max(0L, snap.mobKills());
+
+                ExtraState ex = ensureExtraStateLoaded(minecraftUuid);
+                synchronized (ex) {
+                    sumSlapsSent += Math.max(0L, ex.slapsSent);
+                    sumSlapsRecv += Math.max(0L, ex.slapsReceived);
+                }
+
+                sumCrafted += Math.max(0L, snap.craftedTotal());
             }
 
             String summaryStr = GSON.toJson(summaryArray);
@@ -574,6 +804,38 @@ public class DatabaseManager {
                 upsertPlayers(rows);
                 writeMeta("players_summary_json", summaryStr, now);
             }
+
+            JsonObject server = new JsonObject();
+            server.addProperty("season_id", nz(seasonId));
+            server.addProperty("season_players_total", readSeasonPlayersCount());
+            server.addProperty("season_peak_online", Math.max(0, seasonPeakOnline));
+
+            JsonObject sstats = new JsonObject();
+            sstats.addProperty("blocks_placed", sumBlocksPlaced);
+            sstats.addProperty("blocks_broken", sumBlocksBroken);
+
+            JsonObject travel = new JsonObject();
+            travel.addProperty("walked", sumWalkBlocks);
+            travel.addProperty("swum", sumSwimBlocks);
+            travel.addProperty("flown", sumFlyBlocks);
+            travel.addProperty("total", Math.max(0L, sumWalkBlocks + sumSwimBlocks + sumFlyBlocks));
+            sstats.add("travel_blocks", travel);
+
+            sstats.addProperty("jumps", sumJumps);
+            sstats.addProperty("advancements", sumAdv);
+            sstats.addProperty("kills_players", sumKillsPlayers);
+            sstats.addProperty("deaths", sumDeaths);
+            sstats.addProperty("kills_mobs", sumKillsMobs);
+            sstats.addProperty("slaps_received", sumSlapsRecv);
+            sstats.addProperty("slaps_sent", sumSlapsSent);
+            sstats.addProperty("items_crafted", sumCrafted);
+
+            server.add("stats", sstats);
+
+            String serverStr = GSON.toJson(server);
+            serverStatsJsonCache = serverStr;
+            if (hasDb()) writeMeta("server_stats_json", serverStr, now);
+
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to refresh players data: " + e.getMessage());
         } finally {
@@ -600,6 +862,16 @@ public class DatabaseManager {
         return v;
     }
 
+    public String getServerStatsJson() {
+        String cached = serverStatsJsonCache;
+        if (!isBlank(cached) && !cached.equals("{}")) return cached;
+        if (!hasDb()) return "{}";
+        String v = readMeta("server_stats_json");
+        if (isBlank(v)) return "{}";
+        serverStatsJsonCache = v;
+        return v;
+    }
+
     public String getPlayerJsonById(String query) { return getPlayerJsonById(query, null); }
 
     public String getPlayerJsonById(String query, String remoteIp) {
@@ -615,7 +887,8 @@ public class DatabaseManager {
             JsonObject obj = JsonParser.parseString(baseJson).getAsJsonObject();
 
             String mcUuidStr = obj.has("minecraft_uuid") && !obj.get("minecraft_uuid").isJsonNull() ? obj.get("minecraft_uuid").getAsString() : null;
-            if (!isBlank(mcUuidStr)) obj.addProperty("is_online", onlineUuids.contains(mcUuidStr));
+            boolean isOnline = !isBlank(mcUuidStr) && onlineUuids.contains(mcUuidStr);
+            if (!isBlank(mcUuidStr)) obj.addProperty("is_online", isOnline);
 
             String discordId = obj.has("id") && !obj.get("id").isJsonNull() ? obj.get("id").getAsString() : null;
 
@@ -625,6 +898,12 @@ public class DatabaseManager {
             UUID mcUuid = null;
             try { if (!isBlank(mcUuidStr)) mcUuid = UUID.fromString(mcUuidStr); } catch (Exception ignored) {}
             obj.add("litebans", liteBansBridge.getLiteBansJson(mcUuid, allowed, remoteIp));
+
+            if (mcUuid != null && !isBlank(mcUuidStr)) {
+                StatsSnapshot snap = getStatsSnapshot(mcUuid);
+                AdvSnapshot adv = getAdvSnapshot(mcUuid);
+                obj.add("stats", buildStatsJson(snap, adv, mcUuidStr, isOnline, allowed));
+            }
 
             JsonObject flex = buildFlexJsonForDiscordId(discordId);
             return GSON.toJson(reorderWithFlex(obj, flex));
@@ -871,10 +1150,12 @@ public class DatabaseManager {
             boolean online = onlineUuids.contains(mcUuid);
 
             StatsSnapshot snap = getStatsSnapshot(uuid);
+            AdvSnapshot adv = getAdvSnapshot(uuid);
+
             JsonObject full = new JsonObject();
             putBase(full, did, mcName, mcUuid, links, online);
             full.add("luckperms", getLuckPermsGroups(uuid));
-            full.add("stats", buildStatsJson(snap, online));
+            full.add("stats", buildStatsJson(snap, adv, mcUuid, online, false));
             return GSON.toJson(full);
         }
         return null;
@@ -951,6 +1232,8 @@ public class DatabaseManager {
 
         if (isOnline) onlineUuids.add(uuid);
         else onlineUuids.remove(uuid);
+
+        if (isOnline) updateSeasonPeakOnlineIfNeeded(safeOnlineCount());
 
         String discordId = discordIdByUuid.get(uuid);
         if (isBlank(discordId)) return;
@@ -1303,140 +1586,535 @@ public class DatabaseManager {
             JsonObject custom = obj(statsRoot, "minecraft:custom");
 
             long playTime = getLong(custom, "minecraft:play_time", "minecraft:play_one_minute", "stat.playOneMinute");
-            long leaveGame = getLong(custom, "minecraft:leave_game", "stat.leaveGame");
             long deaths = getLong(custom, "minecraft:deaths", "stat.deaths");
             long playerKills = getLong(custom, "minecraft:player_kills", "stat.playerKills");
             long mobKills = getLong(custom, "minecraft:mob_kills", "stat.mobKills");
-            long damageDealt = getLong(custom, "minecraft:damage_dealt", "stat.damageDealt");
-            long damageTaken = getLong(custom, "minecraft:damage_taken", "stat.damageTaken");
-
-            long walkCm = getLong(custom, "minecraft:walk_one_cm", "stat.walkOneCm");
-            long flyCm = getLong(custom, "minecraft:aviate_one_cm", "stat.aviateOneCm");
-            long swimCm = getLong(custom, "minecraft:swim_one_cm", "stat.swimOneCm");
+            long walkCm = getLong(custom, "minecraft:walk_one_cm", "minecraft:walked_one_cm", "stat.walkOneCm");
             long sprintCm = getLong(custom, "minecraft:sprint_one_cm", "stat.sprintOneCm");
             long crouchCm = getLong(custom, "minecraft:crouch_one_cm", "stat.crouchOneCm");
             long climbCm = getLong(custom, "minecraft:climb_one_cm", "stat.climbOneCm");
-            long fallCm = getLong(custom, "minecraft:fall_one_cm", "stat.fallOneCm");
-            long minecartCm = getLong(custom, "minecraft:minecart_one_cm", "stat.minecartOneCm");
-            long boatCm = getLong(custom, "minecraft:boat_one_cm", "stat.boatOneCm");
-            long pigCm = getLong(custom, "minecraft:pig_one_cm", "stat.pigOneCm");
-            long horseCm = getLong(custom, "minecraft:horse_one_cm", "stat.horseOneCm");
-            long striderCm = getLong(custom, "minecraft:strider_one_cm", "stat.striderOneCm");
-
+            long swimCm = getLong(custom, "minecraft:swim_one_cm", "stat.swimOneCm");
+            long flyCm = getLong(custom, "minecraft:aviate_one_cm", "stat.aviateOneCm");
             long jumps = getLong(custom, "minecraft:jump", "stat.jump");
-            long animalsBred = getLong(custom, "minecraft:animals_bred", "stat.animalsBred");
-            long fishCaught = getLong(custom, "minecraft:fish_caught", "stat.fishCaught");
-            long villagerTrades = getLong(custom, "minecraft:traded_with_villager", "stat.tradedWithVillager");
-            long enchantments = getLong(custom, "minecraft:item_enchanted", "stat.itemEnchanted");
 
             JsonObject minedObj = obj(statsRoot, "minecraft:mined");
             JsonObject usedObj = obj(statsRoot, "minecraft:used");
             JsonObject craftedObj = obj(statsRoot, "minecraft:crafted");
-            JsonObject pickedObj = obj(statsRoot, "minecraft:picked_up");
-            JsonObject droppedObj = obj(statsRoot, "minecraft:dropped");
 
-            long minedTotal = 0L, usedTotal = 0L;
+            long blocksBroken = sumValues(minedObj);
+            long blocksPlaced = sumBlockValues(usedObj);
             long craftedTotal = sumValues(craftedObj);
-            long pickedUpTotal = sumValues(pickedObj);
-            long droppedTotal = sumValues(droppedObj);
-
-            TopK topMined = new TopK(5);
-            TopK topUsed = new TopK(5);
-
-            if (minedObj != null) for (Map.Entry<String, JsonElement> e : minedObj.entrySet()) {
-                long v = asLong(e.getValue());
-                if (v <= 0) continue;
-                minedTotal += v;
-                topMined.add(stripNamespace(e.getKey()).toLowerCase(Locale.ROOT), v);
-            }
-
-            if (usedObj != null) for (Map.Entry<String, JsonElement> e : usedObj.entrySet()) {
-                long v = asLong(e.getValue());
-                if (v <= 0) continue;
-                usedTotal += v;
-                topUsed.add(stripNamespace(e.getKey()).toLowerCase(Locale.ROOT), v);
-            }
 
             return new StatsSnapshot(
-                    mtime, playTime, leaveGame, deaths, playerKills, mobKills, damageDealt, damageTaken,
-                    walkCm, flyCm, swimCm, sprintCm, crouchCm, climbCm, fallCm, minecartCm, boatCm, pigCm, horseCm, striderCm,
-                    jumps, animalsBred, fishCaught, villagerTrades, enchantments,
-                    minedTotal, usedTotal, craftedTotal, pickedUpTotal, droppedTotal,
-                    topMined.toSortedDesc(), topUsed.toSortedDesc()
+                    mtime,
+                    playTime,
+                    deaths,
+                    playerKills,
+                    mobKills,
+                    walkCm,
+                    sprintCm,
+                    crouchCm,
+                    climbCm,
+                    swimCm,
+                    flyCm,
+                    jumps,
+                    blocksBroken,
+                    blocksPlaced,
+                    craftedTotal
             );
         } catch (Exception ignored) {
             return StatsSnapshot.empty(mtime);
         }
     }
 
-    private JsonObject buildStatsJson(StatsSnapshot s, boolean isOnline) {
-        JsonObject stats = new JsonObject();
-        stats.addProperty("play_time_hours", round1(ticksToHours(s.playTimeTicks())));
+    private AdvSnapshot getAdvSnapshot(UUID uuid) {
+        String key = uuid.toString();
+        AdvCacheEntry cached = advCache.get(key);
 
-        long joins = isOnline ? s.leaveGame() + 1L : s.leaveGame();
-        stats.addProperty("joins", joins);
-        stats.addProperty("deaths", s.deaths());
+        AdvFileRef ref = findLatestAdvFile(uuid);
+        long mtime = ref == null ? 0L : ref.mtime();
 
-        JsonObject kills = new JsonObject();
-        kills.addProperty("players", s.playerKills());
-        kills.addProperty("mobs", s.mobKills());
-        stats.add("kills", kills);
+        if (cached != null && cached.mtime() == mtime) return cached.snapshot();
 
-        JsonObject damage = new JsonObject();
-        damage.addProperty("dealt", s.damageDealt());
-        damage.addProperty("taken", s.damageTaken());
-        stats.add("damage", damage);
-
-        long totalCm = s.walkCm() + s.flyCm() + s.swimCm() + s.sprintCm() + s.crouchCm() + s.climbCm() + s.fallCm()
-                + s.minecartCm() + s.boatCm() + s.pigCm() + s.horseCm() + s.striderCm();
-
-        JsonObject distance = new JsonObject();
-        distance.addProperty("total_km", toKilometers(totalCm));
-        distance.addProperty("walk_km", toKilometers(s.walkCm()));
-        distance.addProperty("fly_km", toKilometers(s.flyCm()));
-        distance.addProperty("swim_km", toKilometers(s.swimCm()));
-        stats.add("distance", distance);
-
-        JsonObject blocks = new JsonObject();
-        blocks.addProperty("mined_total", s.minedTotal());
-        stats.add("blocks", blocks);
-
-        JsonObject items = new JsonObject();
-        items.addProperty("used_total", s.usedTotal());
-        items.addProperty("crafted_total", s.craftedTotal());
-        items.addProperty("picked_up_total", s.pickedUpTotal());
-        items.addProperty("dropped_total", s.droppedTotal());
-        stats.add("items", items);
-
-        JsonObject fun = new JsonObject();
-        fun.addProperty("jumps", s.jumps());
-        fun.addProperty("animals_bred", s.animalsBred());
-        fun.addProperty("fish_caught", s.fishCaught());
-        fun.addProperty("villager_trades", s.villagerTrades());
-        fun.addProperty("enchantments", s.enchantments());
-        stats.add("fun", fun);
-
-        JsonObject top = new JsonObject();
-        top.add("mined", toTopArray(s.topMined()));
-        top.add("used", toTopArray(s.topUsed()));
-        stats.add("top", top);
-
-        stats.addProperty("favorite_mined", s.topMined().isEmpty() ? "" : s.topMined().get(0).getKey());
-        stats.addProperty("favorite_used", s.topUsed().isEmpty() ? "" : s.topUsed().get(0).getKey());
-        return stats;
+        AdvSnapshot snap = ref == null ? new AdvSnapshot(0L, 0L) : parseAdvFile(ref.path(), mtime);
+        advCache.put(key, new AdvCacheEntry(mtime, snap));
+        return snap;
     }
 
-    private JsonArray toTopArray(List<Map.Entry<String, Long>> entries) {
-        JsonArray array = new JsonArray();
-        int limit = Math.min(entries.size(), 5);
-        for (int i = 0; i < limit; i++) {
-            Map.Entry<String, Long> e = entries.get(i);
-            JsonObject o = new JsonObject();
-            o.addProperty("material", e.getKey());
-            o.addProperty("count", e.getValue());
-            array.add(o);
+    private AdvFileRef findLatestAdvFile(UUID uuid) {
+        String fn = uuid + ".json";
+        long best = 0L;
+        Path bestPath = null;
+
+        for (File folder : advancementsFolders) {
+            if (folder == null) continue;
+            try {
+                File f = new File(folder, fn);
+                if (!f.exists() || !f.isFile()) continue;
+                long lm = f.lastModified();
+                if (lm > best) { best = lm; bestPath = f.toPath(); }
+            } catch (Exception ignored) {}
         }
-        return array;
+        return bestPath == null ? null : new AdvFileRef(bestPath, best);
+    }
+
+    private AdvSnapshot parseAdvFile(Path path, long mtime) {
+        long done = 0L;
+        try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            JsonElement rootEl = JsonParser.parseReader(br);
+            if (rootEl == null || !rootEl.isJsonObject()) return new AdvSnapshot(mtime, 0L);
+            JsonObject root = rootEl.getAsJsonObject();
+            for (Map.Entry<String, JsonElement> e : root.entrySet()) {
+                String key = e.getKey();
+                if (isBlank(key)) continue;
+                String low = key.toLowerCase(Locale.ROOT);
+                if (low.startsWith("minecraft:recipes/") || low.contains(":recipes/")) continue;
+
+                JsonElement val = e.getValue();
+                if (val == null || !val.isJsonObject()) continue;
+                JsonObject o = val.getAsJsonObject();
+                if (!o.has("done") || o.get("done").isJsonNull()) continue;
+                boolean d;
+                try { d = o.get("done").getAsBoolean(); } catch (Exception ignored) { continue; }
+                if (d) done++;
+            }
+            return new AdvSnapshot(mtime, done);
+        } catch (Exception ignored) {
+            return new AdvSnapshot(mtime, 0L);
+        }
+    }
+
+    private JsonObject buildStatsJson(StatsSnapshot s, AdvSnapshot a, String minecraftUuid, boolean isOnline, boolean includeIps) {
+        long now = System.currentTimeMillis();
+
+        TimeState t = ensureTimeStateLoaded(minecraftUuid, now);
+        ExtraState ex = ensureExtraStateLoaded(minecraftUuid);
+
+        long lastSeenMs;
+        long activeTodayMs;
+        long activeWeekMs;
+        long activeMonthMs;
+        long afkTotalMs;
+
+        synchronized (t) {
+            lastSeenMs = t.lastSeenMs;
+            activeTodayMs = t.activeTodayMs;
+            activeWeekMs = t.activeWeekMs;
+            activeMonthMs = t.activeMonthMs;
+            afkTotalMs = t.afkTotalMs;
+        }
+
+        if (lastSeenMs <= 0 && s != null && s.mtime() > 0) lastSeenMs = s.mtime();
+
+        double hoursAgo = 0.0;
+        if (!isOnline && lastSeenMs > 0) {
+            long diff = Math.max(0L, now - lastSeenMs);
+            hoursAgo = round1(diff / 3600000.0);
+        }
+
+        JsonObject out = new JsonObject();
+
+        JsonObject time = new JsonObject();
+        time.addProperty("last_seen_hours_ago", hoursAgo);
+        time.add("total_played", hmFromTicks(s == null ? 0L : s.playTimeTicks()));
+        time.add("afk_time", hmFromMs(afkTotalMs));
+        time.add("played_today", hmFromMs(activeTodayMs));
+        time.add("played_week", hmFromMs(activeWeekMs));
+        time.add("played_month", hmFromMs(activeMonthMs));
+        out.add("time", time);
+
+        JsonObject player = new JsonObject();
+        player.addProperty("blocks_placed", s == null ? 0L : Math.max(0L, s.blocksPlaced()));
+        player.addProperty("blocks_broken", s == null ? 0L : Math.max(0L, s.blocksBroken()));
+
+        long walked = s == null ? 0L : cmToBlocks(s.walkCm() + s.sprintCm() + s.crouchCm() + s.climbCm());
+        long swum = s == null ? 0L : cmToBlocks(s.swimCm());
+        long flown = s == null ? 0L : cmToBlocks(s.flyCm());
+
+        JsonObject travel = new JsonObject();
+        travel.addProperty("walked", Math.max(0L, walked));
+        travel.addProperty("swum", Math.max(0L, swum));
+        travel.addProperty("flown", Math.max(0L, flown));
+        travel.addProperty("total", Math.max(0L, walked + swum + flown));
+        player.add("travel_blocks", travel);
+
+        player.addProperty("jumps", s == null ? 0L : Math.max(0L, s.jumps()));
+        player.addProperty("advancements", a == null ? 0L : Math.max(0L, a.completed()));
+        player.addProperty("kills_players", s == null ? 0L : Math.max(0L, s.playerKills()));
+        player.addProperty("deaths", s == null ? 0L : Math.max(0L, s.deaths()));
+        player.addProperty("kills_mobs", s == null ? 0L : Math.max(0L, s.mobKills()));
+
+        synchronized (ex) {
+            player.addProperty("slaps_received", Math.max(0L, ex.slapsReceived));
+            player.addProperty("slaps_sent", Math.max(0L, ex.slapsSent));
+        }
+
+        player.addProperty("items_crafted", s == null ? 0L : Math.max(0L, s.craftedTotal()));
+
+        if (includeIps) player.add("linked_ips", readLinkedIpsJson(minecraftUuid));
+        else player.addProperty("linked_ips", "not allowed");
+
+        out.add("player", player);
+        return out;
+    }
+
+    private JsonArray readLinkedIpsJson(String minecraftUuid) {
+        JsonArray arr = new JsonArray();
+        if (!hasDb() || isBlank(minecraftUuid)) return arr;
+
+        return withConn(null, arr, c -> {
+            JsonArray out = new JsonArray();
+            try (PreparedStatement ps = c.prepareStatement("SELECT ip,first_seen_ms,last_seen_ms,cnt FROM player_ips WHERE minecraft_uuid=? ORDER BY last_seen_ms DESC")) {
+                ps.setString(1, minecraftUuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        JsonObject o = new JsonObject();
+                        o.addProperty("ip", nz(rs.getString(1)));
+                        o.addProperty("first_seen_ms", Math.max(0L, rs.getLong(2)));
+                        o.addProperty("last_seen_ms", Math.max(0L, rs.getLong(3)));
+                        o.addProperty("count", Math.max(0L, rs.getLong(4)));
+                        out.add(o);
+                    }
+                }
+            }
+            return out;
+        });
+    }
+
+    private void recordPlayerIp(String minecraftUuid, String ip, long now) {
+        if (isBlank(minecraftUuid) || isBlank(ip)) return;
+        if (!hasDb()) return;
+
+        withConn(null, null, c -> {
+            int updated;
+            try (PreparedStatement ps = c.prepareStatement("UPDATE player_ips SET last_seen_ms=?, cnt=cnt+1 WHERE minecraft_uuid=? AND ip=?")) {
+                ps.setLong(1, now);
+                ps.setString(2, minecraftUuid);
+                ps.setString(3, ip);
+                updated = ps.executeUpdate();
+            }
+            if (updated <= 0) {
+                try (PreparedStatement ps = c.prepareStatement("INSERT INTO player_ips (minecraft_uuid,ip,first_seen_ms,last_seen_ms,cnt) VALUES (?,?,?,?,?)")) {
+                    ps.setString(1, minecraftUuid);
+                    ps.setString(2, ip);
+                    ps.setLong(3, now);
+                    ps.setLong(4, now);
+                    ps.setLong(5, 1L);
+                    ps.executeUpdate();
+                } catch (Exception ignored) {
+                    try (PreparedStatement ps = c.prepareStatement("UPDATE player_ips SET last_seen_ms=?, cnt=cnt+1 WHERE minecraft_uuid=? AND ip=?")) {
+                        ps.setLong(1, now);
+                        ps.setString(2, minecraftUuid);
+                        ps.setString(3, ip);
+                        ps.executeUpdate();
+                    }
+                }
+            }
+            return null;
+        });
+    }
+
+    private TimeState ensureTimeStateLoaded(String minecraftUuid, long now) {
+        TimeState cached = timeByUuid.get(minecraftUuid);
+        if (cached != null) return cached;
+
+        TimeState loaded = hasDb() ? readTimeStateFromDb(minecraftUuid) : null;
+        if (loaded == null) loaded = new TimeState();
+
+        synchronized (loaded) {
+            if (loaded.dayKey == 0) loaded.dayKey = dayKey(now);
+            if (loaded.weekKey == 0) loaded.weekKey = weekKey(now);
+            if (loaded.monthKey == 0) loaded.monthKey = monthKey(now);
+            if (loaded.updatedAtMs == 0L) loaded.updatedAtMs = now;
+        }
+
+        TimeState prev = timeByUuid.putIfAbsent(minecraftUuid, loaded);
+        return prev != null ? prev : loaded;
+    }
+
+    private TimeState readTimeStateFromDb(String minecraftUuid) {
+        if (!hasDb() || isBlank(minecraftUuid)) return null;
+        return withConn(null, null, c -> {
+            try (PreparedStatement ps = c.prepareStatement("SELECT last_join_ms,last_seen_ms,active_ms_total,afk_ms_total,active_ms_today,active_ms_week,active_ms_month,day_key,week_key,month_key,updated_at FROM player_time WHERE minecraft_uuid=? LIMIT 1")) {
+                ps.setString(1, minecraftUuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        TimeState st = new TimeState();
+                        return st;
+                    }
+                    TimeState st = new TimeState();
+                    st.lastJoinMs = Math.max(0L, rs.getLong(1));
+                    st.lastSeenMs = Math.max(0L, rs.getLong(2));
+                    st.activeTotalMs = Math.max(0L, rs.getLong(3));
+                    st.afkTotalMs = Math.max(0L, rs.getLong(4));
+                    st.activeTodayMs = Math.max(0L, rs.getLong(5));
+                    st.activeWeekMs = Math.max(0L, rs.getLong(6));
+                    st.activeMonthMs = Math.max(0L, rs.getLong(7));
+                    st.dayKey = Math.max(0, rs.getInt(8));
+                    st.weekKey = Math.max(0, rs.getInt(9));
+                    st.monthKey = Math.max(0, rs.getInt(10));
+                    st.updatedAtMs = Math.max(0L, rs.getLong(11));
+                    return st;
+                }
+            }
+        });
+    }
+
+    private void upsertTimeStateToDb(String minecraftUuid, TimeState st, long now) throws Exception {
+        if (!hasDb() || isBlank(minecraftUuid) || st == null) return;
+        try (PreparedStatement ps = pool.borrow().prepareStatement(
+                "MERGE INTO player_time (minecraft_uuid,last_join_ms,last_seen_ms,active_ms_total,afk_ms_total,active_ms_today,active_ms_week,active_ms_month,day_key,week_key,month_key,updated_at) " +
+                        "KEY(minecraft_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+        )) {
+            long lj, ls, at, afk, td, wk, mo;
+            int dk, wkKey, mk;
+            long upd;
+            synchronized (st) {
+                lj = st.lastJoinMs;
+                ls = st.lastSeenMs;
+                at = st.activeTotalMs;
+                afk = st.afkTotalMs;
+                td = st.activeTodayMs;
+                wk = st.activeWeekMs;
+                mo = st.activeMonthMs;
+                dk = st.dayKey;
+                wkKey = st.weekKey;
+                mk = st.monthKey;
+                upd = st.updatedAtMs;
+            }
+            ps.setString(1, minecraftUuid);
+            ps.setLong(2, Math.max(0L, lj));
+            ps.setLong(3, Math.max(0L, ls));
+            ps.setLong(4, Math.max(0L, at));
+            ps.setLong(5, Math.max(0L, afk));
+            ps.setLong(6, Math.max(0L, td));
+            ps.setLong(7, Math.max(0L, wk));
+            ps.setLong(8, Math.max(0L, mo));
+            ps.setInt(9, Math.max(0, dk));
+            ps.setInt(10, Math.max(0, wkKey));
+            ps.setInt(11, Math.max(0, mk));
+            ps.setLong(12, Math.max(0L, upd == 0L ? now : upd));
+            ps.executeUpdate();
+        }
+    }
+
+    private void trackOnlineTimeTick() {
+        long now = System.currentTimeMillis();
+        int dkNow = dayKey(now);
+        int wkNow = weekKey(now);
+        int mkNow = monthKey(now);
+
+        for (Player p : plugin.getServer().getOnlinePlayers()) {
+            String u = p.getUniqueId().toString();
+            long prev = onlineTickMs.getOrDefault(u, now);
+            long delta = now - prev;
+            if (delta < 0L) delta = 0L;
+            if (delta > 60000L) delta = 60000L;
+            onlineTickMs.put(u, now);
+
+            TimeState st = ensureTimeStateLoaded(u, now);
+
+            boolean afk = false;
+            try {
+                if (p.hasMetadata("afk") && !p.getMetadata("afk").isEmpty()) afk = p.getMetadata("afk").get(0).asBoolean();
+            } catch (Exception ignored) {}
+
+            synchronized (st) {
+                if (st.dayKey != dkNow) { st.dayKey = dkNow; st.activeTodayMs = 0L; }
+                if (st.weekKey != wkNow) { st.weekKey = wkNow; st.activeWeekMs = 0L; }
+                if (st.monthKey != mkNow) { st.monthKey = mkNow; st.activeMonthMs = 0L; }
+
+                if (afk) st.afkTotalMs += delta;
+                else {
+                    st.activeTotalMs += delta;
+                    st.activeTodayMs += delta;
+                    st.activeWeekMs += delta;
+                    st.activeMonthMs += delta;
+                }
+                st.updatedAtMs = now;
+            }
+
+            dirtyTimes.add(u);
+        }
+
+        updateSeasonPeakOnlineIfNeeded(safeOnlineCount());
+    }
+
+    private void flushDirtyTimeRows() {
+        if (!hasDb()) return;
+        if (!timeFlushRunning.compareAndSet(false, true)) return;
+        try {
+            if (dirtyTimes.isEmpty()) return;
+
+            ArrayList<String> ids = new ArrayList<>(dirtyTimes);
+            dirtyTimes.removeAll(ids);
+
+            Connection c = null;
+            try {
+                c = pool.borrow();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "MERGE INTO player_time (minecraft_uuid,last_join_ms,last_seen_ms,active_ms_total,afk_ms_total,active_ms_today,active_ms_week,active_ms_month,day_key,week_key,month_key,updated_at) " +
+                                "KEY(minecraft_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+                )) {
+                    int batch = 0;
+                    long now = System.currentTimeMillis();
+                    for (String u : ids) {
+                        TimeState st = timeByUuid.get(u);
+                        if (st == null) continue;
+
+                        long lj, ls, at, afk, td, wk, mo;
+                        int dk, wkKey, mk;
+                        long upd;
+
+                        synchronized (st) {
+                            lj = st.lastJoinMs;
+                            ls = st.lastSeenMs;
+                            at = st.activeTotalMs;
+                            afk = st.afkTotalMs;
+                            td = st.activeTodayMs;
+                            wk = st.activeWeekMs;
+                            mo = st.activeMonthMs;
+                            dk = st.dayKey;
+                            wkKey = st.weekKey;
+                            mk = st.monthKey;
+                            upd = st.updatedAtMs;
+                        }
+
+                        ps.setString(1, u);
+                        ps.setLong(2, Math.max(0L, lj));
+                        ps.setLong(3, Math.max(0L, ls));
+                        ps.setLong(4, Math.max(0L, at));
+                        ps.setLong(5, Math.max(0L, afk));
+                        ps.setLong(6, Math.max(0L, td));
+                        ps.setLong(7, Math.max(0L, wk));
+                        ps.setLong(8, Math.max(0L, mo));
+                        ps.setInt(9, Math.max(0, dk));
+                        ps.setInt(10, Math.max(0, wkKey));
+                        ps.setInt(11, Math.max(0, mk));
+                        ps.setLong(12, Math.max(0L, upd == 0L ? now : upd));
+                        ps.addBatch();
+
+                        if (++batch >= 500) { ps.executeBatch(); batch = 0; }
+                    }
+                    if (batch > 0) ps.executeBatch();
+                }
+            } finally {
+                pool.release(c);
+            }
+
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to flush time rows: " + e.getMessage());
+        } finally {
+            timeFlushRunning.set(false);
+        }
+    }
+
+    private ExtraState ensureExtraStateLoaded(String minecraftUuid) {
+        ExtraState cached = extraByUuid.get(minecraftUuid);
+        if (cached != null) return cached;
+
+        ExtraState loaded = hasDb() ? readExtraStateFromDb(minecraftUuid) : null;
+        if (loaded == null) loaded = new ExtraState();
+
+        ExtraState prev = extraByUuid.putIfAbsent(minecraftUuid, loaded);
+        return prev != null ? prev : loaded;
+    }
+
+    private ExtraState readExtraStateFromDb(String minecraftUuid) {
+        if (!hasDb() || isBlank(minecraftUuid)) return null;
+        return withConn(null, null, c -> {
+            try (PreparedStatement ps = c.prepareStatement("SELECT slaps_sent,slaps_received,updated_at FROM player_extra WHERE minecraft_uuid=? LIMIT 1")) {
+                ps.setString(1, minecraftUuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    ExtraState st = new ExtraState();
+                    if (!rs.next()) return st;
+                    st.slapsSent = Math.max(0L, rs.getLong(1));
+                    st.slapsReceived = Math.max(0L, rs.getLong(2));
+                    st.updatedAtMs = Math.max(0L, rs.getLong(3));
+                    return st;
+                }
+            }
+        });
+    }
+
+    public void addSlapSent(UUID uuid, long delta) {
+        if (uuid == null) return;
+        if (delta <= 0) return;
+        String u = uuid.toString();
+        ExtraState st = ensureExtraStateLoaded(u);
+        long now = System.currentTimeMillis();
+        synchronized (st) {
+            st.slapsSent = Math.max(0L, st.slapsSent + delta);
+            st.updatedAtMs = now;
+        }
+        dirtyExtra.add(u);
+    }
+
+    public void addSlapReceived(UUID uuid, long delta) {
+        if (uuid == null) return;
+        if (delta <= 0) return;
+        String u = uuid.toString();
+        ExtraState st = ensureExtraStateLoaded(u);
+        long now = System.currentTimeMillis();
+        synchronized (st) {
+            st.slapsReceived = Math.max(0L, st.slapsReceived + delta);
+            st.updatedAtMs = now;
+        }
+        dirtyExtra.add(u);
+    }
+
+    private void flushDirtyExtraRows() {
+        if (!hasDb()) return;
+        if (!extraFlushRunning.compareAndSet(false, true)) return;
+        try {
+            if (dirtyExtra.isEmpty()) return;
+
+            ArrayList<String> ids = new ArrayList<>(dirtyExtra);
+            dirtyExtra.removeAll(ids);
+
+            Connection c = null;
+            try {
+                c = pool.borrow();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "MERGE INTO player_extra (minecraft_uuid,slaps_sent,slaps_received,updated_at) KEY(minecraft_uuid) VALUES (?,?,?,?)"
+                )) {
+                    int batch = 0;
+                    long now = System.currentTimeMillis();
+                    for (String u : ids) {
+                        ExtraState st = extraByUuid.get(u);
+                        if (st == null) continue;
+
+                        long ss, sr, upd;
+                        synchronized (st) {
+                            ss = st.slapsSent;
+                            sr = st.slapsReceived;
+                            upd = st.updatedAtMs;
+                        }
+
+                        ps.setString(1, u);
+                        ps.setLong(2, Math.max(0L, ss));
+                        ps.setLong(3, Math.max(0L, sr));
+                        ps.setLong(4, Math.max(0L, upd == 0L ? now : upd));
+                        ps.addBatch();
+
+                        if (++batch >= 500) { ps.executeBatch(); batch = 0; }
+                    }
+                    if (batch > 0) ps.executeBatch();
+                }
+            } finally {
+                pool.release(c);
+            }
+
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to flush extra rows: " + e.getMessage());
+        } finally {
+            extraFlushRunning.set(false);
+        }
+    }
+
+    private JsonObject obj(JsonObject root, String key) {
+        if (root == null || key == null || !root.has(key) || !root.get(key).isJsonObject()) return null;
+        return root.getAsJsonObject(key);
     }
 
     private long getLong(JsonObject obj, String... keys) {
@@ -1465,6 +2143,29 @@ public class DatabaseManager {
         return sum;
     }
 
+    private long sumBlockValues(JsonObject usedObj) {
+        if (usedObj == null) return 0L;
+        long sum = 0L;
+        for (Map.Entry<String, JsonElement> e : usedObj.entrySet()) {
+            long v = asLong(e.getValue());
+            if (v <= 0) continue;
+
+            Material m = materialFromStatKey(e.getKey());
+            if (m != null && m.isBlock()) sum += v;
+        }
+        return sum;
+    }
+
+    private Material materialFromStatKey(String key) {
+        if (isBlank(key)) return null;
+        String k = stripNamespace(key);
+        if (k.isEmpty()) return null;
+        String up = k.toUpperCase(Locale.ROOT);
+        try { return Material.valueOf(up); } catch (Exception ignored) {}
+        try { return Material.matchMaterial(up); } catch (Exception ignored) {}
+        return null;
+    }
+
     private String stripNamespace(String key) {
         if (key == null) return "";
         int idx = key.indexOf(':');
@@ -1473,35 +2174,123 @@ public class DatabaseManager {
 
     private double ticksToHours(long ticks) { return ticks / 20.0 / 3600.0; }
     private double round1(double v) { return Math.round(v * 10.0) / 10.0; }
-    private double toKilometers(long cm) { return Math.round((cm / 100000.0) * 100.0) / 100.0; }
 
-    private JsonObject obj(JsonObject root, String key) {
-        if (root == null || key == null || !root.has(key) || !root.get(key).isJsonObject()) return null;
-        return root.getAsJsonObject(key);
+    private long cmToBlocks(long cm) {
+        if (cm <= 0) return 0L;
+        return cm / 100L;
     }
 
-    private static final class TopK {
-        private final int k;
-        private final PriorityQueue<Map.Entry<String, Long>> pq;
+    private JsonObject hmFromMs(long ms) {
+        long m = Math.max(0L, ms) / 60000L;
+        long h = m / 60L;
+        long mm = m % 60L;
+        JsonObject o = new JsonObject();
+        o.addProperty("hours", h);
+        o.addProperty("minutes", mm);
+        return o;
+    }
 
-        private TopK(int k) {
-            this.k = k;
-            this.pq = new PriorityQueue<>(Comparator.comparingLong(Map.Entry::getValue));
+    private JsonObject hmFromTicks(long ticks) {
+        long t = Math.max(0L, ticks);
+        long sec = t / 20L;
+        long m = sec / 60L;
+        long h = m / 60L;
+        long mm = m % 60L;
+        JsonObject o = new JsonObject();
+        o.addProperty("hours", h);
+        o.addProperty("minutes", mm);
+        return o;
+    }
+
+    private int dayKey(long ms) {
+        LocalDate d = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate();
+        return d.getYear() * 10000 + d.getMonthValue() * 100 + d.getDayOfMonth();
+    }
+
+    private int monthKey(long ms) {
+        LocalDate d = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate();
+        return d.getYear() * 100 + d.getMonthValue();
+    }
+
+    private int weekKey(long ms) {
+        LocalDate d = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate();
+        WeekFields wf = WeekFields.ISO;
+        int wy = d.get(wf.weekBasedYear());
+        int w = d.get(wf.weekOfWeekBasedYear());
+        return wy * 100 + w;
+    }
+
+    private void handleJoin(Player p) {
+        if (p == null) return;
+        String u = p.getUniqueId().toString();
+        long now = System.currentTimeMillis();
+        onlineTickMs.put(u, now);
+
+        TimeState st = ensureTimeStateLoaded(u, now);
+        synchronized (st) {
+            st.lastJoinMs = now;
+            st.updatedAtMs = now;
+            if (st.dayKey == 0) st.dayKey = dayKey(now);
+            if (st.weekKey == 0) st.weekKey = weekKey(now);
+            if (st.monthKey == 0) st.monthKey = monthKey(now);
+        }
+        dirtyTimes.add(u);
+
+        if (hasDb()) {
+            plugin.getFoliaLib().getScheduler().runAsync(t -> markSeasonJoin(u, now));
+        } else {
+            pendingSeasonJoins.add(u);
         }
 
-        private void add(String key, long value) {
-            if (value <= 0) return;
-            Map.Entry<String, Long> e = Map.entry(key, value);
-            if (pq.size() < k) { pq.offer(e); return; }
-            Map.Entry<String, Long> min = pq.peek();
-            if (min != null && value > min.getValue()) { pq.poll(); pq.offer(e); }
+        updateSeasonPeakOnlineIfNeeded(safeOnlineCount());
+    }
+
+    private void handleQuit(Player p) {
+        if (p == null) return;
+        String u = p.getUniqueId().toString();
+        long now = System.currentTimeMillis();
+
+        Long prev = onlineTickMs.get(u);
+        if (prev != null) {
+            long delta = now - prev;
+            if (delta < 0L) delta = 0L;
+            if (delta > 60000L) delta = 60000L;
+            TimeState st = ensureTimeStateLoaded(u, now);
+
+            boolean afk = false;
+            try {
+                if (p.hasMetadata("afk") && !p.getMetadata("afk").isEmpty()) afk = p.getMetadata("afk").get(0).asBoolean();
+            } catch (Exception ignored) {}
+
+            synchronized (st) {
+                if (afk) st.afkTotalMs += delta;
+                else {
+                    st.activeTotalMs += delta;
+                    st.activeTodayMs += delta;
+                    st.activeWeekMs += delta;
+                    st.activeMonthMs += delta;
+                }
+            }
         }
 
-        private List<Map.Entry<String, Long>> toSortedDesc() {
-            ArrayList<Map.Entry<String, Long>> list = new ArrayList<>(pq);
-            list.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
-            return list;
+        TimeState st = ensureTimeStateLoaded(u, now);
+        synchronized (st) {
+            st.lastSeenMs = now;
+            st.updatedAtMs = now;
         }
+        dirtyTimes.add(u);
+        onlineTickMs.remove(u);
+    }
+
+    private static String jsonError(String msg) { JsonObject o = new JsonObject(); o.addProperty("error", msg); return GSON.toJson(o); }
+
+    private static boolean isBlank(String s) { return s == null || s.isBlank(); }
+    private static String nz(String s) { return s == null ? "" : s; }
+    private static String nz(String s, String def) { return isBlank(s) ? def : s; }
+    private static String firstNonBlank(String... vals) {
+        if (vals == null) return "";
+        for (String v : vals) if (!isBlank(v)) return v;
+        return "";
     }
 
     private record AccountEntry(String discordId, String minecraftUuid) {}
@@ -1514,33 +2303,91 @@ public class DatabaseManager {
     private record StatsFileRef(Path path, long mtime) {}
     private record StatsCacheEntry(long mtime, StatsSnapshot snapshot) {}
     private record StatsSnapshot(
-            long mtime, long playTimeTicks, long leaveGame, long deaths, long playerKills, long mobKills,
-            long damageDealt, long damageTaken, long walkCm, long flyCm, long swimCm, long sprintCm,
-            long crouchCm, long climbCm, long fallCm, long minecartCm, long boatCm, long pigCm, long horseCm, long striderCm,
-            long jumps, long animalsBred, long fishCaught, long villagerTrades, long enchantments,
-            long minedTotal, long usedTotal, long craftedTotal, long pickedUpTotal, long droppedTotal,
-            List<Map.Entry<String, Long>> topMined, List<Map.Entry<String, Long>> topUsed
+            long mtime,
+            long playTimeTicks,
+            long deaths,
+            long playerKills,
+            long mobKills,
+            long walkCm,
+            long sprintCm,
+            long crouchCm,
+            long climbCm,
+            long swimCm,
+            long flyCm,
+            long jumps,
+            long blocksBroken,
+            long blocksPlaced,
+            long craftedTotal
     ) {
         static StatsSnapshot empty(long mtime) {
             return new StatsSnapshot(
                     mtime,
-                    0L, 0L, 0L, 0L, 0L, 0L, 0L,
-                    0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-                    0L, 0L, 0L, 0L, 0L,
-                    0L, 0L, 0L, 0L, 0L,
-                    List.of(), List.of()
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L
             );
         }
     }
 
-    private final class OnlineListener implements Listener {
-        @EventHandler public void onJoin(PlayerJoinEvent e) { handleOnlineChange(e.getPlayer().getUniqueId().toString(), true); }
-        @EventHandler public void onQuit(PlayerQuitEvent e) { handleOnlineChange(e.getPlayer().getUniqueId().toString(), false); }
-    }
+    private record AdvFileRef(Path path, long mtime) {}
+    private record AdvCacheEntry(long mtime, AdvSnapshot snapshot) {}
+    private record AdvSnapshot(long mtime, long completed) {}
 
     private record TicketInfo(String moderatorId, String ticketId, JsonObject ticket, String timeKey) {}
     private record FlexData(long bank, String color, List<String> subscription, String command) {
         static FlexData empty() { return new FlexData(0L, "", List.of(), ""); }
+    }
+
+    private static final class TimeState {
+        long lastJoinMs;
+        long lastSeenMs;
+        long activeTotalMs;
+        long afkTotalMs;
+        long activeTodayMs;
+        long activeWeekMs;
+        long activeMonthMs;
+        int dayKey;
+        int weekKey;
+        int monthKey;
+        long updatedAtMs;
+    }
+
+    private static final class ExtraState {
+        long slapsSent;
+        long slapsReceived;
+        long updatedAtMs;
+    }
+
+    private final class OnlineListener implements Listener {
+        @EventHandler public void onLogin(PlayerLoginEvent e) {
+            try {
+                String u = e.getPlayer() == null ? null : e.getPlayer().getUniqueId().toString();
+                String ip = e.getAddress() == null ? null : e.getAddress().getHostAddress();
+                long now = System.currentTimeMillis();
+                if (!isBlank(u) && !isBlank(ip) && hasDb()) plugin.getFoliaLib().getScheduler().runAsync(t -> recordPlayerIp(u, ip, now));
+            } catch (Exception ignored) {}
+        }
+
+        @EventHandler public void onJoin(PlayerJoinEvent e) {
+            try { handleOnlineChange(e.getPlayer().getUniqueId().toString(), true); } catch (Exception ignored) {}
+            try { handleJoin(e.getPlayer()); } catch (Exception ignored) {}
+        }
+
+        @EventHandler public void onQuit(PlayerQuitEvent e) {
+            try { handleQuit(e.getPlayer()); } catch (Exception ignored) {}
+            try { handleOnlineChange(e.getPlayer().getUniqueId().toString(), false); } catch (Exception ignored) {}
+        }
     }
 
     private record IpRule(int network, int maskBits, int mask) {
@@ -1681,14 +2528,4 @@ public class DatabaseManager {
 
         private void closeQuietly(Connection c) { try { c.close(); } catch (Exception ignored) {} }
     }
-
-    private static boolean isBlank(String s) { return s == null || s.isBlank(); }
-    private static String nz(String s) { return s == null ? "" : s; }
-    private static String nz(String s, String def) { return isBlank(s) ? def : s; }
-    private static String firstNonBlank(String... vals) {
-        if (vals == null) return "";
-        for (String v : vals) if (!isBlank(v)) return v;
-        return "";
-    }
-    private static String jsonError(String msg) { JsonObject o = new JsonObject(); o.addProperty("error", msg); return GSON.toJson(o); }
 }

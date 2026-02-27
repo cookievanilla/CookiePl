@@ -1,6 +1,7 @@
 package com.leir4iks.cookiepl.modules.slap;
 
 import com.leir4iks.cookiepl.CookiePl;
+import com.leir4iks.cookiepl.modules.web.DatabaseManager;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.ChatColor;
@@ -73,6 +74,12 @@ public class SlapListener implements Listener {
 
         Particle.DustOptions dustOptions = new Particle.DustOptions(Color.fromRGB(255, 153, 0), 1.0f);
         victim.getWorld().spawnParticle(Particle.DUST, victim.getLocation().add(0, 1, 0), 20, 0.4, 0.4, 0.4, 0, dustOptions);
+
+        DatabaseManager db = plugin.getWebDatabaseManager();
+        if (db != null) {
+            db.addSlapSent(slapper.getUniqueId(), 1L);
+            db.addSlapReceived(victim.getUniqueId(), 1L);
+        }
 
         if (ThreadLocalRandom.current().nextDouble(100.0) < patChance) {
             sendTemporaryActionBar(slapper, msgPatSender.replace("{player}", victim.getName()));
