@@ -1785,35 +1785,60 @@ public class DatabaseManager {
 
         return withConn(null, out, c -> {
             JsonObject result = new JsonObject();
-            String sql =
-                    "SELECT p.ip, p.first_seen_ms, p.last_seen_ms, p.cnt, " +
-                            "       COALESCE(LISTAGG(pl.minecraft_name, ', ') WITHIN GROUP (ORDER BY LOWER(pl.minecraft_name)), '') AS players " +
-                            "FROM player_ips p " +
-                            "LEFT JOIN player_ips p2 ON p2.ip = p.ip AND p2.minecraft_uuid <> p.minecraft_uuid " +
-                            "LEFT JOIN players pl ON pl.minecraft_uuid = p2.minecraft_uuid " +
-                            "WHERE p.minecraft_uuid=? " +
-                            "GROUP BY p.ip, p.first_seen_ms, p.last_seen_ms, p.cnt " +
-                            "ORDER BY p.last_seen_ms DESC, p.ip ASC";
+            ArrayList<IpEntry> ownIps = new ArrayList<>();
 
-            try (PreparedStatement ps = c.prepareStatement(sql)) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT ip, first_seen_ms, last_seen_ms, cnt " +
+                            "FROM player_ips WHERE minecraft_uuid=? " +
+                            "ORDER BY last_seen_ms DESC, ip ASC")) {
                 ps.setString(1, minecraftUuid);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         String ip = normalizeIp(rs.getString(1));
                         if (isBlank(ip)) continue;
-
-                        JsonObject ipObj = new JsonObject();
-                        String players = normalizePlayersCsv(rs.getString(5));
-                        if (players == null) ipObj.add("players", JsonNull.INSTANCE);
-                        else ipObj.addProperty("players", players);
-
-                        ipObj.addProperty("first_seen_ms", Math.max(0L, rs.getLong(2)));
-                        ipObj.addProperty("last_seen_ms", Math.max(0L, rs.getLong(3)));
-                        ipObj.addProperty("count", Math.max(0L, rs.getLong(4)));
-                        result.add(ip, ipObj);
+                        ownIps.add(new IpEntry(
+                                ip,
+                                Math.max(0L, rs.getLong(2)),
+                                Math.max(0L, rs.getLong(3)),
+                                Math.max(0L, rs.getLong(4))
+                        ));
                     }
                 }
             }
+
+            for (IpEntry entry : ownIps) {
+                LinkedHashSet<String> otherPlayers = new LinkedHashSet<>();
+
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT DISTINCT p.minecraft_uuid, COALESCE(pl.minecraft_name, '') " +
+                                "FROM player_ips p " +
+                                "LEFT JOIN players pl ON pl.minecraft_uuid = p.minecraft_uuid " +
+                                "WHERE p.ip=? AND p.minecraft_uuid<>?")) {
+                    ps.setString(1, entry.ip());
+                    ps.setString(2, minecraftUuid);
+
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String otherUuid = nz(rs.getString(1));
+                            String otherName = nz(rs.getString(2)).trim();
+
+                            if (isBlank(otherName)) otherName = resolveFallbackMinecraftNameByUuid(otherUuid);
+                            if (!isBlank(otherName)) otherPlayers.add(otherName);
+                        }
+                    }
+                }
+
+                JsonObject ipObj = new JsonObject();
+                if (otherPlayers.isEmpty()) ipObj.add("players", JsonNull.INSTANCE);
+                else ipObj.addProperty("players", String.join(", ", otherPlayers));
+
+                ipObj.addProperty("first_seen_ms", entry.firstSeenMs());
+                ipObj.addProperty("last_seen_ms", entry.lastSeenMs());
+                ipObj.addProperty("count", entry.count());
+
+                result.add(entry.ip(), ipObj);
+            }
+
             return result;
         });
     }
@@ -1829,17 +1854,19 @@ public class DatabaseManager {
                             "FROM player_ips p " +
                             "LEFT JOIN players pl ON pl.minecraft_uuid = p.minecraft_uuid " +
                             "WHERE p.ip=? " +
-                            "ORDER BY LOWER(COALESCE(pl.minecraft_name, '')), p.minecraft_uuid";
+                            "ORDER BY p.last_seen_ms DESC, p.minecraft_uuid";
 
             try (PreparedStatement ps = c.prepareStatement(sql)) {
                 ps.setString(1, ip);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         JsonObject o = new JsonObject();
-                        String name = nz(rs.getString(1));
-                        String uuid = nz(rs.getString(2));
 
-                        o.addProperty("minecraft_name", name);
+                        String name = nz(rs.getString(1)).trim();
+                        String uuid = nz(rs.getString(2)).trim();
+                        if (isBlank(name)) name = resolveFallbackMinecraftNameByUuid(uuid);
+
+                        o.addProperty("minecraft_name", nz(name));
                         o.addProperty("minecraft_uuid", uuid);
                         o.addProperty("first_seen_ms", Math.max(0L, rs.getLong(3)));
                         o.addProperty("last_seen_ms", Math.max(0L, rs.getLong(4)));
@@ -1890,28 +1917,28 @@ public class DatabaseManager {
     private void importLegacyIpsFromDumpIfNeeded() {
         if (!hasDb()) return;
 
-        String done = nz(readMeta("legacy_dump_import_done")).trim();
-        if ("1".equals(done)) return;
-
         File dumpFile = new File(plugin.getDataFolder(), "dump.sql");
-        if (!dumpFile.isFile()) {
-            writeMeta("legacy_dump_import_done", "1", System.currentTimeMillis());
-            return;
-        }
+        if (!dumpFile.isFile()) return;
+
+        String sig = dumpFile.lastModified() + ":" + dumpFile.length();
+        String oldSig = nz(readMeta("legacy_dump_import_sig")).trim();
+        if (sig.equals(oldSig)) return;
 
         try {
             String text = Files.readString(dumpFile.toPath(), StandardCharsets.UTF_8);
             if (isBlank(text)) {
-                writeMeta("legacy_dump_import_done", "1", System.currentTimeMillis());
+                writeMeta("legacy_dump_import_sig", sig, System.currentTimeMillis());
                 return;
             }
 
             List<AccountEntry> accounts = loadAccountsIfChanged();
+            Map<String, String> userCache = loadUserCacheIfChanged();
+
             Map<String, String> nickToUuid = new HashMap<>();
             for (AccountEntry ae : accounts) {
                 String did = ae.discordId();
                 String uuid = ae.minecraftUuid();
-                String name = resolveMinecraftName(did, uuid, loadUserCacheIfChanged());
+                String name = resolveMinecraftName(did, uuid, userCache);
                 if (!isBlank(name) && !isBlank(uuid)) nickToUuid.put(name.toLowerCase(Locale.ROOT), uuid);
             }
 
@@ -1930,10 +1957,16 @@ public class DatabaseManager {
                     row.put(cols.get(i).trim().toUpperCase(Locale.ROOT), sqlUnquote(vals.get(i)));
                 }
 
-                String nickname = nz(row.get("NICKNAME")).trim();
-                if (nickname.isEmpty()) continue;
+                String minecraftUuid = normalizeImportedDumpUuid(firstNonBlank(
+                        row.get("UUID"),
+                        row.get("PREMIUMUUID")
+                ));
 
-                String minecraftUuid = nickToUuid.get(nickname.toLowerCase(Locale.ROOT));
+                if (isBlank(minecraftUuid)) {
+                    String nickname = firstNonBlank(row.get("NICKNAME"), row.get("LOWERCASENICKNAME"));
+                    if (!isBlank(nickname)) minecraftUuid = nickToUuid.get(nickname.toLowerCase(Locale.ROOT));
+                }
+
                 if (isBlank(minecraftUuid)) continue;
 
                 String regIp = normalizeIp(row.get("IP"));
@@ -1950,35 +1983,45 @@ public class DatabaseManager {
                     upsertImportedIp(minecraftUuid, regIp, baseFirst, Math.max(baseFirst, baseLast), 1L);
                     imported++;
                 }
+
                 if (!isBlank(loginIp)) {
-                    long first = regIp != null && regIp.equals(loginIp) ? baseFirst : firstPositive(loginDate, regDate, issuedTime, System.currentTimeMillis());
-                    long last = firstPositive(loginDate, regDate, issuedTime, first);
-                    upsertImportedIp(minecraftUuid, loginIp, first, Math.max(first, last), regIp != null && regIp.equals(loginIp) ? 0L : 1L);
+                    if (loginIp.equals(regIp)) {
+                        upsertImportedIp(minecraftUuid, loginIp, baseFirst, Math.max(baseFirst, baseLast), 2L);
+                    } else {
+                        long first = firstPositive(loginDate, regDate, issuedTime, System.currentTimeMillis());
+                        long last = firstPositive(loginDate, regDate, issuedTime, first);
+                        upsertImportedIp(minecraftUuid, loginIp, first, Math.max(first, last), 1L);
+                    }
                     imported++;
                 }
             }
 
-            writeMeta("legacy_dump_import_done", "1", System.currentTimeMillis());
+            long now = System.currentTimeMillis();
+            writeMeta("legacy_dump_import_sig", sig, now);
+            writeMeta("legacy_dump_import_done", "1", now);
+
             plugin.getLogManager().info("Legacy IP import finished, processed entries: " + imported);
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to import dump.sql IPs: " + e.getMessage());
         }
     }
 
-    private void upsertImportedIp(String minecraftUuid, String ip, long firstSeenMs, long lastSeenMs, long extraCount) {
+    private void upsertImportedIp(String minecraftUuid, String ip, long firstSeenMs, long lastSeenMs, long count) {
         String normIp = normalizeIp(ip);
         if (!hasDb() || isBlank(minecraftUuid) || isBlank(normIp)) return;
 
         long first = Math.max(0L, firstSeenMs);
         long last = Math.max(first, lastSeenMs);
-        long cnt = Math.max(1L, extraCount <= 0L ? 1L : extraCount);
+        long cnt = Math.max(1L, count);
 
         withConn(null, null, c -> {
             int updated;
             try (PreparedStatement ps = c.prepareStatement(
-                    "UPDATE player_ips SET first_seen_ms=CASE WHEN first_seen_ms<=0 THEN ? ELSE LEAST(first_seen_ms, ?) END, " +
-                            "last_seen_ms=GREATEST(last_seen_ms, ?), cnt=GREATEST(cnt, ?) WHERE minecraft_uuid=? AND ip=?"
-            )) {
+                    "UPDATE player_ips " +
+                            "SET first_seen_ms=CASE WHEN first_seen_ms<=0 THEN ? ELSE LEAST(first_seen_ms, ?) END, " +
+                            "    last_seen_ms=GREATEST(last_seen_ms, ?), " +
+                            "    cnt=GREATEST(cnt, ?) " +
+                            "WHERE minecraft_uuid=? AND ip=?")) {
                 ps.setLong(1, first);
                 ps.setLong(2, first);
                 ps.setLong(3, last);
@@ -1989,7 +2032,8 @@ public class DatabaseManager {
             }
 
             if (updated <= 0) {
-                try (PreparedStatement ps = c.prepareStatement("INSERT INTO player_ips (minecraft_uuid,ip,first_seen_ms,last_seen_ms,cnt) VALUES (?,?,?,?,?)")) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "INSERT INTO player_ips (minecraft_uuid,ip,first_seen_ms,last_seen_ms,cnt) VALUES (?,?,?,?,?)")) {
                     ps.setString(1, minecraftUuid);
                     ps.setString(2, normIp);
                     ps.setLong(3, first);
@@ -1998,9 +2042,11 @@ public class DatabaseManager {
                     ps.executeUpdate();
                 } catch (Exception ignored) {
                     try (PreparedStatement ps = c.prepareStatement(
-                            "UPDATE player_ips SET first_seen_ms=CASE WHEN first_seen_ms<=0 THEN ? ELSE LEAST(first_seen_ms, ?) END, " +
-                                    "last_seen_ms=GREATEST(last_seen_ms, ?), cnt=GREATEST(cnt, ?) WHERE minecraft_uuid=? AND ip=?"
-                    )) {
+                            "UPDATE player_ips " +
+                                    "SET first_seen_ms=CASE WHEN first_seen_ms<=0 THEN ? ELSE LEAST(first_seen_ms, ?) END, " +
+                                    "    last_seen_ms=GREATEST(last_seen_ms, ?), " +
+                                    "    cnt=GREATEST(cnt, ?) " +
+                                    "WHERE minecraft_uuid=? AND ip=?")) {
                         ps.setLong(1, first);
                         ps.setLong(2, first);
                         ps.setLong(3, last);
@@ -2013,6 +2059,56 @@ public class DatabaseManager {
             }
             return null;
         });
+    }
+
+    private String resolveFallbackMinecraftNameByUuid(String minecraftUuid) {
+        if (isBlank(minecraftUuid)) return "";
+
+        Map<String, String> userCache = loadUserCacheIfChanged();
+
+        String direct = userCache.get(minecraftUuid);
+        if (!isBlank(direct)) return direct;
+
+        List<AccountEntry> accounts = loadAccountsIfChanged();
+        for (AccountEntry entry : accounts) {
+            if (entry == null || isBlank(entry.minecraftUuid())) continue;
+            if (minecraftUuid.equalsIgnoreCase(entry.minecraftUuid())) {
+                return resolveMinecraftName(entry.discordId(), entry.minecraftUuid(), userCache);
+            }
+        }
+
+        return "";
+    }
+
+    private String normalizeImportedDumpUuid(String raw) {
+        String t = nz(raw).trim();
+        if (t.isEmpty()) return null;
+
+        try {
+            return UUID.fromString(t).toString();
+        } catch (Exception ignored) {}
+
+        String hex = t.replace("-", "").trim();
+        if (hex.length() != 32) return null;
+
+        for (int i = 0; i < hex.length(); i++) {
+            char ch = Character.toLowerCase(hex.charAt(i));
+            boolean ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+            if (!ok) return null;
+        }
+
+        String dashed =
+                hex.substring(0, 8) + "-" +
+                        hex.substring(8, 12) + "-" +
+                        hex.substring(12, 16) + "-" +
+                        hex.substring(16, 20) + "-" +
+                        hex.substring(20, 32);
+
+        try {
+            return UUID.fromString(dashed).toString();
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private List<String> splitSqlCsv(String src) {
@@ -2653,6 +2749,8 @@ public class DatabaseManager {
     private record FlexData(long bank, String color, List<String> subscription, String command) {
         static FlexData empty() { return new FlexData(0L, "", List.of(), ""); }
     }
+
+    private record IpEntry(String ip, long firstSeenMs, long lastSeenMs, long count) {}
 
     private static final class TimeState {
         long lastJoinMs;
