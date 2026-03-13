@@ -41,6 +41,7 @@ public class WebServerManager {
         try {
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/players", this::handlePlayers);
+            server.createContext("/ip", this::handleIpLookup);
             server.createContext("/serverinfo", this::handleServerInfo);
             server.createContext("/serverstats", this::handleServerStats);
             server.createContext("/admin/players", this::handleAdminPlayers);
@@ -112,7 +113,10 @@ public class WebServerManager {
 
         if (path.startsWith("/players/")) {
             String id = path.substring("/players/".length()).trim();
-            if (id.isEmpty()) { send(ex, 200, db.getPlayersSummaryJson()); return; }
+            if (id.isEmpty()) {
+                send(ex, 200, db.getPlayersSummaryJson());
+                return;
+            }
 
             String ip = clientIp(ex);
             String body = db.getPlayerJsonById(id, ip);
@@ -121,6 +125,41 @@ public class WebServerManager {
         }
 
         send(ex, 200, db.getPlayersSummaryJson());
+    }
+
+    private void handleIpLookup(HttpExchange ex) throws IOException {
+        if (preflight(ex)) return;
+
+        String path = ex.getRequestURI().getPath();
+        if (path.equals("/ip") || path.equals("/ip/")) {
+            send(ex, 400, "{\"error\":\"Bad request\"}");
+            return;
+        }
+
+        if (!path.startsWith("/ip/")) {
+            send(ex, 400, "{\"error\":\"Bad request\"}");
+            return;
+        }
+
+        String ipQuery = path.substring("/ip/".length()).trim();
+        if (ipQuery.isEmpty()) {
+            send(ex, 400, "{\"error\":\"Bad request\"}");
+            return;
+        }
+
+        String remoteIp = clientIp(ex);
+        String body = db.getPlayersByIpJson(ipQuery, remoteIp);
+
+        if (body.contains("\"error\":\"Forbidden\"")) {
+            send(ex, 403, body);
+            return;
+        }
+        if (body.contains("\"error\":\"Invalid IP\"")) {
+            send(ex, 400, body);
+            return;
+        }
+
+        send(ex, 200, body);
     }
 
     private void handleAdminPlayers(HttpExchange ex) throws IOException {
@@ -134,7 +173,10 @@ public class WebServerManager {
         }
 
         String query = path.substring(base.length()).trim();
-        if (query.isEmpty()) { send(ex, 400, "{\"error\":\"Bad request\"}"); return; }
+        if (query.isEmpty()) {
+            send(ex, 400, "{\"error\":\"Bad request\"}");
+            return;
+        }
 
         String method = ex.getRequestMethod();
         if ("GET".equalsIgnoreCase(method)) {
@@ -144,9 +186,15 @@ public class WebServerManager {
         }
 
         if ("POST".equalsIgnoreCase(method)) {
-            if (adminToken == null || adminToken.isBlank()) { send(ex, 500, "{\"error\":\"Admin token is not configured\"}"); return; }
+            if (adminToken == null || adminToken.isBlank()) {
+                send(ex, 500, "{\"error\":\"Admin token is not configured\"}");
+                return;
+            }
             String token = ex.getRequestHeaders().getFirst("token");
-            if (token == null || !token.equals(adminToken)) { send(ex, 401, "{\"error\":\"Unauthorized\"}"); return; }
+            if (token == null || !token.equals(adminToken)) {
+                send(ex, 401, "{\"error\":\"Unauthorized\"}");
+                return;
+            }
 
             String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             DatabaseManager.AdminResponse r = db.adminPostFlex(query, body);
@@ -198,6 +246,8 @@ public class WebServerManager {
         byte[] bytes = (json == null ? "" : json).getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(code, bytes.length);
-        try (OutputStream os = ex.getResponseBody()) { os.write(bytes); }
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 }

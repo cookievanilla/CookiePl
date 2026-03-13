@@ -26,6 +26,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.StringReader;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -42,6 +43,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class DatabaseManager {
     private static final String SKINS_DATABASE_URL = "http://212.80.7.214:20945/skins";
@@ -49,6 +52,11 @@ public class DatabaseManager {
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+
+    private static final Pattern AUTH_INSERT_PATTERN = Pattern.compile(
+            "INSERT\\s+INTO\\s+AUTH\\s*\\((.*?)\\)\\s*VALUES\\s*\\((.*?)\\)\\s*;",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
 
     private final CookiePl plugin;
     private final File discordSrvFolder, userCacheFile, dataFile;
@@ -145,6 +153,7 @@ public class DatabaseManager {
         plugin.getFoliaLib().getScheduler().runAsync(t -> {
             initH2();
             liteBansBridge.warmup();
+            importLegacyIpsFromDumpIfNeeded();
             updateExternalNameData();
             updateWhitelistData();
             updateExternalStatsData();
@@ -295,8 +304,8 @@ public class DatabaseManager {
                             "cnt BIGINT NOT NULL DEFAULT 0," +
                             "PRIMARY KEY(minecraft_uuid, ip)" +
                             ")");
-
                     try { st.execute("CREATE INDEX idx_player_ips_uuid ON player_ips (minecraft_uuid)"); } catch (Exception ignored) {}
+                    try { st.execute("CREATE INDEX idx_player_ips_ip ON player_ips (ip)"); } catch (Exception ignored) {}
 
                     st.execute("CREATE TABLE IF NOT EXISTS season_players (" +
                             "season_id VARCHAR(64) NOT NULL," +
@@ -693,8 +702,9 @@ public class DatabaseManager {
     }
 
     private boolean isIpAllowed(String ip) {
-        if (isBlank(ip)) return false;
-        int v = IpRule.ipv4ToInt(ip.trim());
+        String norm = normalizeIp(ip);
+        if (isBlank(norm)) return false;
+        int v = IpRule.ipv4ToInt(norm);
         if (v == -1) return false;
         List<IpRule> rules = whitelistRules;
         if (rules == null || rules.isEmpty()) return false;
@@ -910,6 +920,17 @@ public class DatabaseManager {
         } catch (Exception ignored) {
             return baseJson;
         }
+    }
+
+    public String getPlayersByIpJson(String ip, String remoteIp) {
+        if (!isIpAllowed(remoteIp)) return "{\"error\":\"Forbidden\"}";
+        String normIp = normalizeIp(ip);
+        if (isBlank(normIp)) return "{\"error\":\"Invalid IP\"}";
+
+        JsonObject out = new JsonObject();
+        out.addProperty("ip", normIp);
+        out.add("players", readPlayersByIpJson(normIp));
+        return GSON.toJson(out);
     }
 
     private JsonObject buildTicketsJson(String discordId) {
@@ -1758,21 +1779,71 @@ public class DatabaseManager {
         return out;
     }
 
-    private JsonArray readLinkedIpsJson(String minecraftUuid) {
-        JsonArray arr = new JsonArray();
-        if (!hasDb() || isBlank(minecraftUuid)) return arr;
+    private JsonObject readLinkedIpsJson(String minecraftUuid) {
+        JsonObject out = new JsonObject();
+        if (!hasDb() || isBlank(minecraftUuid)) return out;
 
-        return withConn(null, arr, c -> {
-            JsonArray out = new JsonArray();
-            try (PreparedStatement ps = c.prepareStatement("SELECT ip,first_seen_ms,last_seen_ms,cnt FROM player_ips WHERE minecraft_uuid=? ORDER BY last_seen_ms DESC")) {
+        return withConn(null, out, c -> {
+            JsonObject result = new JsonObject();
+            String sql =
+                    "SELECT p.ip, p.first_seen_ms, p.last_seen_ms, p.cnt, " +
+                            "       COALESCE(LISTAGG(pl.minecraft_name, ', ') WITHIN GROUP (ORDER BY LOWER(pl.minecraft_name)), '') AS players " +
+                            "FROM player_ips p " +
+                            "LEFT JOIN player_ips p2 ON p2.ip = p.ip AND p2.minecraft_uuid <> p.minecraft_uuid " +
+                            "LEFT JOIN players pl ON pl.minecraft_uuid = p2.minecraft_uuid " +
+                            "WHERE p.minecraft_uuid=? " +
+                            "GROUP BY p.ip, p.first_seen_ms, p.last_seen_ms, p.cnt " +
+                            "ORDER BY p.last_seen_ms DESC, p.ip ASC";
+
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
                 ps.setString(1, minecraftUuid);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
+                        String ip = normalizeIp(rs.getString(1));
+                        if (isBlank(ip)) continue;
+
+                        JsonObject ipObj = new JsonObject();
+                        String players = normalizePlayersCsv(rs.getString(5));
+                        if (players == null) ipObj.add("players", JsonNull.INSTANCE);
+                        else ipObj.addProperty("players", players);
+
+                        ipObj.addProperty("first_seen_ms", Math.max(0L, rs.getLong(2)));
+                        ipObj.addProperty("last_seen_ms", Math.max(0L, rs.getLong(3)));
+                        ipObj.addProperty("count", Math.max(0L, rs.getLong(4)));
+                        result.add(ip, ipObj);
+                    }
+                }
+            }
+            return result;
+        });
+    }
+
+    private JsonArray readPlayersByIpJson(String ip) {
+        JsonArray arr = new JsonArray();
+        if (!hasDb() || isBlank(ip)) return arr;
+
+        return withConn(null, arr, c -> {
+            JsonArray out = new JsonArray();
+            String sql =
+                    "SELECT COALESCE(pl.minecraft_name, ''), p.minecraft_uuid, p.first_seen_ms, p.last_seen_ms, p.cnt " +
+                            "FROM player_ips p " +
+                            "LEFT JOIN players pl ON pl.minecraft_uuid = p.minecraft_uuid " +
+                            "WHERE p.ip=? " +
+                            "ORDER BY LOWER(COALESCE(pl.minecraft_name, '')), p.minecraft_uuid";
+
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, ip);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
                         JsonObject o = new JsonObject();
-                        o.addProperty("ip", nz(rs.getString(1)));
-                        o.addProperty("first_seen_ms", Math.max(0L, rs.getLong(2)));
-                        o.addProperty("last_seen_ms", Math.max(0L, rs.getLong(3)));
-                        o.addProperty("count", Math.max(0L, rs.getLong(4)));
+                        String name = nz(rs.getString(1));
+                        String uuid = nz(rs.getString(2));
+
+                        o.addProperty("minecraft_name", name);
+                        o.addProperty("minecraft_uuid", uuid);
+                        o.addProperty("first_seen_ms", Math.max(0L, rs.getLong(3)));
+                        o.addProperty("last_seen_ms", Math.max(0L, rs.getLong(4)));
+                        o.addProperty("count", Math.max(0L, rs.getLong(5)));
                         out.add(o);
                     }
                 }
@@ -1782,7 +1853,8 @@ public class DatabaseManager {
     }
 
     private void recordPlayerIp(String minecraftUuid, String ip, long now) {
-        if (isBlank(minecraftUuid) || isBlank(ip)) return;
+        String normIp = normalizeIp(ip);
+        if (isBlank(minecraftUuid) || isBlank(normIp)) return;
         if (!hasDb()) return;
 
         withConn(null, null, c -> {
@@ -1790,28 +1862,255 @@ public class DatabaseManager {
             try (PreparedStatement ps = c.prepareStatement("UPDATE player_ips SET last_seen_ms=?, cnt=cnt+1 WHERE minecraft_uuid=? AND ip=?")) {
                 ps.setLong(1, now);
                 ps.setString(2, minecraftUuid);
-                ps.setString(3, ip);
+                ps.setString(3, normIp);
                 updated = ps.executeUpdate();
             }
             if (updated <= 0) {
                 try (PreparedStatement ps = c.prepareStatement("INSERT INTO player_ips (minecraft_uuid,ip,first_seen_ms,last_seen_ms,cnt) VALUES (?,?,?,?,?)")) {
                     ps.setString(1, minecraftUuid);
-                    ps.setString(2, ip);
+                    ps.setString(2, normIp);
                     ps.setLong(3, now);
                     ps.setLong(4, now);
                     ps.setLong(5, 1L);
                     ps.executeUpdate();
                 } catch (Exception ignored) {
-                    try (PreparedStatement ps = c.prepareStatement("UPDATE player_ips SET last_seen_ms=?, cnt=cnt+1 WHERE minecraft_uuid=? AND ip=?")) {
+                    try (PreparedStatement ps = c.prepareStatement("UPDATE player_ips SET first_seen_ms=LEAST(first_seen_ms, ?), last_seen_ms=GREATEST(last_seen_ms, ?), cnt=cnt+1 WHERE minecraft_uuid=? AND ip=?")) {
                         ps.setLong(1, now);
-                        ps.setString(2, minecraftUuid);
-                        ps.setString(3, ip);
+                        ps.setLong(2, now);
+                        ps.setString(3, minecraftUuid);
+                        ps.setString(4, normIp);
                         ps.executeUpdate();
                     }
                 }
             }
             return null;
         });
+    }
+
+    private void importLegacyIpsFromDumpIfNeeded() {
+        if (!hasDb()) return;
+
+        String done = nz(readMeta("legacy_dump_import_done")).trim();
+        if ("1".equals(done)) return;
+
+        File dumpFile = new File(plugin.getDataFolder(), "dump.sql");
+        if (!dumpFile.isFile()) {
+            writeMeta("legacy_dump_import_done", "1", System.currentTimeMillis());
+            return;
+        }
+
+        try {
+            String text = Files.readString(dumpFile.toPath(), StandardCharsets.UTF_8);
+            if (isBlank(text)) {
+                writeMeta("legacy_dump_import_done", "1", System.currentTimeMillis());
+                return;
+            }
+
+            List<AccountEntry> accounts = loadAccountsIfChanged();
+            Map<String, String> nickToUuid = new HashMap<>();
+            for (AccountEntry ae : accounts) {
+                String did = ae.discordId();
+                String uuid = ae.minecraftUuid();
+                String name = resolveMinecraftName(did, uuid, loadUserCacheIfChanged());
+                if (!isBlank(name) && !isBlank(uuid)) nickToUuid.put(name.toLowerCase(Locale.ROOT), uuid);
+            }
+
+            int imported = 0;
+            Matcher matcher = AUTH_INSERT_PATTERN.matcher(text);
+            while (matcher.find()) {
+                String colsPart = matcher.group(1);
+                String valsPart = matcher.group(2);
+
+                List<String> cols = splitSqlCsv(colsPart);
+                List<String> vals = splitSqlCsv(valsPart);
+                if (cols.isEmpty() || vals.isEmpty() || cols.size() != vals.size()) continue;
+
+                Map<String, String> row = new HashMap<>();
+                for (int i = 0; i < cols.size(); i++) {
+                    row.put(cols.get(i).trim().toUpperCase(Locale.ROOT), sqlUnquote(vals.get(i)));
+                }
+
+                String nickname = nz(row.get("NICKNAME")).trim();
+                if (nickname.isEmpty()) continue;
+
+                String minecraftUuid = nickToUuid.get(nickname.toLowerCase(Locale.ROOT));
+                if (isBlank(minecraftUuid)) continue;
+
+                String regIp = normalizeIp(row.get("IP"));
+                String loginIp = normalizeIp(row.get("LOGINIP"));
+
+                long regDate = parseLongSafe(row.get("REGDATE"));
+                long loginDate = parseLongSafe(row.get("LOGINDATE"));
+                long issuedTime = parseLongSafe(row.get("ISSUEDTIME"));
+
+                long baseFirst = firstPositive(regDate, issuedTime, loginDate, System.currentTimeMillis());
+                long baseLast = firstPositive(loginDate, regDate, issuedTime, baseFirst);
+
+                if (!isBlank(regIp)) {
+                    upsertImportedIp(minecraftUuid, regIp, baseFirst, Math.max(baseFirst, baseLast), 1L);
+                    imported++;
+                }
+                if (!isBlank(loginIp)) {
+                    long first = regIp != null && regIp.equals(loginIp) ? baseFirst : firstPositive(loginDate, regDate, issuedTime, System.currentTimeMillis());
+                    long last = firstPositive(loginDate, regDate, issuedTime, first);
+                    upsertImportedIp(minecraftUuid, loginIp, first, Math.max(first, last), regIp != null && regIp.equals(loginIp) ? 0L : 1L);
+                    imported++;
+                }
+            }
+
+            writeMeta("legacy_dump_import_done", "1", System.currentTimeMillis());
+            plugin.getLogManager().info("Legacy IP import finished, processed entries: " + imported);
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to import dump.sql IPs: " + e.getMessage());
+        }
+    }
+
+    private void upsertImportedIp(String minecraftUuid, String ip, long firstSeenMs, long lastSeenMs, long extraCount) {
+        String normIp = normalizeIp(ip);
+        if (!hasDb() || isBlank(minecraftUuid) || isBlank(normIp)) return;
+
+        long first = Math.max(0L, firstSeenMs);
+        long last = Math.max(first, lastSeenMs);
+        long cnt = Math.max(1L, extraCount <= 0L ? 1L : extraCount);
+
+        withConn(null, null, c -> {
+            int updated;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE player_ips SET first_seen_ms=CASE WHEN first_seen_ms<=0 THEN ? ELSE LEAST(first_seen_ms, ?) END, " +
+                            "last_seen_ms=GREATEST(last_seen_ms, ?), cnt=GREATEST(cnt, ?) WHERE minecraft_uuid=? AND ip=?"
+            )) {
+                ps.setLong(1, first);
+                ps.setLong(2, first);
+                ps.setLong(3, last);
+                ps.setLong(4, cnt);
+                ps.setString(5, minecraftUuid);
+                ps.setString(6, normIp);
+                updated = ps.executeUpdate();
+            }
+
+            if (updated <= 0) {
+                try (PreparedStatement ps = c.prepareStatement("INSERT INTO player_ips (minecraft_uuid,ip,first_seen_ms,last_seen_ms,cnt) VALUES (?,?,?,?,?)")) {
+                    ps.setString(1, minecraftUuid);
+                    ps.setString(2, normIp);
+                    ps.setLong(3, first);
+                    ps.setLong(4, last);
+                    ps.setLong(5, cnt);
+                    ps.executeUpdate();
+                } catch (Exception ignored) {
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE player_ips SET first_seen_ms=CASE WHEN first_seen_ms<=0 THEN ? ELSE LEAST(first_seen_ms, ?) END, " +
+                                    "last_seen_ms=GREATEST(last_seen_ms, ?), cnt=GREATEST(cnt, ?) WHERE minecraft_uuid=? AND ip=?"
+                    )) {
+                        ps.setLong(1, first);
+                        ps.setLong(2, first);
+                        ps.setLong(3, last);
+                        ps.setLong(4, cnt);
+                        ps.setString(5, minecraftUuid);
+                        ps.setString(6, normIp);
+                        ps.executeUpdate();
+                    }
+                }
+            }
+            return null;
+        });
+    }
+
+    private List<String> splitSqlCsv(String src) {
+        ArrayList<String> out = new ArrayList<>();
+        if (src == null) return out;
+
+        StringBuilder cur = new StringBuilder();
+        boolean inQuote = false;
+
+        for (int i = 0; i < src.length(); i++) {
+            char ch = src.charAt(i);
+
+            if (ch == '\'') {
+                cur.append(ch);
+                if (inQuote) {
+                    if (i + 1 < src.length() && src.charAt(i + 1) == '\'') {
+                        cur.append('\'');
+                        i++;
+                    } else {
+                        inQuote = false;
+                    }
+                } else {
+                    inQuote = true;
+                }
+                continue;
+            }
+
+            if (ch == ',' && !inQuote) {
+                out.add(cur.toString().trim());
+                cur.setLength(0);
+                continue;
+            }
+
+            cur.append(ch);
+        }
+
+        if (cur.length() > 0) out.add(cur.toString().trim());
+        return out;
+    }
+
+    private String sqlUnquote(String raw) {
+        String t = nz(raw).trim();
+        if (t.equalsIgnoreCase("NULL")) return null;
+        if (t.length() >= 2 && t.charAt(0) == '\'' && t.charAt(t.length() - 1) == '\'') {
+            t = t.substring(1, t.length() - 1).replace("''", "'");
+        }
+        return t;
+    }
+
+    private long parseLongSafe(String s) {
+        if (isBlank(s)) return 0L;
+        try { return Long.parseLong(s.trim()); } catch (Exception ignored) { return 0L; }
+    }
+
+    private long firstPositive(long... vals) {
+        if (vals == null) return 0L;
+        for (long v : vals) if (v > 0L) return v;
+        return 0L;
+    }
+
+    private String normalizePlayersCsv(String csv) {
+        if (isBlank(csv)) return null;
+        LinkedHashSet<String> uniq = new LinkedHashSet<>();
+        for (String part : csv.split(",")) {
+            String t = nz(part).trim();
+            if (!t.isEmpty()) uniq.add(t);
+        }
+        if (uniq.isEmpty()) return null;
+        return String.join(", ", uniq);
+    }
+
+    private String normalizeIp(String ip) {
+        if (isBlank(ip)) return null;
+        String s = ip.trim();
+
+        if (s.startsWith("/")) s = s.substring(1).trim();
+
+        int colonCount = 0;
+        for (int i = 0; i < s.length(); i++) if (s.charAt(i) == ':') colonCount++;
+
+        if (colonCount == 1 && s.contains(".") && !s.startsWith("[")) {
+            int idx = s.lastIndexOf(':');
+            if (idx > 0) s = s.substring(0, idx).trim();
+        }
+
+        if (s.startsWith("[") && s.contains("]")) {
+            int end = s.indexOf(']');
+            if (end > 1) s = s.substring(1, end).trim();
+        }
+
+        try {
+            InetSocketAddress unresolved = InetSocketAddress.createUnresolved(s, 0);
+            String host = unresolved.getHostString();
+            if (!isBlank(host)) s = host.trim();
+        } catch (Exception ignored) {}
+
+        if (IpRule.ipv4ToInt(s) == -1) return null;
+        return s;
     }
 
     private TimeState ensureTimeStateLoaded(String minecraftUuid, long now) {
@@ -1862,39 +2161,45 @@ public class DatabaseManager {
 
     private void upsertTimeStateToDb(String minecraftUuid, TimeState st, long now) throws Exception {
         if (!hasDb() || isBlank(minecraftUuid) || st == null) return;
-        try (PreparedStatement ps = pool.borrow().prepareStatement(
-                "MERGE INTO player_time (minecraft_uuid,last_join_ms,last_seen_ms,active_ms_total,afk_ms_total,active_ms_today,active_ms_week,active_ms_month,day_key,week_key,month_key,updated_at) " +
-                        "KEY(minecraft_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
-        )) {
-            long lj, ls, at, afk, td, wk, mo;
-            int dk, wkKey, mk;
-            long upd;
-            synchronized (st) {
-                lj = st.lastJoinMs;
-                ls = st.lastSeenMs;
-                at = st.activeTotalMs;
-                afk = st.afkTotalMs;
-                td = st.activeTodayMs;
-                wk = st.activeWeekMs;
-                mo = st.activeMonthMs;
-                dk = st.dayKey;
-                wkKey = st.weekKey;
-                mk = st.monthKey;
-                upd = st.updatedAtMs;
+        Connection c = null;
+        try {
+            c = pool.borrow();
+            try (PreparedStatement ps = c.prepareStatement(
+                    "MERGE INTO player_time (minecraft_uuid,last_join_ms,last_seen_ms,active_ms_total,afk_ms_total,active_ms_today,active_ms_week,active_ms_month,day_key,week_key,month_key,updated_at) " +
+                            "KEY(minecraft_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+            )) {
+                long lj, ls, at, afk, td, wk, mo;
+                int dk, wkKey, mk;
+                long upd;
+                synchronized (st) {
+                    lj = st.lastJoinMs;
+                    ls = st.lastSeenMs;
+                    at = st.activeTotalMs;
+                    afk = st.afkTotalMs;
+                    td = st.activeTodayMs;
+                    wk = st.activeWeekMs;
+                    mo = st.activeMonthMs;
+                    dk = st.dayKey;
+                    wkKey = st.weekKey;
+                    mk = st.monthKey;
+                    upd = st.updatedAtMs;
+                }
+                ps.setString(1, minecraftUuid);
+                ps.setLong(2, Math.max(0L, lj));
+                ps.setLong(3, Math.max(0L, ls));
+                ps.setLong(4, Math.max(0L, at));
+                ps.setLong(5, Math.max(0L, afk));
+                ps.setLong(6, Math.max(0L, td));
+                ps.setLong(7, Math.max(0L, wk));
+                ps.setLong(8, Math.max(0L, mo));
+                ps.setInt(9, Math.max(0, dk));
+                ps.setInt(10, Math.max(0, wkKey));
+                ps.setInt(11, Math.max(0, mk));
+                ps.setLong(12, Math.max(0L, upd == 0L ? now : upd));
+                ps.executeUpdate();
             }
-            ps.setString(1, minecraftUuid);
-            ps.setLong(2, Math.max(0L, lj));
-            ps.setLong(3, Math.max(0L, ls));
-            ps.setLong(4, Math.max(0L, at));
-            ps.setLong(5, Math.max(0L, afk));
-            ps.setLong(6, Math.max(0L, td));
-            ps.setLong(7, Math.max(0L, wk));
-            ps.setLong(8, Math.max(0L, mo));
-            ps.setInt(9, Math.max(0, dk));
-            ps.setInt(10, Math.max(0, wkKey));
-            ps.setInt(11, Math.max(0, mk));
-            ps.setLong(12, Math.max(0L, upd == 0L ? now : upd));
-            ps.executeUpdate();
+        } finally {
+            pool.release(c);
         }
     }
 
