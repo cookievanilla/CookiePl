@@ -69,8 +69,9 @@ public class DatabaseManager {
 
     private final CookiePl plugin;
     private final File discordSrvFolder, userCacheFile, dataFile;
-    private final LiteBansBridge liteBansBridge;
     private final RegionMsptBridge regionMsptBridge = new RegionMsptBridge();
+    private final RegionTpsBridge regionTpsBridge = new RegionTpsBridge();
+    private final LiteBansBridge liteBansBridge;
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
     private final Map<String, String> ticketNameCache = new ConcurrentHashMap<>();
@@ -2759,7 +2760,7 @@ public class DatabaseManager {
 
         try {
             Location loc = new Location(world, (seedChunkX << 4) + 8.0, world.getMinHeight(), (seedChunkZ << 4) + 8.0);
-            plugin.getFoliaLib().getScheduler().runAtLocation(loc, () -> {
+            plugin.getFoliaLib().getScheduler().runAtLocation(loc, task -> {
                 try {
                     holder[0] = buildRegionSnapshot(world, seedChunkX, seedChunkZ, knownChunks);
                 } catch (Exception ignored) {
@@ -2823,7 +2824,7 @@ public class DatabaseManager {
 
         if (visited.isEmpty()) return null;
 
-        double[] tps = safeRegionTps(world, seedChunkX, seedChunkZ);
+        double[] tps = regionTpsBridge.get(world, seedChunkX, seedChunkZ);
         double[] mspt = regionMsptBridge.get(world, seedChunkX, seedChunkZ);
 
         return new RegionSnapshot(
@@ -2841,14 +2842,6 @@ public class DatabaseManager {
                 tps,
                 mspt
         );
-    }
-
-    private double[] safeRegionTps(World world, int chunkX, int chunkZ) {
-        try {
-            return Bukkit.getRegionTPS(world, chunkX, chunkZ);
-        } catch (Exception ignored) {
-            return null;
-        }
     }
 
     private JsonObject toJson(RegionSnapshot rs) {
@@ -3297,6 +3290,82 @@ public class DatabaseManager {
                 oct[i] = v;
             }
             return (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
+        }
+    }
+
+    private static final class RegionTpsBridge {
+        private final Method staticWorldChunkMethod;
+        private final Method serverWorldChunkMethod;
+        private final Method staticChunkMethod;
+        private final Method serverChunkMethod;
+
+        private RegionTpsBridge() {
+            this.staticWorldChunkMethod = findStatic("getRegionTPS", World.class, int.class, int.class);
+            this.serverWorldChunkMethod = findServer("getRegionTPS", World.class, int.class, int.class);
+            this.staticChunkMethod = findStatic("getRegionTPS", Chunk.class);
+            this.serverChunkMethod = findServer("getRegionTPS", Chunk.class);
+        }
+
+        private Method findStatic(String name, Class<?>... params) {
+            try { return Bukkit.class.getMethod(name, params); } catch (Exception ignored) { return null; }
+        }
+
+        private Method findServer(String name, Class<?>... params) {
+            try { return Bukkit.getServer().getClass().getMethod(name, params); } catch (Exception ignored) { return null; }
+        }
+
+        private double[] get(World world, int chunkX, int chunkZ) {
+            if (world == null) return null;
+
+            double[] a = invoke(staticWorldChunkMethod, null, world, chunkX, chunkZ);
+            if (a != null) return a;
+
+            a = invoke(serverWorldChunkMethod, Bukkit.getServer(), world, chunkX, chunkZ);
+            if (a != null) return a;
+
+            if (world.isChunkLoaded(chunkX, chunkZ)) {
+                try {
+                    Chunk chunk = world.getChunkAt(chunkX, chunkZ);
+
+                    a = invoke(staticChunkMethod, null, chunk);
+                    if (a != null) return a;
+
+                    a = invoke(serverChunkMethod, Bukkit.getServer(), chunk);
+                    if (a != null) return a;
+                } catch (Exception ignored) {
+                }
+            }
+
+            return null;
+        }
+
+        private double[] invoke(Method method, Object target, Object... args) {
+            if (method == null) return null;
+            try {
+                Object out = method.invoke(target, args);
+
+                if (out instanceof double[] d) return d.clone();
+
+                if (out instanceof float[] f) {
+                    double[] r = new double[f.length];
+                    for (int i = 0; i < f.length; i++) r[i] = f[i];
+                    return r;
+                }
+
+                if (out instanceof long[] l) {
+                    double[] r = new double[l.length];
+                    for (int i = 0; i < l.length; i++) r[i] = l[i];
+                    return r;
+                }
+
+                if (out instanceof int[] v) {
+                    double[] r = new double[v.length];
+                    for (int i = 0; i < v.length; i++) r[i] = v[i];
+                    return r;
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
         }
     }
 

@@ -50,7 +50,7 @@ public class WebServerManager {
             server.setExecutor(Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors())));
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runNextTick(this::updateCache);
+            plugin.getFoliaLib().getScheduler().runNextTick(task -> updateCache());
             updateTask = plugin.getFoliaLib().getScheduler().runTimer(this::updateCache, 600L, 600L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
