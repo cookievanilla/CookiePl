@@ -55,7 +55,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class DatabaseManager {
-    private static final String SKINS_DATABASE_URL = "http://212.80.7.214:20945/skins";
+    private static final String SKINS_DATABASE_URL = "http://212.80.7.215:20200/skins";
     private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
