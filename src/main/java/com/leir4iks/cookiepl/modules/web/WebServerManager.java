@@ -7,6 +7,7 @@ import com.leir4iks.cookiepl.CookiePl;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
+import org.bukkit.Bukkit;
 import org.bukkit.Server;
 import org.bukkit.entity.Player;
 
@@ -49,8 +50,8 @@ public class WebServerManager {
             server.setExecutor(Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors())));
             server.start();
 
-            plugin.getFoliaLib().getScheduler().runAsync(t -> updateCache());
-            updateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateCache, 600L, 600L);
+            plugin.getFoliaLib().getScheduler().runNextTick(this::updateCache);
+            updateTask = plugin.getFoliaLib().getScheduler().runTimer(this::updateCache, 600L, 600L);
 
             plugin.getLogManager().info("Web Server started on port " + port);
         } catch (IOException e) {
@@ -71,32 +72,53 @@ public class WebServerManager {
     private void updateCache() {
         try {
             Server s = plugin.getServer();
-            JsonObject json = db.newJsonObject();
-            json.addProperty("online", s.getOnlinePlayers().size());
-            json.addProperty("online_players", s.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.joining(", ")));
-            json.addProperty("max_players", s.getMaxPlayers());
-            json.addProperty("uptime", ManagementFactory.getRuntimeMXBean().getUptime() / (1000L * 60L * 60L));
-            json.addProperty("version", s.getBukkitVersion());
-            json.addProperty("server", s.getName());
+            JsonObject root = db.newJsonObject();
+
+            JsonObject serverObj = new JsonObject();
+            serverObj.addProperty("online", s.getOnlinePlayers().size());
+            serverObj.addProperty("online_players", s.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.joining(", ")));
+            serverObj.addProperty("max_players", s.getMaxPlayers());
+            serverObj.addProperty("uptime", ManagementFactory.getRuntimeMXBean().getUptime() / (1000L * 60L * 60L));
+            serverObj.addProperty("version", s.getBukkitVersion());
+            serverObj.addProperty("server", s.getName());
+            try { serverObj.addProperty("average_mspt", Bukkit.getAverageTickTime()); } catch (Exception ignored) {}
+            root.add("server", serverObj);
 
             try {
-                String serverStats = db.getServerStatsJson();
-                JsonElement el = JsonParser.parseString(serverStats);
-                if (el != null && el.isJsonObject()) {
-                    JsonObject so = el.getAsJsonObject();
-
-                    JsonObject season = new JsonObject();
-                    if (so.has("season_id") && !so.get("season_id").isJsonNull()) season.addProperty("id", so.get("season_id").getAsString());
-                    if (so.has("season_players_total") && !so.get("season_players_total").isJsonNull()) season.addProperty("players_total", so.get("season_players_total").getAsInt());
-                    if (so.has("season_peak_online") && !so.get("season_peak_online").isJsonNull()) season.addProperty("peak_online", so.get("season_peak_online").getAsInt());
-                    json.add("season", season);
-
-                    if (so.has("stats") && so.get("stats").isJsonObject()) json.add("stats", so.get("stats").getAsJsonObject());
-                }
+                String totalStats = db.getServerStatsJson();
+                JsonElement el = JsonParser.parseString(totalStats);
+                if (el != null && el.isJsonObject()) root.add("total_stats", el.getAsJsonObject());
+                else root.add("total_stats", new JsonObject());
             } catch (Exception ignored) {
+                root.add("total_stats", new JsonObject());
             }
 
-            cachedServerInfoJson = db.toJsonString(json);
+            try {
+                String worlds = db.getWorldsJson();
+                JsonElement el = JsonParser.parseString(worlds);
+                root.add("worlds", el);
+            } catch (Exception ignored) {
+                root.add("worlds", JsonParser.parseString("[]"));
+            }
+
+            try {
+                String regions = db.getFoliaRegionsJson();
+                JsonElement el = JsonParser.parseString(regions);
+                root.add("folia_regions", el);
+            } catch (Exception ignored) {
+                root.add("folia_regions", JsonParser.parseString("[]"));
+            }
+
+            try {
+                String discord = db.getDiscordStatsJson();
+                JsonElement el = JsonParser.parseString(discord);
+                if (el != null && el.isJsonObject()) root.add("discord", el.getAsJsonObject());
+                else root.add("discord", new JsonObject());
+            } catch (Exception ignored) {
+                root.add("discord", new JsonObject());
+            }
+
+            cachedServerInfoJson = db.toJsonString(root);
         } catch (Exception e) {
             plugin.getLogManager().warn("Failed to update web server cache: " + e.getMessage());
         }

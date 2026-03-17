@@ -10,8 +10,12 @@ import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.query.QueryOptions;
 import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
+import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.HandlerList;
@@ -19,12 +23,15 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerLoginEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.world.ChunkLoadEvent;
+import org.bukkit.event.world.ChunkUnloadEvent;
 
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.StringReader;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.URL;
@@ -40,6 +47,7 @@ import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,6 +59,7 @@ public class DatabaseManager {
     private static final String EXTERNAL_NAME_URL_DEFAULT = "http://212.80.7.211:20081/name";
     private static final String EXTERNAL_STATS_URL_DEFAULT = "http://212.80.7.211:20081/stats";
     private static final String EXTERNAL_WHITELIST_URL_DEFAULT = "http://212.80.7.211:20081/whitelist";
+    private static final String EXTERNAL_DISCORD_URL_DEFAULT = "http://212.80.7.211:20081/discord";
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private static final Pattern AUTH_INSERT_PATTERN = Pattern.compile(
@@ -61,6 +70,7 @@ public class DatabaseManager {
     private final CookiePl plugin;
     private final File discordSrvFolder, userCacheFile, dataFile;
     private final LiteBansBridge liteBansBridge;
+    private final RegionMsptBridge regionMsptBridge = new RegionMsptBridge();
 
     private final Map<String, String> externalCache = new ConcurrentHashMap<>();
     private final Map<String, String> ticketNameCache = new ConcurrentHashMap<>();
@@ -97,9 +107,11 @@ public class DatabaseManager {
     private final AtomicBoolean statsRefreshRunning = new AtomicBoolean(false);
     private volatile Map<String, List<TicketInfo>> ticketsByUserId = Map.of();
     private volatile int lastStatsHash;
+    private volatile int lastDiscordStatsHash;
 
     private WrappedTask skinsUpdateTask, playersStatsUpdateTask, whitelistUpdateTask, statsUpdateTask, nameUpdateTask;
     private WrappedTask timeTrackTask, timeFlushTask, extraFlushTask;
+    private WrappedTask discordUpdateTask, worldsUpdateTask, foliaRegionsUpdateTask;
     private final OnlineListener onlineListener = new OnlineListener();
 
     private volatile boolean dbReady;
@@ -120,7 +132,12 @@ public class DatabaseManager {
     private final Set<String> dirtyExtra = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean extraFlushRunning = new AtomicBoolean(false);
 
+    private final Map<String, Set<Long>> loadedChunksByWorld = new ConcurrentHashMap<>();
+
     private volatile String serverStatsJsonCache = "{}";
+    private volatile String discordStatsJsonCache = "{}";
+    private volatile String worldsJsonCache = "[]";
+    private volatile String foliaRegionsJsonCache = "[]";
 
     public DatabaseManager(CookiePl plugin) {
         this.plugin = plugin;
@@ -135,6 +152,8 @@ public class DatabaseManager {
         loadDataYml();
         buildStatsFolders();
         buildAdvancementsFolders();
+        indexLoadedChunksFromWorlds();
+        updateWorldsSnapshot();
 
         try { Bukkit.getOnlinePlayers().forEach(p -> onlineUuids.add(p.getUniqueId().toString())); } catch (Exception ignored) {}
         try { Bukkit.getPluginManager().registerEvents(onlineListener, plugin); }
@@ -157,9 +176,11 @@ public class DatabaseManager {
             updateExternalNameData();
             updateWhitelistData();
             updateExternalStatsData();
+            updateDiscordStatsData();
             updateSkinsData();
             refreshPlayersData();
             flushPendingSeasonJoins();
+            updateFoliaRegionsSnapshot();
         });
 
         timeTrackTask = plugin.getFoliaLib().getScheduler().runTimer(this::trackOnlineTimeTick, 20L, 20L);
@@ -171,6 +192,9 @@ public class DatabaseManager {
         playersStatsUpdateTask = timer(this::refreshPlayersData, 6000L, 6000L);
         whitelistUpdateTask = timer(this::updateWhitelistData, 1200L, 1200L);
         statsUpdateTask = timer(this::updateExternalStatsData, 300L, 300L);
+        discordUpdateTask = timer(this::updateDiscordStatsData, 300L, 300L);
+        worldsUpdateTask = plugin.getFoliaLib().getScheduler().runTimer(this::updateWorldsSnapshot, 200L, 200L);
+        foliaRegionsUpdateTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::updateFoliaRegionsSnapshot, 200L, 200L);
     }
 
     public void stop() {
@@ -179,8 +203,16 @@ public class DatabaseManager {
         cancel(extraFlushTask);
         timeTrackTask = timeFlushTask = extraFlushTask = null;
 
-        cancel(nameUpdateTask); cancel(skinsUpdateTask); cancel(playersStatsUpdateTask); cancel(whitelistUpdateTask); cancel(statsUpdateTask);
+        cancel(nameUpdateTask);
+        cancel(skinsUpdateTask);
+        cancel(playersStatsUpdateTask);
+        cancel(whitelistUpdateTask);
+        cancel(statsUpdateTask);
+        cancel(discordUpdateTask);
+        cancel(worldsUpdateTask);
+        cancel(foliaRegionsUpdateTask);
         nameUpdateTask = skinsUpdateTask = playersStatsUpdateTask = whitelistUpdateTask = statsUpdateTask = null;
+        discordUpdateTask = worldsUpdateTask = foliaRegionsUpdateTask = null;
 
         try { flushDirtyTimeRows(); } catch (Exception ignored) {}
         try { flushDirtyExtraRows(); } catch (Exception ignored) {}
@@ -199,7 +231,11 @@ public class DatabaseManager {
         dirtyExtra.clear();
         extraByUuid.clear();
         pendingSeasonJoins.clear();
+        loadedChunksByWorld.clear();
         serverStatsJsonCache = "{}";
+        discordStatsJsonCache = "{}";
+        worldsJsonCache = "[]";
+        foliaRegionsJsonCache = "[]";
     }
 
     public JsonObject newJsonObject() { return new JsonObject(); }
@@ -340,6 +376,9 @@ public class DatabaseManager {
 
             String sstats = readMeta("server_stats_json");
             if (!isBlank(sstats)) serverStatsJsonCache = sstats;
+
+            String discordStats = readMeta("discord_stats_json");
+            if (!isBlank(discordStats)) discordStatsJsonCache = discordStats;
 
         } catch (Exception e) {
             dbReady = false;
@@ -586,6 +625,28 @@ public class DatabaseManager {
         }
     }
 
+    private void updateDiscordStatsData() {
+        try {
+            String url = plugin.getConfig().getString("modules.web-server.external-discord-url", EXTERNAL_DISCORD_URL_DEFAULT);
+            String text = fetchText(url, 5000, 5000);
+            if (isBlank(text)) return;
+
+            int h = text.hashCode();
+            if (h == lastDiscordStatsHash) return;
+
+            JsonObject root = parseLenientObject(text);
+            if (root == null) return;
+
+            lastDiscordStatsHash = h;
+            String json = GSON.toJson(root);
+            discordStatsJsonCache = json;
+
+            if (hasDb()) writeMeta("discord_stats_json", json, System.currentTimeMillis());
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update discord stats: " + e.getMessage());
+        }
+    }
+
     private void collectTickets(JsonObject root, String key, Map<String, String> userToModerator, Map<String, List<TicketInfo>> byUser, Map<String, String> names) {
         JsonObject src = obj(root, key);
         if (src == null) return;
@@ -717,6 +778,7 @@ public class DatabaseManager {
         try {
             List<AccountEntry> accounts = loadAccountsIfChanged();
             Map<String, String> userCache = loadUserCacheIfChanged();
+            Map<String, FlexData> flexByDiscordId = hasDb() ? readAllFlex() : Map.of();
 
             if (accounts.isEmpty()) {
                 synchronized (summaryLock) {
@@ -757,11 +819,13 @@ public class DatabaseManager {
                 double playHours = round1(ticksToHours(snap.playTimeTicks()));
                 JsonObject statsObj = buildStatsJson(snap, adv, minecraftUuid, isOnline, false);
                 JsonObject lpGroups = getLuckPermsGroups(uuid);
+                FlexData flexData = flexByDiscordId.getOrDefault(discordId, FlexData.empty());
 
                 JsonObject summary = new JsonObject();
                 putBase(summary, discordId, minecraftName, minecraftUuid, links, isOnline);
                 summary.addProperty("play_time_hours", playHours);
                 summary.add("luckperms", lpGroups);
+                summary.add("flex", buildFlexJson(flexData));
                 summaryArray.add(summary);
 
                 JsonObject full = new JsonObject();
@@ -882,6 +946,26 @@ public class DatabaseManager {
         return v;
     }
 
+    public String getDiscordStatsJson() {
+        String cached = discordStatsJsonCache;
+        if (!isBlank(cached) && !cached.equals("{}")) return cached;
+        if (!hasDb()) return "{}";
+        String v = readMeta("discord_stats_json");
+        if (isBlank(v)) return "{}";
+        discordStatsJsonCache = v;
+        return v;
+    }
+
+    public String getWorldsJson() {
+        String cached = worldsJsonCache;
+        return isBlank(cached) ? "[]" : cached;
+    }
+
+    public String getFoliaRegionsJson() {
+        String cached = foliaRegionsJsonCache;
+        return isBlank(cached) ? "[]" : cached;
+    }
+
     public String getPlayerJsonById(String query) { return getPlayerJsonById(query, null); }
 
     public String getPlayerJsonById(String query, String remoteIp) {
@@ -974,23 +1058,23 @@ public class DatabaseManager {
         return out;
     }
 
-    private JsonObject buildFlexJsonForDiscordId(String discordId) {
-        FlexData d = (hasDb() && !isBlank(discordId)) ? readFlex(discordId) : FlexData.empty();
+    private JsonObject buildFlexJson(FlexData d) {
+        FlexData v = d == null ? FlexData.empty() : d;
         JsonObject o = new JsonObject();
-        o.addProperty("bank", Math.max(0L, d.bank()));
-        o.addProperty("color", nz(d.color()));
-        o.add("subscription", toJsonArray(d.subscription()));
-        o.addProperty("command", nz(d.command()));
+        o.addProperty("bank", Math.max(0L, v.bank()));
+        o.addProperty("color", nz(v.color()));
+        o.add("subscription", toJsonArray(v.subscription()));
+        o.addProperty("command", nz(v.command()));
         return o;
     }
 
+    private JsonObject buildFlexJsonForDiscordId(String discordId) {
+        FlexData d = (hasDb() && !isBlank(discordId)) ? readFlex(discordId) : FlexData.empty();
+        return buildFlexJson(d);
+    }
+
     private JsonObject emptyFlexJson() {
-        JsonObject o = new JsonObject();
-        o.addProperty("bank", 0L);
-        o.addProperty("color", "");
-        o.add("subscription", new JsonArray());
-        o.addProperty("command", "");
-        return o;
+        return buildFlexJson(FlexData.empty());
     }
 
     private JsonArray toJsonArray(List<String> list) {
@@ -1020,8 +1104,13 @@ public class DatabaseManager {
             return new AdminResponse(400, "{\"error\":\"Invalid JSON\"}");
         }
 
-        try { upsertFlex(did, mergeFlex(readFlex(did), patch)); }
-        catch (Exception ignored) { return new AdminResponse(500, "{\"error\":\"Failed to save\"}"); }
+        try {
+            FlexData merged = mergeFlex(readFlex(did), patch);
+            upsertFlex(did, merged);
+            updateCachedPlayerFlex(did, merged);
+        } catch (Exception ignored) {
+            return new AdminResponse(500, "{\"error\":\"Failed to save\"}");
+        }
 
         return new AdminResponse(200, GSON.toJson(buildFlexJsonForDiscordId(did)));
     }
@@ -1094,6 +1183,63 @@ public class DatabaseManager {
                 }
             }
         });
+    }
+
+    private Map<String, FlexData> readAllFlex() {
+        if (!hasDb()) return Map.of();
+        return withConn(null, Map.of(), c -> {
+            HashMap<String, FlexData> out = new HashMap<>();
+            try (PreparedStatement ps = c.prepareStatement("SELECT discord_id,bank,color,subscription,command FROM flex");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String discordId = rs.getString(1);
+                    if (isBlank(discordId)) continue;
+
+                    long bank = Math.max(0L, rs.getLong(2));
+                    String color = nz(rs.getString(3));
+                    String subStr = rs.getString(4);
+                    String command = nz(rs.getString(5));
+
+                    List<String> subs = List.of();
+                    if (!isBlank(subStr)) {
+                        try {
+                            JsonElement el = JsonParser.parseString(subStr);
+                            if (el != null && el.isJsonArray()) {
+                                ArrayList<String> tmp = new ArrayList<>();
+                                for (JsonElement it : el.getAsJsonArray()) if (it != null && !it.isJsonNull()) tmp.add(nz(it.getAsString()));
+                                subs = List.copyOf(tmp);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    out.put(discordId, new FlexData(bank, color, subs, command));
+                }
+            }
+            return Map.copyOf(out);
+        });
+    }
+
+    private void updateCachedPlayerFlex(String discordId, FlexData flexData) {
+        if (isBlank(discordId)) return;
+
+        String newSummary = null;
+        synchronized (summaryLock) {
+            JsonObject obj = summaryByDiscordId.get(discordId);
+            if (obj == null) return;
+
+            obj.add("flex", buildFlexJson(flexData));
+
+            JsonArray arr = new JsonArray();
+            for (String id : summaryOrder) {
+                JsonObject o = summaryByDiscordId.get(id);
+                if (o != null) arr.add(o);
+            }
+
+            newSummary = GSON.toJson(arr);
+            playersSummaryListCache = newSummary;
+        }
+
+        if (hasDb() && newSummary != null) writeMeta("players_summary_json", newSummary, System.currentTimeMillis());
     }
 
     private String resolveDiscordIdFromAny(String q) {
@@ -2513,6 +2659,259 @@ public class DatabaseManager {
         }
     }
 
+    private void indexLoadedChunksFromWorlds() {
+        try {
+            HashMap<String, Set<Long>> fresh = new HashMap<>();
+            for (World world : Bukkit.getWorlds()) {
+                if (world == null) continue;
+                HashSet<Long> set = new HashSet<>();
+                for (Chunk chunk : world.getLoadedChunks()) set.add(packChunk(chunk.getX(), chunk.getZ()));
+                fresh.put(world.getName(), ConcurrentHashMap.newKeySet());
+                fresh.get(world.getName()).addAll(set);
+            }
+
+            loadedChunksByWorld.clear();
+            loadedChunksByWorld.putAll(fresh);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void updateWorldsSnapshot() {
+        try {
+            JsonArray arr = new JsonArray();
+            for (World world : Bukkit.getWorlds()) {
+                if (world == null) continue;
+                JsonObject o = new JsonObject();
+                o.addProperty("name", world.getName());
+                o.addProperty("environment", String.valueOf(world.getEnvironment()));
+                o.addProperty("time", world.getTime());
+                o.addProperty("is_storming", world.hasStorm());
+                o.addProperty("is_thundering", world.isThundering());
+
+                Set<Long> loaded = loadedChunksByWorld.get(world.getName());
+                o.addProperty("loaded_chunks", loaded == null ? 0 : loaded.size());
+
+                arr.add(o);
+            }
+            worldsJsonCache = GSON.toJson(arr);
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update worlds snapshot: " + e.getMessage());
+        }
+    }
+
+    private void updateFoliaRegionsSnapshot() {
+        try {
+            Map<String, Set<Long>> snapshot = snapshotLoadedChunks();
+            if (snapshot.isEmpty()) {
+                foliaRegionsJsonCache = "[]";
+                return;
+            }
+
+            ArrayList<JsonObject> regions = new ArrayList<>();
+
+            for (Map.Entry<String, Set<Long>> entry : snapshot.entrySet()) {
+                String worldName = entry.getKey();
+                World world = Bukkit.getWorld(worldName);
+                if (world == null) continue;
+
+                HashSet<Long> remaining = new HashSet<>(entry.getValue());
+                while (!remaining.isEmpty()) {
+                    long seed = remaining.iterator().next();
+                    RegionSnapshot rs = collectRegionSnapshot(world, unpackChunkX(seed), unpackChunkZ(seed), remaining);
+                    if (rs == null) {
+                        remaining.remove(seed);
+                        continue;
+                    }
+
+                    remaining.removeAll(rs.chunkKeys());
+                    regions.add(toJson(rs));
+                }
+            }
+
+            regions.sort(Comparator
+                    .comparing((JsonObject o) -> nz(getAsStringOrEmpty(o, "world")))
+                    .thenComparingInt(o -> getAsIntOrZero(o, "anchor_chunk_x"))
+                    .thenComparingInt(o -> getAsIntOrZero(o, "anchor_chunk_z")));
+
+            JsonArray out = new JsonArray();
+            for (JsonObject o : regions) out.add(o);
+            foliaRegionsJsonCache = GSON.toJson(out);
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to update Folia regions snapshot: " + e.getMessage());
+        }
+    }
+
+    private Map<String, Set<Long>> snapshotLoadedChunks() {
+        HashMap<String, Set<Long>> out = new HashMap<>();
+        for (Map.Entry<String, Set<Long>> e : loadedChunksByWorld.entrySet()) {
+            Set<Long> src = e.getValue();
+            if (src == null || src.isEmpty()) continue;
+            out.put(e.getKey(), new HashSet<>(src));
+        }
+        return out;
+    }
+
+    private RegionSnapshot collectRegionSnapshot(World world, int seedChunkX, int seedChunkZ, Set<Long> knownChunks) {
+        if (world == null || knownChunks == null || knownChunks.isEmpty()) return null;
+
+        CountDownLatch latch = new CountDownLatch(1);
+        RegionSnapshot[] holder = new RegionSnapshot[1];
+
+        try {
+            Location loc = new Location(world, (seedChunkX << 4) + 8.0, world.getMinHeight(), (seedChunkZ << 4) + 8.0);
+            plugin.getFoliaLib().getScheduler().runAtLocation(loc, () -> {
+                try {
+                    holder[0] = buildRegionSnapshot(world, seedChunkX, seedChunkZ, knownChunks);
+                } catch (Exception ignored) {
+                    holder[0] = null;
+                } finally {
+                    latch.countDown();
+                }
+            });
+
+            if (!latch.await(10L, TimeUnit.SECONDS)) return null;
+            return holder[0];
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private RegionSnapshot buildRegionSnapshot(World world, int seedChunkX, int seedChunkZ, Set<Long> knownChunks) {
+        if (world == null || knownChunks == null || knownChunks.isEmpty()) return null;
+        if (!knownChunks.contains(packChunk(seedChunkX, seedChunkZ))) return null;
+        if (!Bukkit.isOwnedByCurrentRegion(world, seedChunkX, seedChunkZ)) return null;
+
+        HashSet<Long> visited = new HashSet<>();
+        ArrayDeque<long[]> queue = new ArrayDeque<>();
+        queue.add(new long[]{seedChunkX, seedChunkZ});
+
+        int minX = seedChunkX, maxX = seedChunkX, minZ = seedChunkZ, maxZ = seedChunkZ;
+        int entityCount = 0;
+        int playerCount = 0;
+
+        while (!queue.isEmpty()) {
+            long[] pos = queue.poll();
+            int x = (int) pos[0];
+            int z = (int) pos[1];
+            long key = packChunk(x, z);
+
+            if (!knownChunks.contains(key) || !visited.add(key)) continue;
+            if (!Bukkit.isOwnedByCurrentRegion(world, x, z)) continue;
+
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+
+            if (world.isChunkLoaded(x, z)) {
+                try {
+                    Chunk chunk = world.getChunkAt(x, z);
+                    for (Entity entity : chunk.getEntities()) {
+                        if (entity == null) continue;
+                        entityCount++;
+                        if (entity instanceof Player) playerCount++;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            queue.add(new long[]{x + 1, z});
+            queue.add(new long[]{x - 1, z});
+            queue.add(new long[]{x, z + 1});
+            queue.add(new long[]{x, z - 1});
+        }
+
+        if (visited.isEmpty()) return null;
+
+        double[] tps = safeRegionTps(world, seedChunkX, seedChunkZ);
+        double[] mspt = regionMsptBridge.get(world, seedChunkX, seedChunkZ);
+
+        return new RegionSnapshot(
+                world.getName(),
+                seedChunkX,
+                seedChunkZ,
+                minX,
+                maxX,
+                minZ,
+                maxZ,
+                visited.size(),
+                playerCount,
+                entityCount,
+                visited,
+                tps,
+                mspt
+        );
+    }
+
+    private double[] safeRegionTps(World world, int chunkX, int chunkZ) {
+        try {
+            return Bukkit.getRegionTPS(world, chunkX, chunkZ);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private JsonObject toJson(RegionSnapshot rs) {
+        JsonObject o = new JsonObject();
+        o.addProperty("world", rs.worldName());
+        o.addProperty("anchor_chunk_x", rs.anchorChunkX());
+        o.addProperty("anchor_chunk_z", rs.anchorChunkZ());
+        o.addProperty("min_chunk_x", rs.minChunkX());
+        o.addProperty("max_chunk_x", rs.maxChunkX());
+        o.addProperty("min_chunk_z", rs.minChunkZ());
+        o.addProperty("max_chunk_z", rs.maxChunkZ());
+        o.addProperty("chunk_count", rs.chunkCount());
+        o.addProperty("players", rs.playerCount());
+        o.addProperty("entities", rs.entityCount());
+        o.add("tps", toWindowStats(rs.tps()));
+        o.add("mspt", toWindowStats(rs.mspt()));
+        return o;
+    }
+
+    private JsonObject toWindowStats(double[] arr) {
+        JsonObject o = new JsonObject();
+        if (arr == null || arr.length == 0) {
+            o.add("5s", JsonNull.INSTANCE);
+            o.add("15s", JsonNull.INSTANCE);
+            o.add("1m", JsonNull.INSTANCE);
+            o.add("5m", JsonNull.INSTANCE);
+            o.add("15m", JsonNull.INSTANCE);
+            return o;
+        }
+        o.addProperty("5s", arr.length > 0 ? round2(arr[0]) : 0.0);
+        o.addProperty("15s", arr.length > 1 ? round2(arr[1]) : 0.0);
+        o.addProperty("1m", arr.length > 2 ? round2(arr[2]) : 0.0);
+        o.addProperty("5m", arr.length > 3 ? round2(arr[3]) : 0.0);
+        o.addProperty("15m", arr.length > 4 ? round2(arr[4]) : 0.0);
+        return o;
+    }
+
+    private double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
+    private String getAsStringOrEmpty(JsonObject o, String key) {
+        try { return o != null && o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : ""; }
+        catch (Exception ignored) { return ""; }
+    }
+
+    private int getAsIntOrZero(JsonObject o, String key) {
+        try { return o != null && o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsInt() : 0; }
+        catch (Exception ignored) { return 0; }
+    }
+
+    private long packChunk(int x, int z) {
+        return ((long) x << 32) ^ (z & 0xffffffffL);
+    }
+
+    private int unpackChunkX(long packed) {
+        return (int) (packed >> 32);
+    }
+
+    private int unpackChunkZ(long packed) {
+        return (int) packed;
+    }
+
     private JsonObject obj(JsonObject root, String key) {
         if (root == null || key == null || !root.has(key) || !root.get(key).isJsonObject()) return null;
         return root.getAsJsonObject(key);
@@ -2752,6 +3151,22 @@ public class DatabaseManager {
 
     private record IpEntry(String ip, long firstSeenMs, long lastSeenMs, long count) {}
 
+    private record RegionSnapshot(
+            String worldName,
+            int anchorChunkX,
+            int anchorChunkZ,
+            int minChunkX,
+            int maxChunkX,
+            int minChunkZ,
+            int maxChunkZ,
+            int chunkCount,
+            int playerCount,
+            int entityCount,
+            Set<Long> chunkKeys,
+            double[] tps,
+            double[] mspt
+    ) {}
+
     private static final class TimeState {
         long lastJoinMs;
         long lastSeenMs;
@@ -2790,6 +3205,24 @@ public class DatabaseManager {
         @EventHandler public void onQuit(PlayerQuitEvent e) {
             try { handleQuit(e.getPlayer()); } catch (Exception ignored) {}
             try { handleOnlineChange(e.getPlayer().getUniqueId().toString(), false); } catch (Exception ignored) {}
+        }
+
+        @EventHandler public void onChunkLoad(ChunkLoadEvent e) {
+            try {
+                Chunk chunk = e.getChunk();
+                if (chunk == null || chunk.getWorld() == null) return;
+                loadedChunksByWorld.computeIfAbsent(chunk.getWorld().getName(), k -> ConcurrentHashMap.newKeySet())
+                        .add(packChunk(chunk.getX(), chunk.getZ()));
+            } catch (Exception ignored) {}
+        }
+
+        @EventHandler public void onChunkUnload(ChunkUnloadEvent e) {
+            try {
+                Chunk chunk = e.getChunk();
+                if (chunk == null || chunk.getWorld() == null) return;
+                Set<Long> set = loadedChunksByWorld.get(chunk.getWorld().getName());
+                if (set != null) set.remove(packChunk(chunk.getX(), chunk.getZ()));
+            } catch (Exception ignored) {}
         }
     }
 
@@ -2864,6 +3297,77 @@ public class DatabaseManager {
                 oct[i] = v;
             }
             return (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
+        }
+    }
+
+    private static final class RegionMsptBridge {
+        private final Method staticWorldChunkMethod;
+        private final Method serverWorldChunkMethod;
+        private final Method staticChunkMethod;
+        private final Method serverChunkMethod;
+
+        private RegionMsptBridge() {
+            this.staticWorldChunkMethod = findStatic("getRegionAverageTickTimes", World.class, int.class, int.class);
+            this.serverWorldChunkMethod = findServer("getRegionAverageTickTimes", World.class, int.class, int.class);
+            this.staticChunkMethod = findStatic("getRegionAverageTickTimes", Chunk.class);
+            this.serverChunkMethod = findServer("getRegionAverageTickTimes", Chunk.class);
+        }
+
+        private Method findStatic(String name, Class<?>... params) {
+            try { return Bukkit.class.getMethod(name, params); } catch (Exception ignored) { return null; }
+        }
+
+        private Method findServer(String name, Class<?>... params) {
+            try { return Bukkit.getServer().getClass().getMethod(name, params); } catch (Exception ignored) { return null; }
+        }
+
+        private double[] get(World world, int chunkX, int chunkZ) {
+            if (world == null) return null;
+
+            double[] a = invoke(staticWorldChunkMethod, null, world, chunkX, chunkZ);
+            if (a != null) return a;
+
+            a = invoke(serverWorldChunkMethod, Bukkit.getServer(), world, chunkX, chunkZ);
+            if (a != null) return a;
+
+            if (world.isChunkLoaded(chunkX, chunkZ)) {
+                try {
+                    Chunk chunk = world.getChunkAt(chunkX, chunkZ);
+                    a = invoke(staticChunkMethod, null, chunk);
+                    if (a != null) return a;
+
+                    a = invoke(serverChunkMethod, Bukkit.getServer(), chunk);
+                    if (a != null) return a;
+                } catch (Exception ignored) {
+                }
+            }
+
+            return null;
+        }
+
+        private double[] invoke(Method method, Object target, Object... args) {
+            if (method == null) return null;
+            try {
+                Object out = method.invoke(target, args);
+                if (out instanceof double[] d) return d.clone();
+                if (out instanceof float[] f) {
+                    double[] r = new double[f.length];
+                    for (int i = 0; i < f.length; i++) r[i] = f[i];
+                    return r;
+                }
+                if (out instanceof long[] l) {
+                    double[] r = new double[l.length];
+                    for (int i = 0; i < l.length; i++) r[i] = l[i];
+                    return r;
+                }
+                if (out instanceof int[] v) {
+                    double[] r = new double[v.length];
+                    for (int i = 0; i < v.length; i++) r[i] = v[i];
+                    return r;
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
         }
     }
 
