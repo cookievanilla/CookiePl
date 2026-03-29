@@ -1,18 +1,23 @@
 package com.leir4iks.cookiepl.modules.profile.features;
 
 import com.leir4iks.cookiepl.CookiePl;
+import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerAdvancementDoneEvent;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
 
 public class adventure implements Listener {
 
-    private final CookiePl plugin;
+    private static final byte FALSE = 0;
+
+    private final NamespacedKey advancementVisibleKey;
 
     public adventure(CookiePl plugin) {
-        this.plugin = plugin;
+        this.advancementVisibleKey = new NamespacedKey(plugin, "profile_show_advancements");
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -23,17 +28,8 @@ public class adventure implements Listener {
     }
 
     public boolean isVisible(Player player) {
-        return plugin.getConfig().getBoolean(getPath(player), true);
-    }
-
-    public boolean toggle(Player player) {
-        boolean newState = !isVisible(player);
-        plugin.getConfig().set(getPath(player), newState);
-        plugin.saveConfig();
-        return newState;
-    }
-
-    private String getPath(Player player) {
-        return "modules.profile.players." + player.getUniqueId() + ".show-advancements";
+        PersistentDataContainer pdc = player.getPersistentDataContainer();
+        Byte value = pdc.get(advancementVisibleKey, PersistentDataType.BYTE);
+        return value == null || value != FALSE;
     }
 }
