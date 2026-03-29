@@ -201,6 +201,42 @@ modules:
       afk-disabled: "&7Вы вышли из режима &eAFK&7."
       only-player: "&cЭту команду может использовать только игрок."
 
+
+  profile:
+    enabled: true
+    permission: "cookiepl.command.profile"
+    menu:
+      title: "&8Профиль"
+      common:
+        state-enabled: "&aвидно"
+        state-disabled: "&7скрыто"
+        click-to-enable: "&7Нажми, чтобы показать"
+        click-to-disable: "&7Нажми, чтобы скрыть"
+      items:
+        profile-info:
+          name: "&fПрофиль"
+          description:
+            - "&7Настройки сообщений"
+            - "&7Игрок: &f{player}"
+        death:
+          name: "&fСмерть"
+          description:
+            - "&7Кто увидит сообщение о смерти"
+        advancement:
+          name: "&fДостижения"
+          description:
+            - "&7Кто увидит сообщение о достижении"
+        close:
+          name: "&7Закрыть"
+          description:
+            - "&7Нажми, чтобы выйти"
+    messages:
+      players-only: "&cЭту команду может использовать только игрок."
+      death-enabled: "&7Профиль: &fсмерть видна всем."
+      death-disabled: "&7Профиль: &fсмерть скрыта."
+      advancements-enabled: "&7Профиль: &fдостижения видны всем."
+      advancements-disabled: "&7Профиль: &fдостижения скрыты."
+
   update-server:
     enabled: false
     port: 20564

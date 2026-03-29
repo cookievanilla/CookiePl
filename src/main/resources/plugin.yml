@@ -44,3 +44,8 @@ commands:
     usage: /<command>
     permission: cookiepl.command.afk
     permission-message: "You do not have permission to use this command."
+  profile:
+    description: Open profile settings.
+    usage: /<command>
+    permission: cookiepl.command.profile
+    permission-message: "You do not have permission to use this command."
