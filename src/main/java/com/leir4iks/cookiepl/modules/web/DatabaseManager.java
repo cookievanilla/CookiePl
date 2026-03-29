@@ -964,8 +964,9 @@ public class DatabaseManager {
                             "LEFT JOIN player_time t ON t.minecraft_uuid = p.minecraft_uuid " +
                             "WHERE p.discord_id IS NOT NULL " +
                             "AND TRIM(p.discord_id) <> '' " +
-                            "AND p.play_time_hours >= ? " +
                             "AND ( " +
+                            "    p.play_time_hours >= ? " +
+                            "    OR " +
                             "    (COALESCE(t.last_seen_ms, 0) >= ? AND COALESCE(t.last_seen_ms, 0) < ?) " +
                             "    OR " +
                             "    (COALESCE(p.stats_mtime, 0) >= ? AND COALESCE(p.stats_mtime, 0) < ?) " +
