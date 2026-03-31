@@ -45,7 +45,6 @@ public class WebServerManager {
             server.createContext("/ip", this::handleIpLookup);
             server.createContext("/serverinfo", this::handleServerInfo);
             server.createContext("/serverstats", this::handleServerStats);
-            server.createContext("/zov", this::handleZov); // zov
             server.createContext("/admin/players", this::handleAdminPlayers);
 
             server.setExecutor(Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors())));
@@ -237,13 +236,6 @@ public class WebServerManager {
         if (preflight(ex)) return;
         send(ex, 200, db.getServerStatsJson());
     }
-
-    // zov
-    private void handleZov(HttpExchange ex) throws IOException {
-        if (preflight(ex)) return;
-        send(ex, 200, db.getZovJson());
-    }
-    // zov
 
     private boolean preflight(HttpExchange ex) throws IOException {
         if (corsEnabled) {

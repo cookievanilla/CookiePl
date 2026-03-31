@@ -32,4 +32,21 @@ public class adventure implements Listener {
         Byte value = pdc.get(advancementVisibleKey, PersistentDataType.BYTE);
         return value == null || value != FALSE;
     }
+
+    public boolean toggleVisible(Player player) {
+        boolean newState = !isVisible(player);
+        setVisible(player, newState);
+        return newState;
+    }
+
+    public void setVisible(Player player, boolean visible) {
+        PersistentDataContainer pdc = player.getPersistentDataContainer();
+
+        if (visible) {
+            pdc.remove(advancementVisibleKey);
+            return;
+        }
+
+        pdc.set(advancementVisibleKey, PersistentDataType.BYTE, FALSE);
+    }
 }

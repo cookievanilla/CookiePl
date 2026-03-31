@@ -205,27 +205,41 @@ modules:
   profile:
     enabled: true
     permission: "cookiepl.command.profile"
+
     menu:
-      title: "&8Профиль"
+      categories:
+        title: "&8Профиль"
+
+      profile-settings:
+        title: "&8Управление профилем"
+
       common:
         state-enabled: "&aвидно"
         state-disabled: "&7скрыто"
         click-to-enable: "&7Нажми, чтобы показать"
         click-to-disable: "&7Нажми, чтобы скрыть"
+
       items:
-        profile-info:
-          name: "&fПрофиль"
-          description:
-            - "&7Настройки сообщений"
-            - "&7Игрок: &f{player}"
         death:
-          name: "&fСмерть"
+          name: "&fПоказ смертей"
           description:
-            - "&7Кто увидит сообщение о смерти"
+            - "&7Включение/выключение показа смертей"
+
         advancement:
-          name: "&fДостижения"
+          name: "&fПоказ достижений"
           description:
-            - "&7Кто увидит сообщение о достижении"
+            - "&7Включение/выключение показа достижений"
+
+        squaremap:
+          name: "&fПоказ на карте"
+          description:
+            - "&7Показ/скрытие игрока на карте squaremap"
+
+        back:
+          name: "&7Назад"
+          description:
+            - "&7Вернуться к категориям"
+
         close:
           name: "&7Закрыть"
           description:
@@ -236,6 +250,9 @@ modules:
       death-disabled: "&7Профиль: &fсмерть скрыта."
       advancements-enabled: "&7Профиль: &fдостижения видны всем."
       advancements-disabled: "&7Профиль: &fдостижения скрыты."
+      squaremap-enabled: "&7Профиль: &fотображение на карте включено."
+      squaremap-disabled: "&7Профиль: &fотображение на карте скрыто."
+      squaremap-unavailable: "&cSquaremap не найден или ещё не загрузился."
 
   update-server:
     enabled: false

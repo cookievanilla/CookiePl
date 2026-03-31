@@ -4,10 +4,10 @@ import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
 import com.leir4iks.cookiepl.modules.profile.features.adventure;
 import com.leir4iks.cookiepl.modules.profile.features.death;
+import com.leir4iks.cookiepl.modules.profile.features.squaremap;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -24,8 +24,6 @@ import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -33,25 +31,34 @@ import java.util.List;
 public class profile implements IModule, Listener, CommandExecutor {
 
     private static final int INVENTORY_SIZE = 27;
-    private static final int PLAYER_INFO_SLOT = 13;
+
+    private static final int CATEGORY_LEFT_SLOT = 11;
+    private static final int CATEGORY_CENTER_SLOT = 13;
+    private static final int CATEGORY_RIGHT_SLOT = 15;
+
+    private static final int PROFILE_INFO_SLOT = 4;
     private static final int DEATH_SLOT = 11;
-    private static final int ADVANCEMENT_SLOT = 15;
+    private static final int ADVANCEMENT_SLOT = 13;
+    private static final int SQUAREMAP_SLOT = 15;
+
+    private static final int BACK_SLOT = 18;
     private static final int CLOSE_SLOT = 22;
-    private static final byte FALSE = 0;
 
     private CookiePl plugin;
     private death deathFeature;
     private adventure adventureFeature;
-    private NamespacedKey deathVisibleKey;
-    private NamespacedKey advancementVisibleKey;
+    private squaremap squaremapFeature;
 
     @Override
     public void enable(CookiePl plugin) {
         this.plugin = plugin;
-        this.deathVisibleKey = new NamespacedKey(plugin, "profile_show_death_messages");
-        this.advancementVisibleKey = new NamespacedKey(plugin, "profile_show_advancements");
+
         this.deathFeature = new death(plugin);
         this.adventureFeature = new adventure(plugin);
+
+        if (plugin.getServer().getPluginManager().isPluginEnabled("squaremap")) {
+            this.squaremapFeature = new squaremap();
+        }
 
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
         plugin.getServer().getPluginManager().registerEvents(deathFeature, plugin);
@@ -75,6 +82,7 @@ public class profile implements IModule, Listener, CommandExecutor {
         }
 
         HandlerList.unregisterAll(this);
+
         if (deathFeature != null) {
             HandlerList.unregisterAll(deathFeature);
         }
@@ -84,8 +92,7 @@ public class profile implements IModule, Listener, CommandExecutor {
 
         this.deathFeature = null;
         this.adventureFeature = null;
-        this.deathVisibleKey = null;
-        this.advancementVisibleKey = null;
+        this.squaremapFeature = null;
         this.plugin = null;
     }
 
@@ -109,55 +116,105 @@ public class profile implements IModule, Listener, CommandExecutor {
             return true;
         }
 
-        openMenu(player);
+        openCategoriesMenu(player);
         return true;
     }
 
-    private void openMenu(Player player) {
-        ProfileMenuHolder holder = new ProfileMenuHolder();
-        Inventory inventory = Bukkit.createInventory(holder, INVENTORY_SIZE, getMenuTitle());
+    private void openCategoriesMenu(Player player) {
+        ProfileMenuHolder holder = new ProfileMenuHolder(MenuType.CATEGORIES);
+        Inventory inventory = Bukkit.createInventory(holder, INVENTORY_SIZE, getCategoriesMenuTitle());
         holder.setInventory(inventory);
-        renderMenu(player, inventory);
+        renderCategoriesMenu(player, inventory);
         player.openInventory(inventory);
     }
 
-    private void renderMenu(Player player, Inventory inventory) {
+    private void openProfileSettingsMenu(Player player) {
+        ProfileMenuHolder holder = new ProfileMenuHolder(MenuType.PROFILE_SETTINGS);
+        Inventory inventory = Bukkit.createInventory(holder, INVENTORY_SIZE, getProfileSettingsMenuTitle());
+        holder.setInventory(inventory);
+        renderProfileSettingsMenu(player, inventory);
+        player.openInventory(inventory);
+    }
+
+    private void renderCategoriesMenu(Player player, Inventory inventory) {
         ItemStack filler = createItem(Material.LIGHT_GRAY_STAINED_GLASS_PANE, " ", List.of(), true);
 
         for (int slot = 0; slot < INVENTORY_SIZE; slot++) {
             inventory.setItem(slot, filler);
         }
 
-        inventory.setItem(PLAYER_INFO_SLOT, createProfileInfoItem(player));
+        inventory.setItem(CATEGORY_LEFT_SLOT, createSoonCategoryItem());
+        inventory.setItem(CATEGORY_CENTER_SLOT, createProfileCategoryItem(player));
+        inventory.setItem(CATEGORY_RIGHT_SLOT, createSoonCategoryItem());
+        inventory.setItem(CLOSE_SLOT, createCloseItem());
+    }
+
+    private void renderProfileSettingsMenu(Player player, Inventory inventory) {
+        ItemStack filler = createItem(Material.LIGHT_GRAY_STAINED_GLASS_PANE, " ", List.of(), true);
+
+        for (int slot = 0; slot < INVENTORY_SIZE; slot++) {
+            inventory.setItem(slot, filler);
+        }
+
+        inventory.setItem(PROFILE_INFO_SLOT, createProfileInfoItem(player));
+
         inventory.setItem(DEATH_SLOT, createToggleItem(
                 Material.SKELETON_SKULL,
-                getString("modules.profile.menu.items.death.name", "&fСмерть"),
-                isDeathVisible(player),
+                getString("modules.profile.menu.items.death.name", "&fПоказ смертей"),
+                deathFeature.isVisible(player),
                 getStringList(
                         "modules.profile.menu.items.death.description",
-                        List.of("&7Кто увидит сообщение о смерти")
+                        List.of("&7Включение/выключение показа смертей")
                 )
         ));
 
         inventory.setItem(ADVANCEMENT_SLOT, createToggleItem(
                 Material.KNOWLEDGE_BOOK,
-                getString("modules.profile.menu.items.advancement.name", "&fДостижения"),
-                isAdvancementVisible(player),
+                getString("modules.profile.menu.items.advancement.name", "&fПоказ достижений"),
+                adventureFeature.isVisible(player),
                 getStringList(
                         "modules.profile.menu.items.advancement.description",
-                        List.of("&7Кто увидит сообщение о достижении")
+                        List.of("&7Включение/выключение показа достижений")
                 )
         ));
 
-        inventory.setItem(CLOSE_SLOT, createItem(
-                Material.BARRIER,
-                getString("modules.profile.menu.items.close.name", "&7Закрыть"),
+        inventory.setItem(SQUAREMAP_SLOT, createSquaremapItem(player));
+
+        inventory.setItem(BACK_SLOT, createItem(
+                Material.ARROW,
+                getString("modules.profile.menu.items.back.name", "&7Назад"),
                 getStringList(
-                        "modules.profile.menu.items.close.description",
-                        List.of("&7Нажми, чтобы выйти")
+                        "modules.profile.menu.items.back.description",
+                        List.of("&7Вернуться к категориям")
                 ),
                 true
         ));
+
+        inventory.setItem(CLOSE_SLOT, createCloseItem());
+    }
+
+    private ItemStack createSoonCategoryItem() {
+        return createItem(
+                Material.GRAY_STAINED_GLASS_PANE,
+                " ",
+                List.of("&7soon..."),
+                true
+        );
+    }
+
+    private ItemStack createProfileCategoryItem(Player player) {
+        ItemStack item = new ItemStack(Material.PLAYER_HEAD);
+        SkullMeta meta = (SkullMeta) item.getItemMeta();
+        if (meta == null) {
+            return item;
+        }
+
+        meta.setOwningPlayer(player);
+        meta.setDisplayName(color("&f" + player.getName()));
+        meta.setLore(List.of(color("&7Управление профилем")));
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        item.setItemMeta(meta);
+        return item;
     }
 
     private ItemStack createProfileInfoItem(Player player) {
@@ -168,26 +225,72 @@ public class profile implements IModule, Listener, CommandExecutor {
         }
 
         meta.setOwningPlayer(player);
-        meta.setDisplayName(color(getString(
-                "modules.profile.menu.items.profile-info.name",
-                "&fПрофиль"
-        )));
+        meta.setDisplayName(color("&f" + player.getName()));
 
         List<String> lore = new ArrayList<>();
-        for (String line : getStringList(
-                "modules.profile.menu.items.profile-info.description",
-                List.of("&7Настройки уведомлений", "&7Игрок: &f{player}")
-        )) {
-            lore.add(color(line.replace("{player}", player.getName())));
-        }
+        lore.add(color("&7Управление профилем"));
         lore.add("");
-        lore.add(color("&7Смерть: " + formatState(isDeathVisible(player))));
-        lore.add(color("&7Достижения: " + formatState(isAdvancementVisible(player))));
+        lore.add(color("&7Смерти: " + formatState(deathFeature.isVisible(player))));
+        lore.add(color("&7Достижения: " + formatState(adventureFeature.isVisible(player))));
+        lore.add(color("&7Карта: " + formatSquaremapState(player)));
 
         meta.setLore(lore);
         meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
         item.setItemMeta(meta);
         return item;
+    }
+
+    private ItemStack createCloseItem() {
+        return createItem(
+                Material.BARRIER,
+                getString("modules.profile.menu.items.close.name", "&7Закрыть"),
+                getStringList(
+                        "modules.profile.menu.items.close.description",
+                        List.of("&7Нажми, чтобы выйти")
+                ),
+                true
+        );
+    }
+
+    private ItemStack createSquaremapItem(Player player) {
+        if (squaremapFeature == null || !squaremapFeature.isAvailable()) {
+            return createItem(
+                    Material.FILLED_MAP,
+                    getString("modules.profile.menu.items.squaremap.name", "&fПоказ на карте"),
+                    List.of(
+                            "&7Показ/скрытие игрока на карте squaremap",
+                            "",
+                            "&7Статус: &cнедоступно",
+                            "&7Squaremap не найден или API ещё не готов"
+                    ),
+                    true
+            );
+        }
+
+        squaremap.VisibilityState state = squaremapFeature.getVisibilityState(player);
+        if (state == squaremap.VisibilityState.UNAVAILABLE) {
+            return createItem(
+                    Material.FILLED_MAP,
+                    getString("modules.profile.menu.items.squaremap.name", "&fПоказ на карте"),
+                    List.of(
+                            "&7Показ/скрытие игрока на карте squaremap",
+                            "",
+                            "&7Статус: &cнедоступно",
+                            "&7Squaremap не найден или API ещё не готов"
+                    ),
+                    true
+            );
+        }
+
+        return createToggleItem(
+                Material.FILLED_MAP,
+                getString("modules.profile.menu.items.squaremap.name", "&fПоказ на карте"),
+                state == squaremap.VisibilityState.SHOWN,
+                getStringList(
+                        "modules.profile.menu.items.squaremap.description",
+                        List.of("&7Показ/скрытие игрока на карте squaremap")
+                )
+        );
     }
 
     private ItemStack createToggleItem(Material material, String displayName, boolean enabled, List<String> description) {
@@ -203,6 +306,7 @@ public class profile implements IModule, Listener, CommandExecutor {
         for (String line : description) {
             lore.add(color(line));
         }
+
         lore.add("");
         lore.add(color("&7Статус: " + formatState(enabled)));
         lore.add(color(enabled
@@ -219,6 +323,23 @@ public class profile implements IModule, Listener, CommandExecutor {
         return enabled
                 ? getString("modules.profile.menu.common.state-enabled", "&aвидно")
                 : getString("modules.profile.menu.common.state-disabled", "&7скрыто");
+    }
+
+    private String formatSquaremapState(Player player) {
+        if (squaremapFeature == null || !squaremapFeature.isAvailable()) {
+            return colorState("&cнедоступно");
+        }
+
+        squaremap.VisibilityState state = squaremapFeature.getVisibilityState(player);
+        return switch (state) {
+            case SHOWN -> formatState(true);
+            case HIDDEN -> formatState(false);
+            case UNAVAILABLE -> colorState("&cнедоступно");
+        };
+    }
+
+    private String colorState(String value) {
+        return color(value);
     }
 
     @EventHandler
@@ -245,27 +366,77 @@ public class profile implements IModule, Listener, CommandExecutor {
             return;
         }
 
-        switch (event.getRawSlot()) {
+        ProfileMenuHolder holder = (ProfileMenuHolder) event.getView().getTopInventory().getHolder();
+        if (holder == null) {
+            return;
+        }
+
+        switch (holder.getMenuType()) {
+            case CATEGORIES -> handleCategoriesClick(player, event.getRawSlot());
+            case PROFILE_SETTINGS -> handleProfileSettingsClick(player, event.getRawSlot(), event.getView().getTopInventory());
+        }
+    }
+
+    private void handleCategoriesClick(Player player, int slot) {
+        switch (slot) {
+            case CATEGORY_CENTER_SLOT -> openProfileSettingsMenu(player);
+            case CLOSE_SLOT -> player.closeInventory();
+            default -> {
+            }
+        }
+    }
+
+    private void handleProfileSettingsClick(Player player, int slot, Inventory inventory) {
+        switch (slot) {
             case DEATH_SLOT -> {
-                boolean isVisible = toggleDeathVisible(player);
+                boolean isVisible = deathFeature.toggleVisible(player);
                 player.sendMessage(color(getString(
                         isVisible ? "modules.profile.messages.death-enabled" : "modules.profile.messages.death-disabled",
                         isVisible
                                 ? "&7Профиль: &fсмерть видна всем."
                                 : "&7Профиль: &fсмерть скрыта."
                 )));
-                renderMenu(player, event.getView().getTopInventory());
+                renderProfileSettingsMenu(player, inventory);
             }
             case ADVANCEMENT_SLOT -> {
-                boolean isVisible = toggleAdvancementVisible(player);
+                boolean isVisible = adventureFeature.toggleVisible(player);
                 player.sendMessage(color(getString(
                         isVisible ? "modules.profile.messages.advancements-enabled" : "modules.profile.messages.advancements-disabled",
                         isVisible
                                 ? "&7Профиль: &fдостижения видны всем."
                                 : "&7Профиль: &fдостижения скрыты."
                 )));
-                renderMenu(player, event.getView().getTopInventory());
+                renderProfileSettingsMenu(player, inventory);
             }
+            case SQUAREMAP_SLOT -> {
+                if (squaremapFeature == null) {
+                    player.sendMessage(color(getString(
+                            "modules.profile.messages.squaremap-unavailable",
+                            "&cSquaremap не найден или ещё не загрузился."
+                    )));
+                    renderProfileSettingsMenu(player, inventory);
+                    return;
+                }
+
+                squaremap.ToggleResult result = squaremapFeature.toggleVisible(player);
+                switch (result) {
+                    case SHOWN -> player.sendMessage(color(getString(
+                            "modules.profile.messages.squaremap-enabled",
+                            "&7Профиль: &fотображение на карте включено."
+                    )));
+                    case HIDDEN -> player.sendMessage(color(getString(
+                            "modules.profile.messages.squaremap-disabled",
+                            "&7Профиль: &fотображение на карте скрыто."
+                    )));
+                    case UNAVAILABLE -> player.sendMessage(color(getString(
+                            "modules.profile.messages.squaremap-unavailable",
+                            "&cSquaremap не найден или ещё не загрузился."
+                    )));
+                }
+
+                renderProfileSettingsMenu(player, inventory);
+            }
+            case BACK_SLOT -> openCategoriesMenu(player);
             case CLOSE_SLOT -> player.closeInventory();
             default -> {
             }
@@ -291,45 +462,12 @@ public class profile implements IModule, Listener, CommandExecutor {
         return inventory.getHolder() instanceof ProfileMenuHolder;
     }
 
-    private boolean isDeathVisible(Player player) {
-        return getBoolean(player, deathVisibleKey, true);
+    private String getCategoriesMenuTitle() {
+        return color(getString("modules.profile.menu.categories.title", "&8Профиль"));
     }
 
-    private boolean toggleDeathVisible(Player player) {
-        boolean newState = !isDeathVisible(player);
-        setBoolean(player, deathVisibleKey, newState, true);
-        return newState;
-    }
-
-    private boolean isAdvancementVisible(Player player) {
-        return getBoolean(player, advancementVisibleKey, true);
-    }
-
-    private boolean toggleAdvancementVisible(Player player) {
-        boolean newState = !isAdvancementVisible(player);
-        setBoolean(player, advancementVisibleKey, newState, true);
-        return newState;
-    }
-
-    private boolean getBoolean(Player player, NamespacedKey key, boolean defaultValue) {
-        PersistentDataContainer pdc = player.getPersistentDataContainer();
-        Byte value = pdc.get(key, PersistentDataType.BYTE);
-        return value == null ? defaultValue : value != FALSE;
-    }
-
-    private void setBoolean(Player player, NamespacedKey key, boolean value, boolean defaultValue) {
-        PersistentDataContainer pdc = player.getPersistentDataContainer();
-
-        if (value == defaultValue) {
-            pdc.remove(key);
-            return;
-        }
-
-        pdc.set(key, PersistentDataType.BYTE, value ? (byte) 1 : FALSE);
-    }
-
-    private String getMenuTitle() {
-        return color(getString("modules.profile.menu.title", "&8Профиль"));
+    private String getProfileSettingsMenuTitle() {
+        return color(getString("modules.profile.menu.profile-settings.title", "&8Управление профилем"));
     }
 
     private ItemStack createItem(Material material, String displayName, List<String> lore, boolean hideAttributes) {
@@ -367,8 +505,18 @@ public class profile implements IModule, Listener, CommandExecutor {
         return ChatColor.translateAlternateColorCodes('&', text);
     }
 
+    private enum MenuType {
+        CATEGORIES,
+        PROFILE_SETTINGS
+    }
+
     private static final class ProfileMenuHolder implements InventoryHolder {
+        private final MenuType menuType;
         private Inventory inventory;
+
+        private ProfileMenuHolder(MenuType menuType) {
+            this.menuType = menuType;
+        }
 
         @Override
         public Inventory getInventory() {
@@ -377,6 +525,10 @@ public class profile implements IModule, Listener, CommandExecutor {
 
         private void setInventory(Inventory inventory) {
             this.inventory = inventory;
+        }
+
+        private MenuType getMenuType() {
+            return menuType;
         }
     }
 }

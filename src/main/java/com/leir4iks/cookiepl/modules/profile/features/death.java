@@ -39,4 +39,21 @@ public class death implements Listener {
         Byte value = pdc.get(deathVisibleKey, PersistentDataType.BYTE);
         return value == null || value != FALSE;
     }
+
+    public boolean toggleVisible(Player player) {
+        boolean newState = !isVisible(player);
+        setVisible(player, newState);
+        return newState;
+    }
+
+    public void setVisible(Player player, boolean visible) {
+        PersistentDataContainer pdc = player.getPersistentDataContainer();
+
+        if (visible) {
+            pdc.remove(deathVisibleKey);
+            return;
+        }
+
+        pdc.set(deathVisibleKey, PersistentDataType.BYTE, FALSE);
+    }
 }

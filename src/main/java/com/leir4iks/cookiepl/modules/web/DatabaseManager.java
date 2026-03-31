@@ -947,52 +947,6 @@ public class DatabaseManager {
         return v;
     }
 
-    // zov
-    public String getZovJson() {
-        if (!hasDb()) return "[]";
-
-        final double minPlayedHours = 24.0D;
-        final long startMs = LocalDate.of(2026, 3, 26).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
-        final long endMs = LocalDate.of(2026, 3, 30).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
-
-        return withConn("Failed to build /zov response: ", "[]", c -> {
-            JsonArray out = new JsonArray();
-
-            String sql =
-                    "SELECT DISTINCT p.discord_id " +
-                            "FROM players p " +
-                            "LEFT JOIN player_time t ON t.minecraft_uuid = p.minecraft_uuid " +
-                            "WHERE p.discord_id IS NOT NULL " +
-                            "AND TRIM(p.discord_id) <> '' " +
-                            "AND ( " +
-                            "    p.play_time_hours >= ? " +
-                            "    OR " +
-                            "    (COALESCE(t.last_seen_ms, 0) >= ? AND COALESCE(t.last_seen_ms, 0) < ?) " +
-                            "    OR " +
-                            "    (COALESCE(p.stats_mtime, 0) >= ? AND COALESCE(p.stats_mtime, 0) < ?) " +
-                            ") " +
-                            "ORDER BY p.discord_id ASC";
-
-            try (PreparedStatement ps = c.prepareStatement(sql)) {
-                ps.setDouble(1, minPlayedHours);
-                ps.setLong(2, startMs);
-                ps.setLong(3, endMs);
-                ps.setLong(4, startMs);
-                ps.setLong(5, endMs);
-
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String discordId = nz(rs.getString(1)).trim();
-                        if (!discordId.isEmpty()) out.add(discordId);
-                    }
-                }
-            }
-
-            return GSON.toJson(out);
-        });
-    }
-    // zov
-
     public String getDiscordStatsJson() {
         String cached = discordStatsJsonCache;
         if (!isBlank(cached) && !cached.equals("{}")) return cached;
