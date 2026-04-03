@@ -277,6 +277,52 @@ modules:
       pool-size: 10
     admin-token: "CHANGE_ME"
 
+
+  antigrief:
+    enabled: true
+    bypass-permission: "cookiepl.antigrief.bypass"
+    required-active-time-seconds: 10800
+    idle-timeout-seconds: 300
+    save-interval-seconds: 60
+    time-zone: "Europe/Moscow"
+    time-format: "dd.MM.yyyy HH:mm:ss"
+    item-names:
+      flint-and-steel: "&6Огниво"
+      fire-charge: "&6Огненный шар"
+      tnt: "&cДинамит"
+      bed: "&cКровать"
+      end-crystal: "&dКристалл Края"
+      respawn-anchor: "&5Якорь возрождения"
+    target-names:
+      chest: "сундук"
+      trapped-chest: "сундук-ловушка"
+      barrel: "бочка"
+      shulker-box: "шалкер"
+      villager: "крестьянин"
+    messages:
+      restricted-item: "&cЧтобы использовать {item}, нужно наиграть &f{required}&c активного времени. Но, сейчас у тебя &f{current}&c."
+    container-monitor:
+      newbie-max-active-time-seconds: 7200
+      window-seconds: 300
+      open:
+        min-unique-targets: 8
+        min-spread-blocks: 24.0
+        alert-cooldown-seconds: 900
+      break:
+        min-unique-targets: 5
+        min-spread-blocks: 24.0
+        alert-cooldown-seconds: 900
+    webhook:
+      enabled: false
+      url: "https://discord.com/api/webhooks/CHANGE_ME"
+      username: "CookiePl AntiGrief"
+      avatar-url: ""
+      mention: ""
+      timeout-seconds: 10
+      messages:
+        open: "{mention}**{player}** за период **{period}** открыл слишком много обьектов в разных местах. Наиграл: **{active_time}**. Обьектов: **{count}**. Миры: **{worlds}**. Разброс: **{spread}** блоков. Детали: **{details}**."
+        break: "{mention}**{player}** за период **{period}** сломал слишком много обьектов в разных местах. Наиграл: **{active_time}**. Обьектов: **{count}**. Миры: **{worlds}**. Разброс: **{spread}** блоков. Детали: **{details}**."
+
 logging:
   enabled: true
   log-level: "INFO"

@@ -242,6 +242,15 @@ public class DatabaseManager {
     public JsonObject newJsonObject() { return new JsonObject(); }
     public String toJsonString(JsonElement el) { return GSON.toJson(el); }
 
+    public long getActivePlaytimeMillis(UUID minecraftUuid) {
+        if (minecraftUuid == null) return 0L;
+        TimeState st = ensureTimeStateLoaded(minecraftUuid.toString(), System.currentTimeMillis());
+        if (st == null) return 0L;
+        synchronized (st) {
+            return Math.max(0L, st.activeTotalMs);
+        }
+    }
+
     private WrappedTask timer(Runnable r, long delay, long period) {
         return plugin.getFoliaLib().getScheduler().runTimerAsync(r, delay, period);
     }
