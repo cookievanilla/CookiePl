@@ -425,12 +425,11 @@ public class AntiGriefManager implements Listener {
         }
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     private static Statistic resolvePlayTimeStatistic() {
         for (String name : new String[]{"PLAY_TIME", "PLAY_ONE_MINUTE"}) {
             try {
-                return (Statistic) Enum.valueOf((Class<Enum>) Statistic.class, name);
-            } catch (Exception ignored) {
+                return Statistic.valueOf(name);
+            } catch (IllegalArgumentException ignored) {
             }
         }
         return null;
