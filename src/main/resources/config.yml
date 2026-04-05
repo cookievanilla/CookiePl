@@ -254,6 +254,15 @@ modules:
       squaremap-disabled: "&7Профиль: &fотображение на карте скрыто."
       squaremap-unavailable: "&cSquaremap не найден или ещё не загрузился."
 
+  active-player:
+    enabled: true
+    required-active-seconds: 3600
+    role-duration-seconds: 259200
+    api-url: "http://212.80.7.211:20081/active"
+    request-timeout-seconds: 10
+    check-period-ticks: 100
+    save-period-ticks: 1200
+
   update-server:
     enabled: false
     port: 20564

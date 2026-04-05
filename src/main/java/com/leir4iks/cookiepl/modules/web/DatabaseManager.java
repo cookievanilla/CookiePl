@@ -97,6 +97,7 @@ public class DatabaseManager {
     private volatile Map<String, JsonObject> summaryByDiscordId = Map.of();
     private volatile List<String> summaryOrder = List.of();
     private volatile Map<String, String> discordIdByUuid = Map.of();
+    private volatile Map<String, Boolean> activeStateByDiscordId = Map.of();
     private volatile String playersSummaryListCache = "[]";
 
     private final Set<String> onlineUuids = ConcurrentHashMap.newKeySet();
@@ -251,6 +252,60 @@ public class DatabaseManager {
         }
     }
 
+    public String getDiscordIdByMinecraftUuid(UUID minecraftUuid) {
+        if (minecraftUuid == null) return null;
+        String uuid = minecraftUuid.toString();
+        String cached = discordIdByUuid.get(uuid);
+        if (!isBlank(cached)) return cached;
+        if (!hasDb()) return null;
+        return withConn("Failed to resolve discord id by uuid: ", null, c -> {
+            try (PreparedStatement ps = c.prepareStatement("SELECT discord_id FROM players WHERE minecraft_uuid=? LIMIT 1")) {
+                ps.setString(1, uuid);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String discordId = rs.getString(1);
+                        return isBlank(discordId) ? null : discordId;
+                    }
+                }
+            }
+            return null;
+        });
+    }
+
+    public boolean isPlayerActive(String discordId) {
+        if (isBlank(discordId)) return false;
+        Boolean cached = activeStateByDiscordId.get(discordId);
+        if (cached != null) return cached;
+        if (!hasDb()) return false;
+        Boolean fromDb = withConn("Failed to read active state from H2: ", Boolean.FALSE, c -> {
+            try (PreparedStatement ps = c.prepareStatement("SELECT active FROM players WHERE discord_id=? LIMIT 1")) {
+                ps.setString(1, discordId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return rs.getBoolean(1);
+                }
+            }
+            return false;
+        });
+        return fromDb != null && fromDb;
+    }
+
+    public void setPlayerActive(UUID minecraftUuid, boolean active) {
+        String discordId = getDiscordIdByMinecraftUuid(minecraftUuid);
+        if (isBlank(discordId)) return;
+        setPlayerActive(discordId, active);
+    }
+
+    public void setPlayerActive(String discordId, boolean active) {
+        if (isBlank(discordId)) return;
+
+        HashMap<String, Boolean> updated = new HashMap<>(activeStateByDiscordId);
+        updated.put(discordId, active);
+        activeStateByDiscordId = Map.copyOf(updated);
+
+        updateCachedPlayerActive(discordId, active);
+        updatePlayerActiveInDb(discordId, active);
+    }
+
     private WrappedTask timer(Runnable r, long delay, long period) {
         return plugin.getFoliaLib().getScheduler().runTimerAsync(r, delay, period);
     }
@@ -295,6 +350,7 @@ public class DatabaseManager {
                             "skin_url CLOB," +
                             "head_url CLOB," +
                             "is_online BOOLEAN NOT NULL DEFAULT FALSE," +
+                            "active BOOLEAN NOT NULL DEFAULT FALSE," +
                             "play_time_hours DOUBLE NOT NULL DEFAULT 0," +
                             "summary_json CLOB," +
                             "full_json CLOB," +
@@ -303,6 +359,7 @@ public class DatabaseManager {
                             "stats_mtime BIGINT NOT NULL DEFAULT 0" +
                             ")");
 
+                    try { st.execute("ALTER TABLE players ADD COLUMN active BOOLEAN NOT NULL DEFAULT FALSE"); } catch (Exception ignored) {}
                     try { st.execute("CREATE INDEX idx_uuid ON players (minecraft_uuid)"); } catch (Exception ignored) {}
                     try { st.execute("CREATE INDEX idx_name_lc ON players (minecraft_name_lc)"); } catch (Exception ignored) {}
 
@@ -377,6 +434,7 @@ public class DatabaseManager {
             String metaSeason = nz(readMeta("season_id")).trim();
             seasonId = !cfgSeason.isEmpty() ? cfgSeason : (!metaSeason.isEmpty() ? metaSeason : "default");
             writeMeta("season_id", seasonId, now);
+            activeStateByDiscordId = readAllActiveStates();
 
             seasonPeakOnline = readSeasonPeakOnline(seasonId);
             upsertSeasonPeakOnline(seasonId, Math.max(seasonPeakOnline, safeOnlineCount()), now);
@@ -789,6 +847,7 @@ public class DatabaseManager {
             List<AccountEntry> accounts = loadAccountsIfChanged();
             Map<String, String> userCache = loadUserCacheIfChanged();
             Map<String, FlexData> flexByDiscordId = hasDb() ? readAllFlex() : Map.of();
+            Map<String, Boolean> activeByDiscordId = hasDb() ? readAllActiveStates() : activeStateByDiscordId;
 
             if (accounts.isEmpty()) {
                 synchronized (summaryLock) {
@@ -830,16 +889,17 @@ public class DatabaseManager {
                 JsonObject statsObj = buildStatsJson(snap, adv, minecraftUuid, isOnline, false);
                 JsonObject lpGroups = getLuckPermsGroups(uuid);
                 FlexData flexData = flexByDiscordId.getOrDefault(discordId, FlexData.empty());
+                boolean active = activeByDiscordId.getOrDefault(discordId, false);
 
                 JsonObject summary = new JsonObject();
-                putBase(summary, discordId, minecraftName, minecraftUuid, links, isOnline);
+                putBase(summary, discordId, minecraftName, minecraftUuid, links, isOnline, active);
                 summary.addProperty("play_time_hours", playHours);
                 summary.add("luckperms", lpGroups);
                 summary.add("flex", buildFlexJson(flexData));
                 summaryArray.add(summary);
 
                 JsonObject full = new JsonObject();
-                putBase(full, discordId, minecraftName, minecraftUuid, links, isOnline);
+                putBase(full, discordId, minecraftName, minecraftUuid, links, isOnline, active);
                 full.add("luckperms", lpGroups);
                 full.add("stats", statsObj);
 
@@ -851,7 +911,7 @@ public class DatabaseManager {
                         discordId, minecraftUuid, minecraftName,
                         nz(minecraftName).toLowerCase(Locale.ROOT),
                         links.skinUrl(), links.headUrl(),
-                        isOnline, playHours,
+                        isOnline, active, playHours,
                         GSON.toJson(summary), GSON.toJson(full),
                         now, now, snap.mtime()
                 ));
@@ -927,13 +987,14 @@ public class DatabaseManager {
         }
     }
 
-    private void putBase(JsonObject o, String did, String name, String uuid, SkinLinks links, boolean online) {
+    private void putBase(JsonObject o, String did, String name, String uuid, SkinLinks links, boolean online, boolean active) {
         o.addProperty("id", nz(did));
         o.addProperty("minecraft_name", nz(name, "Unknown"));
         o.addProperty("minecraft_uuid", nz(uuid));
         o.addProperty("skinUrl", nz(links == null ? null : links.skinUrl()));
         o.addProperty("headUrl", nz(links == null ? null : links.headUrl()));
         o.addProperty("is_online", online);
+        o.addProperty("active", active);
     }
 
     public String getPlayersSummaryJson() {
@@ -995,6 +1056,7 @@ public class DatabaseManager {
             if (!isBlank(mcUuidStr)) obj.addProperty("is_online", isOnline);
 
             String discordId = obj.has("id") && !obj.get("id").isJsonNull() ? obj.get("id").getAsString() : null;
+            if (!isBlank(discordId)) obj.addProperty("active", isPlayerActive(discordId));
 
             if (!allowed) obj.addProperty("tickets", "not allowed");
             else obj.add("tickets", buildTicketsJson(discordId));
@@ -1049,7 +1111,7 @@ public class DatabaseManager {
 
     private JsonObject reorderWithFlex(JsonObject src, JsonObject flexObj) {
         JsonObject out = new JsonObject();
-        String[] first = {"id", "minecraft_name", "minecraft_uuid", "skinUrl", "headUrl", "is_online"};
+        String[] first = {"id", "minecraft_name", "minecraft_uuid", "skinUrl", "headUrl", "is_online", "active"};
         String[] after = {"luckperms", "stats", "tickets", "litebans"};
 
         for (String k : first) if (src.has(k)) out.add(k, src.get(k));
@@ -1076,6 +1138,25 @@ public class DatabaseManager {
         o.add("subscription", toJsonArray(v.subscription()));
         o.addProperty("command", nz(v.command()));
         return o;
+    }
+
+    private Map<String, Boolean> readAllActiveStates() {
+        if (!hasDb()) return activeStateByDiscordId;
+        return withConn("Failed to load active states from H2: ", activeStateByDiscordId, c -> {
+            HashMap<String, Boolean> out = new HashMap<>();
+            try (PreparedStatement ps = c.prepareStatement("SELECT discord_id,active FROM players")) {
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String discordId = rs.getString(1);
+                        if (isBlank(discordId)) continue;
+                        out.put(discordId, rs.getBoolean(2));
+                    }
+                }
+            }
+            Map<String, Boolean> result = Map.copyOf(out);
+            activeStateByDiscordId = result;
+            return result;
+        });
     }
 
     private JsonObject buildFlexJsonForDiscordId(String discordId) {
@@ -1252,6 +1333,69 @@ public class DatabaseManager {
         if (hasDb() && newSummary != null) writeMeta("players_summary_json", newSummary, System.currentTimeMillis());
     }
 
+    private void updateCachedPlayerActive(String discordId, boolean active) {
+        if (isBlank(discordId)) return;
+
+        String newSummary = null;
+        synchronized (summaryLock) {
+            JsonObject obj = summaryByDiscordId.get(discordId);
+            if (obj != null) obj.addProperty("active", active);
+
+            JsonArray arr = new JsonArray();
+            for (String id : summaryOrder) {
+                JsonObject o = summaryByDiscordId.get(id);
+                if (o != null) arr.add(o);
+            }
+
+            newSummary = GSON.toJson(arr);
+            playersSummaryListCache = newSummary;
+        }
+
+        if (hasDb() && newSummary != null) writeMeta("players_summary_json", newSummary, System.currentTimeMillis());
+    }
+
+    private String injectActiveIntoJson(String json, boolean active) {
+        if (isBlank(json)) return json;
+        try {
+            JsonElement el = JsonParser.parseString(json);
+            if (el != null && el.isJsonObject()) {
+                JsonObject obj = el.getAsJsonObject();
+                obj.addProperty("active", active);
+                return GSON.toJson(obj);
+            }
+        } catch (Exception ignored) {}
+        return json;
+    }
+
+    private void updatePlayerActiveInDb(String discordId, boolean active) {
+        withConn("Failed to update active state in H2: ", null, c -> {
+            String summaryJson = null;
+            String fullJson = null;
+
+            try (PreparedStatement ps = c.prepareStatement("SELECT summary_json,full_json FROM players WHERE discord_id=? LIMIT 1")) {
+                ps.setString(1, discordId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        summaryJson = rs.getString(1);
+                        fullJson = rs.getString(2);
+                    }
+                }
+            }
+
+            long now = System.currentTimeMillis();
+            try (PreparedStatement ps = c.prepareStatement("UPDATE players SET active=?,summary_json=?,full_json=?,summary_updated_at=?,full_updated_at=? WHERE discord_id=?")) {
+                ps.setBoolean(1, active);
+                ps.setString(2, injectActiveIntoJson(summaryJson, active));
+                ps.setString(3, injectActiveIntoJson(fullJson, active));
+                ps.setLong(4, now);
+                ps.setLong(5, now);
+                ps.setString(6, discordId);
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
     private String resolveDiscordIdFromAny(String q) {
         String query = nz(q).trim();
         if (query.isEmpty()) return null;
@@ -1330,7 +1474,7 @@ public class DatabaseManager {
             AdvSnapshot adv = getAdvSnapshot(uuid);
 
             JsonObject full = new JsonObject();
-            putBase(full, did, mcName, mcUuid, links, online);
+            putBase(full, did, mcName, mcUuid, links, online, activeStateByDiscordId.getOrDefault(did, false));
             full.add("luckperms", getLuckPermsGroups(uuid));
             full.add("stats", buildStatsJson(snap, adv, mcUuid, online, false));
             return GSON.toJson(full);
@@ -1354,8 +1498,8 @@ public class DatabaseManager {
 
         withConn("Failed to upsert players to H2: ", null, c -> {
             try (PreparedStatement ps = c.prepareStatement(
-                    "MERGE INTO players (discord_id,minecraft_uuid,minecraft_name,minecraft_name_lc,skin_url,head_url,is_online,play_time_hours,summary_json,full_json,summary_updated_at,full_updated_at,stats_mtime) " +
-                            "KEY(discord_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                    "MERGE INTO players (discord_id,minecraft_uuid,minecraft_name,minecraft_name_lc,skin_url,head_url,is_online,active,play_time_hours,summary_json,full_json,summary_updated_at,full_updated_at,stats_mtime) " +
+                            "KEY(discord_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             )) {
                 int batch = 0;
                 for (PlayerUpsertRow r : rows) {
@@ -1366,12 +1510,13 @@ public class DatabaseManager {
                     ps.setString(5, r.skinUrl());
                     ps.setString(6, r.headUrl());
                     ps.setBoolean(7, r.isOnline());
-                    ps.setDouble(8, r.playTimeHours());
-                    ps.setString(9, r.summaryJson());
-                    ps.setString(10, r.fullJson());
-                    ps.setLong(11, r.summaryUpdatedAt());
-                    ps.setLong(12, r.fullUpdatedAt());
-                    ps.setLong(13, r.statsMtime());
+                    ps.setBoolean(8, r.active());
+                    ps.setDouble(9, r.playTimeHours());
+                    ps.setString(10, r.summaryJson());
+                    ps.setString(11, r.fullJson());
+                    ps.setLong(12, r.summaryUpdatedAt());
+                    ps.setLong(13, r.fullUpdatedAt());
+                    ps.setLong(14, r.statsMtime());
                     ps.addBatch();
                     if (++batch >= 500) { ps.executeBatch(); batch = 0; }
                 }
@@ -3099,7 +3244,7 @@ public class DatabaseManager {
     private record SkinLinks(String skinUrl, String headUrl) {}
     private record PlayerUpsertRow(
             String discordId, String minecraftUuid, String minecraftName, String minecraftNameLc,
-            String skinUrl, String headUrl, boolean isOnline, double playTimeHours,
+            String skinUrl, String headUrl, boolean isOnline, boolean active, double playTimeHours,
             String summaryJson, String fullJson, long summaryUpdatedAt, long fullUpdatedAt, long statsMtime
     ) {}
     private record StatsFileRef(Path path, long mtime) {}
