@@ -10,6 +10,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 
 import java.util.EnumSet;
@@ -17,24 +18,24 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class AirSwordListener implements Listener {
-
-    private final CookiePl plugin;
-    private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
-    private final long cooldownMillis;
+public final class AirSwordListener implements Listener {
 
     private static final EnumSet<Material> SWORD_MATERIALS = EnumSet.of(
-            Material.DIAMOND_SWORD,
             Material.WOODEN_SWORD,
-            Material.IRON_SWORD,
             Material.STONE_SWORD,
+            Material.IRON_SWORD,
             Material.GOLDEN_SWORD,
+            Material.DIAMOND_SWORD,
             Material.NETHERITE_SWORD
     );
 
+    private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
+    private final long cooldownMillis;
+    private final int cooldownTicks;
+
     public AirSwordListener(CookiePl plugin) {
-        this.plugin = plugin;
-        this.cooldownMillis = plugin.getConfig().getInt("modules.air-sword.cooldown-ticks", 10) * 50L;
+        this.cooldownTicks = plugin.getConfig().getInt("modules.air-sword.cooldown-ticks", 10);
+        this.cooldownMillis = this.cooldownTicks * 50L;
     }
 
     @EventHandler
@@ -43,37 +44,50 @@ public class AirSwordListener implements Listener {
             return;
         }
 
-        Player player = event.getPlayer();
-        ItemStack itemInHand = player.getInventory().getItemInMainHand();
-
-        if (!SWORD_MATERIALS.contains(itemInHand.getType())) {
+        if (event.getHand() != EquipmentSlot.HAND) {
             return;
         }
 
-        if (isOnCooldown(player)) {
+        if (!event.hasItem()) {
+            return;
+        }
+
+        ItemStack itemInHand = event.getItem();
+        Material material = itemInHand.getType();
+
+        if (!SWORD_MATERIALS.contains(material)) {
+            return;
+        }
+
+        Player player = event.getPlayer();
+
+        if (isOnCooldown(player.getUniqueId())) {
             return;
         }
 
         event.setCancelled(true);
-        setCooldown(player);
+        setCooldown(player.getUniqueId());
 
-        int cooldownTicks = plugin.getConfig().getInt("modules.air-sword.cooldown-ticks", 10);
-        player.setCooldown(itemInHand.getType(), cooldownTicks);
-
+        player.setCooldown(material, this.cooldownTicks);
         player.playSound(player.getLocation(), Sound.ENTITY_WITCH_THROW, 1.0f, 1.0f);
 
-        Location particleLocation = player.getLocation()
-                .add(0, 1, 0)
-                .add(player.getLocation().getDirection());
-        player.getWorld().spawnParticle(Particle.SWEEP_ATTACK, particleLocation, 1, 0, 0, 0, 0);
+        Location particleLocation = player.getLocation();
+        particleLocation.add(0.0, 1.0, 0.0);
+        particleLocation.add(particleLocation.getDirection());
+
+        player.getWorld().spawnParticle(Particle.SWEEP_ATTACK, particleLocation, 1, 0.0, 0.0, 0.0, 0.0);
     }
 
-    private boolean isOnCooldown(Player player) {
-        long lastUsed = cooldowns.getOrDefault(player.getUniqueId(), 0L);
-        return (System.currentTimeMillis() - lastUsed) < cooldownMillis;
+    public void clearCooldowns() {
+        this.cooldowns.clear();
     }
 
-    private void setCooldown(Player player) {
-        cooldowns.put(player.getUniqueId(), System.currentTimeMillis());
+    private boolean isOnCooldown(UUID playerId) {
+        long lastUsed = this.cooldowns.getOrDefault(playerId, 0L);
+        return System.currentTimeMillis() - lastUsed < this.cooldownMillis;
+    }
+
+    private void setCooldown(UUID playerId) {
+        this.cooldowns.put(playerId, System.currentTimeMillis());
     }
 }

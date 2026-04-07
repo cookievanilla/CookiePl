@@ -9,7 +9,7 @@ softdepend: [PlaceholderAPI, DiscordSRV, SkinsRestorer, LuckPerms, squaremap]
 commands:
   cookiepl:
     description: Main command for the CookiePl plugin.
-    usage: /<command> <reload|fixinvulnerable>
+    usage: /<command> <reload>
     permission: cookiepl.command.base
     permission-message: "You do not have permission to use this command."
   wheremyframe:

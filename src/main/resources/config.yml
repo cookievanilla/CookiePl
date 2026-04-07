@@ -263,15 +263,6 @@ modules:
     check-period-ticks: 100
     save-period-ticks: 1200
 
-  update-server:
-    enabled: false
-    port: 20564
-    api-key: "UPDATE_SERVER_API_KEY"
-    public-url: "http://your.domain.com:20564"
-    downloads-dir: "downloads"
-    update-json-file: "update.json"
-    update-route: "/update/coreprotecttnt"
-
   web-server:
     enabled: true
     port: 8080

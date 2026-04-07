@@ -6,11 +6,6 @@ import com.tcoded.folialib.wrapper.task.WrappedTask;
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.HandlerList;
-import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerJoinEvent;
-import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.io.File;
 import java.io.IOException;
@@ -20,13 +15,16 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class ActivePlayerManager implements Listener {
+public class ActivePlayerManager {
     private static final long DEFAULT_REQUIRED_ACTIVE_MS = 60L * 60L * 1000L;
     private static final long DEFAULT_ROLE_DURATION_MS = 3L * 24L * 60L * 60L * 1000L;
 
@@ -34,13 +32,11 @@ public class ActivePlayerManager implements Listener {
     private final String configKey;
     private final File dataFile;
     private final HttpClient httpClient;
-    private final Map<UUID, SessionState> sessions = new ConcurrentHashMap<>();
     private final Map<String, GrantState> grantsByUuid = new ConcurrentHashMap<>();
     private final AtomicBoolean saveRunning = new AtomicBoolean(false);
 
     private WrappedTask monitorTask;
     private WrappedTask saveTask;
-    private WrappedTask bootstrapTask;
 
     private volatile String endpointUrl;
     private volatile long requiredActiveMs;
@@ -60,62 +56,41 @@ public class ActivePlayerManager implements Listener {
     }
 
     public void start() {
-        Bukkit.getPluginManager().registerEvents(this, plugin);
-        long now = System.currentTimeMillis();
-        for (Player player : plugin.getServer().getOnlinePlayers()) {
-            SessionState state = sessions.computeIfAbsent(player.getUniqueId(), ignored -> new SessionState());
-            state.sessionStartMs = now;
-        }
-        monitorTask = plugin.getFoliaLib().getScheduler().runTimer(this::tick, 20L, Math.max(20L, monitorPeriodTicks));
-        saveTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::saveDataSafe, Math.max(20L, savePeriodTicks), Math.max(20L, savePeriodTicks));
-        bootstrapTask = plugin.getFoliaLib().getScheduler().runTimer(this::bootstrapOnlineSessions, 1L, 40L);
+        long monitorTicks = Math.max(20L, monitorPeriodTicks);
+        long persistTicks = Math.max(20L, savePeriodTicks);
+        monitorTask = plugin.getFoliaLib().getScheduler().runTimer(this::tick, 20L, monitorTicks);
+        saveTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::saveDataSafe, persistTicks, persistTicks);
+        bootstrapOnlinePlayers();
     }
 
     public void shutdown() {
-        HandlerList.unregisterAll(this);
         cancel(monitorTask);
         cancel(saveTask);
-        cancel(bootstrapTask);
         monitorTask = null;
         saveTask = null;
-        bootstrapTask = null;
         saveNow();
-        sessions.clear();
-    }
-
-    @EventHandler
-    public void onJoin(PlayerJoinEvent event) {
-        SessionState state = sessions.computeIfAbsent(event.getPlayer().getUniqueId(), ignored -> new SessionState());
-        state.sessionStartMs = System.currentTimeMillis();
-        state.initialized = false;
-        state.sessionStartActiveMs = 0L;
-        state.grantedThisSession = false;
-    }
-
-    @EventHandler
-    public void onQuit(PlayerQuitEvent event) {
-        sessions.remove(event.getPlayer().getUniqueId());
     }
 
     private void tick() {
         long now = System.currentTimeMillis();
         DatabaseManager db = plugin.getWebDatabaseManager();
-        bootstrapOnlineSessions();
+        bootstrapOnlinePlayers();
         if (db != null && !databaseStateRestored) restoreDatabaseState(db, now);
         evaluateOnlinePlayers(db, now);
         revokeExpiredOffline(now, db);
         syncPendingStates();
     }
 
-    private void bootstrapOnlineSessions() {
+    private void bootstrapOnlinePlayers() {
         DatabaseManager db = plugin.getWebDatabaseManager();
-        long now = System.currentTimeMillis();
-        for (Player player : plugin.getServer().getOnlinePlayers()) {
-            SessionState state = sessions.computeIfAbsent(player.getUniqueId(), ignored -> new SessionState());
-            if (state.sessionStartMs <= 0L) state.sessionStartMs = now;
-            if (!state.initialized && db != null) {
-                state.sessionStartActiveMs = Math.max(0L, db.getActivePlaytimeMillis(player.getUniqueId()));
-                state.initialized = true;
+        if (db == null) return;
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            GrantState grant = grantsByUuid.computeIfAbsent(player.getUniqueId().toString(), ignored -> new GrantState());
+            synchronized (grant) {
+                if (isBlank(grant.discordId)) {
+                    String discordId = db.getDiscordIdByMinecraftUuid(player.getUniqueId());
+                    if (!isBlank(discordId)) grant.discordId = discordId;
+                }
             }
         }
     }
@@ -148,49 +123,51 @@ public class ActivePlayerManager implements Listener {
 
     private void evaluateOnlinePlayers(DatabaseManager db, long now) {
         if (db == null) return;
+        int todayKey = dayKey(now);
 
-        for (Player player : plugin.getServer().getOnlinePlayers()) {
+        for (Player player : Bukkit.getOnlinePlayers()) {
             UUID uuid = player.getUniqueId();
-            SessionState session = sessions.computeIfAbsent(uuid, ignored -> new SessionState());
-            if (session.sessionStartMs <= 0L) session.sessionStartMs = now;
-            if (!session.initialized) {
-                session.sessionStartActiveMs = Math.max(0L, db.getActivePlaytimeMillis(uuid));
-                session.initialized = true;
-                continue;
-            }
-
             GrantState grant = grantsByUuid.computeIfAbsent(uuid.toString(), ignored -> new GrantState());
+
             synchronized (grant) {
                 if (isBlank(grant.discordId)) {
                     String discordId = db.getDiscordIdByMinecraftUuid(uuid);
                     if (!isBlank(discordId)) grant.discordId = discordId;
                 }
+                if (grant.active && grant.activeUntilMs > 0L && grant.activeUntilMs <= now) {
+                    grant.active = false;
+                    grant.activeUntilMs = 0L;
+                    grant.lastSyncedState = null;
+                    if (!isBlank(grant.discordId)) db.setPlayerActive(grant.discordId, false);
+                }
             }
 
-            if (session.grantedThisSession) continue;
-
-            long currentActiveMs = Math.max(0L, db.getActivePlaytimeMillis(uuid));
-            if (currentActiveMs - session.sessionStartActiveMs < requiredActiveMs) continue;
-            if (grantRole(uuid, grant, db, now)) session.grantedThisSession = true;
+            long playedTodayMs = Math.max(0L, db.getActivePlaytimeTodayMillis(uuid));
+            if (playedTodayMs < requiredActiveMs) continue;
+            grantRoleForToday(uuid, grant, db, todayKey, now);
         }
     }
 
-    private boolean grantRole(UUID uuid, GrantState grant, DatabaseManager db, long now) {
+    private void grantRoleForToday(UUID uuid, GrantState grant, DatabaseManager db, int todayKey, long now) {
         String discordId;
+        boolean changed = false;
         synchronized (grant) {
+            if (grant.lastQualifiedDayKey == todayKey) return;
             if (isBlank(grant.discordId)) {
                 String resolved = db.getDiscordIdByMinecraftUuid(uuid);
                 if (!isBlank(resolved)) grant.discordId = resolved;
             }
             discordId = grant.discordId;
-            if (isBlank(discordId)) return false;
+            if (isBlank(discordId)) return;
+            grant.lastQualifiedDayKey = todayKey;
             grant.active = true;
             grant.activeUntilMs = now + Math.max(1000L, roleDurationMs);
             grant.lastSyncedState = null;
+            changed = true;
         }
+        if (!changed) return;
         db.setPlayerActive(discordId, true);
         queueSync(grant);
-        return true;
     }
 
     private void revokeExpiredOffline(long now, DatabaseManager db) {
@@ -298,6 +275,7 @@ public class ActivePlayerManager implements Listener {
             grant.discordId = blankToNull(yaml.getString(base + ".discord-id", ""));
             grant.active = yaml.getBoolean(base + ".active", false);
             grant.activeUntilMs = Math.max(0L, yaml.getLong(base + ".active-until-ms", 0L));
+            grant.lastQualifiedDayKey = yaml.getInt(base + ".last-qualified-day-key", 0);
             grant.lastSyncedState = grant.active ? null : Boolean.FALSE;
             grant.syncInProgress = false;
             grantsByUuid.put(key, grant);
@@ -319,6 +297,7 @@ public class ActivePlayerManager implements Listener {
                     if (!isBlank(grant.discordId)) yaml.set(base + ".discord-id", grant.discordId);
                     yaml.set(base + ".active", grant.active);
                     yaml.set(base + ".active-until-ms", Math.max(0L, grant.activeUntilMs));
+                    yaml.set(base + ".last-qualified-day-key", grant.lastQualifiedDayKey);
                 }
             }
             File parent = dataFile.getParentFile();
@@ -331,10 +310,16 @@ public class ActivePlayerManager implements Listener {
         }
     }
 
+    private int dayKey(long ms) {
+        LocalDate date = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate();
+        return date.getYear() * 10000 + date.getMonthValue() * 100 + date.getDayOfMonth();
+    }
+
     private static void cancel(WrappedTask task) {
         try {
             if (task != null) task.cancel();
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
     }
 
     private static boolean isBlank(String value) {
@@ -367,17 +352,11 @@ public class ActivePlayerManager implements Listener {
         return out.toString();
     }
 
-    private static final class SessionState {
-        long sessionStartMs;
-        long sessionStartActiveMs;
-        boolean initialized;
-        boolean grantedThisSession;
-    }
-
     private static final class GrantState {
         String discordId;
         boolean active;
         long activeUntilMs;
+        int lastQualifiedDayKey;
         Boolean lastSyncedState;
         boolean syncInProgress;
     }

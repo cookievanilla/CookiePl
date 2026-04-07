@@ -252,6 +252,18 @@ public class DatabaseManager {
         }
     }
 
+    public long getActivePlaytimeTodayMillis(UUID minecraftUuid) {
+        if (minecraftUuid == null) return 0L;
+        long now = System.currentTimeMillis();
+        TimeState st = ensureTimeStateLoaded(minecraftUuid.toString(), now);
+        if (st == null) return 0L;
+        int currentDayKey = dayKey(now);
+        synchronized (st) {
+            if (st.dayKey != currentDayKey) return 0L;
+            return Math.max(0L, st.activeTodayMs);
+        }
+    }
+
     public String getDiscordIdByMinecraftUuid(UUID minecraftUuid) {
         if (minecraftUuid == null) return null;
         String uuid = minecraftUuid.toString();
