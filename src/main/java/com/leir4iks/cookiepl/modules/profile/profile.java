@@ -4,6 +4,7 @@ import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
 import com.leir4iks.cookiepl.modules.profile.features.adventure;
 import com.leir4iks.cookiepl.modules.profile.features.death;
+import com.leir4iks.cookiepl.modules.profile.features.phantoms;
 import com.leir4iks.cookiepl.modules.profile.features.squaremap;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -40,6 +41,7 @@ public class profile implements IModule, Listener, CommandExecutor {
     private static final int DEATH_SLOT = 11;
     private static final int ADVANCEMENT_SLOT = 13;
     private static final int SQUAREMAP_SLOT = 15;
+    private static final int PHANTOMS_SLOT = 16;
 
     private static final int BACK_SLOT = 18;
     private static final int CLOSE_SLOT = 22;
@@ -48,6 +50,7 @@ public class profile implements IModule, Listener, CommandExecutor {
     private death deathFeature;
     private adventure adventureFeature;
     private squaremap squaremapFeature;
+    private phantoms phantomsFeature;
 
     @Override
     public void enable(CookiePl plugin) {
@@ -55,6 +58,7 @@ public class profile implements IModule, Listener, CommandExecutor {
 
         this.deathFeature = new death(plugin);
         this.adventureFeature = new adventure(plugin);
+        this.phantomsFeature = new phantoms(plugin);
 
         if (plugin.getServer().getPluginManager().isPluginEnabled("squaremap")) {
             this.squaremapFeature = new squaremap();
@@ -63,6 +67,7 @@ public class profile implements IModule, Listener, CommandExecutor {
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
         plugin.getServer().getPluginManager().registerEvents(deathFeature, plugin);
         plugin.getServer().getPluginManager().registerEvents(adventureFeature, plugin);
+        plugin.getServer().getPluginManager().registerEvents(phantomsFeature, plugin);
 
         PluginCommand command = plugin.getCommand("profile");
         if (command != null) {
@@ -89,10 +94,14 @@ public class profile implements IModule, Listener, CommandExecutor {
         if (adventureFeature != null) {
             HandlerList.unregisterAll(adventureFeature);
         }
+        if (phantomsFeature != null) {
+            HandlerList.unregisterAll(phantomsFeature);
+        }
 
         this.deathFeature = null;
         this.adventureFeature = null;
         this.squaremapFeature = null;
+        this.phantomsFeature = null;
         this.plugin = null;
     }
 
@@ -180,6 +189,20 @@ public class profile implements IModule, Listener, CommandExecutor {
 
         inventory.setItem(SQUAREMAP_SLOT, createSquaremapItem(player));
 
+        inventory.setItem(PHANTOMS_SLOT, createToggleItem(
+                Material.PHANTOM_MEMBRANE,
+                getString("modules.profile.menu.items.phantoms.name", "&fСпавн фантомов"),
+                !phantomsFeature.isPhantomSpawnDisabled(player),
+                getStringList(
+                        "modules.profile.menu.items.phantoms.description",
+                        List.of("&7Включение/выключение спавна фантомов")
+                ),
+                getString("modules.profile.menu.items.phantoms.state-enabled", "&aвключено"),
+                getString("modules.profile.menu.items.phantoms.state-disabled", "&cвыключено"),
+                getString("modules.profile.menu.items.phantoms.click-to-enable", "&7Нажми, чтобы включить спавн"),
+                getString("modules.profile.menu.items.phantoms.click-to-disable", "&7Нажми, чтобы выключить спавн")
+        ));
+
         inventory.setItem(BACK_SLOT, createItem(
                 Material.ARROW,
                 getString("modules.profile.menu.items.back.name", "&7Назад"),
@@ -233,11 +256,19 @@ public class profile implements IModule, Listener, CommandExecutor {
         lore.add(color("&7Смерти: " + formatState(deathFeature.isVisible(player))));
         lore.add(color("&7Достижения: " + formatState(adventureFeature.isVisible(player))));
         lore.add(color("&7Карта: " + formatSquaremapState(player)));
+        lore.add(color("&7Фантомы: " + formatPhantomState(player)));
 
         meta.setLore(lore);
         meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
         item.setItemMeta(meta);
         return item;
+    }
+
+    private String formatPhantomState(Player player) {
+        boolean spawnEnabled = !phantomsFeature.isPhantomSpawnDisabled(player);
+        return spawnEnabled
+                ? getString("modules.profile.menu.items.phantoms.state-enabled", "&aвключено")
+                : getString("modules.profile.menu.items.phantoms.state-disabled", "&cвыключено");
     }
 
     private ItemStack createCloseItem() {
@@ -294,6 +325,26 @@ public class profile implements IModule, Listener, CommandExecutor {
     }
 
     private ItemStack createToggleItem(Material material, String displayName, boolean enabled, List<String> description) {
+        return createToggleItem(
+                material,
+                displayName,
+                enabled,
+                description,
+                formatState(enabled),
+                enabled
+                        ? getString("modules.profile.menu.common.click-to-disable", "&7Нажми, чтобы скрыть")
+                        : getString("modules.profile.menu.common.click-to-enable", "&7Нажми, чтобы показать")
+        );
+    }
+
+    private ItemStack createToggleItem(
+            Material material,
+            String displayName,
+            boolean enabled,
+            List<String> description,
+            String stateText,
+            String clickText
+    ) {
         ItemStack item = new ItemStack(material);
         ItemMeta meta = item.getItemMeta();
         if (meta == null) {
@@ -308,15 +359,33 @@ public class profile implements IModule, Listener, CommandExecutor {
         }
 
         lore.add("");
-        lore.add(color("&7Статус: " + formatState(enabled)));
-        lore.add(color(enabled
-                ? getString("modules.profile.menu.common.click-to-disable", "&7Нажми, чтобы скрыть")
-                : getString("modules.profile.menu.common.click-to-enable", "&7Нажми, чтобы показать")));
+        lore.add(color("&7Статус: " + stateText));
+        lore.add(color(clickText));
 
         meta.setLore(lore);
         meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
         item.setItemMeta(meta);
         return item;
+    }
+
+    private ItemStack createToggleItem(
+            Material material,
+            String displayName,
+            boolean enabled,
+            List<String> description,
+            String enabledStateText,
+            String disabledStateText,
+            String clickToEnable,
+            String clickToDisable
+    ) {
+        return createToggleItem(
+                material,
+                displayName,
+                enabled,
+                description,
+                enabled ? enabledStateText : disabledStateText,
+                enabled ? clickToDisable : clickToEnable
+        );
     }
 
     private String formatState(boolean enabled) {
@@ -434,6 +503,18 @@ public class profile implements IModule, Listener, CommandExecutor {
                     )));
                 }
 
+                renderProfileSettingsMenu(player, inventory);
+            }
+            case PHANTOMS_SLOT -> {
+                boolean nowDisabled = phantomsFeature.togglePhantomSpawnDisabled(player);
+                player.sendMessage(color(getString(
+                        nowDisabled
+                                ? "modules.profile.messages.phantoms-disabled"
+                                : "modules.profile.messages.phantoms-enabled",
+                        nowDisabled
+                                ? "&7Профиль: &fспавн фантомов выключен."
+                                : "&7Профиль: &fспавн фантомов включен."
+                )));
                 renderProfileSettingsMenu(player, inventory);
             }
             case BACK_SLOT -> openCategoriesMenu(player);

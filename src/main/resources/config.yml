@@ -206,6 +206,9 @@ modules:
     enabled: true
     permission: "cookiepl.command.profile"
 
+    phantoms:
+      max-range: 32.0
+
     menu:
       categories:
         title: "&8Профиль"
@@ -235,6 +238,15 @@ modules:
           description:
             - "&7Показ/скрытие игрока на карте squaremap"
 
+        phantoms:
+          name: "&fСпавн фантомов"
+          description:
+            - "&7Включение/выключение спавна фантомов"
+          state-enabled: "&aвключено"
+          state-disabled: "&cвыключено"
+          click-to-enable: "&7Нажми, чтобы включить спавн"
+          click-to-disable: "&7Нажми, чтобы выключить спавн"
+
         back:
           name: "&7Назад"
           description:
@@ -253,6 +265,8 @@ modules:
       squaremap-enabled: "&7Профиль: &fотображение на карте включено."
       squaremap-disabled: "&7Профиль: &fотображение на карте скрыто."
       squaremap-unavailable: "&cSquaremap не найден или ещё не загрузился."
+      phantoms-enabled: "&7Профиль: &fспавн фантомов включен."
+      phantoms-disabled: "&7Профиль: &fспавн фантомов выключен."
 
   active-player:
     enabled: true

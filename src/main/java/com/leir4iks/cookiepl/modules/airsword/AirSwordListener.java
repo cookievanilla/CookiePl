@@ -26,7 +26,8 @@ public final class AirSwordListener implements Listener {
             Material.IRON_SWORD,
             Material.GOLDEN_SWORD,
             Material.DIAMOND_SWORD,
-            Material.NETHERITE_SWORD
+            Material.NETHERITE_SWORD,
+            Material.COPPER_SWORD
     );
 
     private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
