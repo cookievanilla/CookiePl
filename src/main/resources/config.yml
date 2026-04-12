@@ -14,6 +14,22 @@ modules:
     enabled: true
     cooldown-ticks: 10
 
+  hat:
+    enabled: true
+    permission: "cookiepl.command.hat"
+    permission-ignore-binding: "cookiepl.hat.ignore-binding"
+    prevent-type-permission-prefix: "cookiepl.hat.prevent-type."
+    messages:
+      prefix: "&6[/hat] "
+      players-only: "&cЭту команду может использовать только игрок."
+      no-permission: "&cУ тебя нет прав на использование этой команды."
+      hat-fail: "&cУ тебя в руке нет подходящего предмета."
+      hat-armor: "&cЭтот предмет нельзя надеть как шляпу."
+      hat-curse: "&cНельзя снять предмет с проклятием несьемности."
+      hat-placed: "&aПредмет теперь у тебя на голове."
+      hat-empty: "&cНа тебе сейчас нет шляпы."
+      hat-removed: "&aШляпа снята."
+
   fun-commands:
     enabled: true
     permission-fart: "cookiepl.command.fart"
@@ -206,9 +222,6 @@ modules:
     enabled: true
     permission: "cookiepl.command.profile"
 
-    phantoms:
-      max-range: 32.0
-
     menu:
       categories:
         title: "&8Профиль"
@@ -238,15 +251,6 @@ modules:
           description:
             - "&7Показ/скрытие игрока на карте squaremap"
 
-        phantoms:
-          name: "&fСпавн фантомов"
-          description:
-            - "&7Включение/выключение спавна фантомов"
-          state-enabled: "&aвключено"
-          state-disabled: "&cвыключено"
-          click-to-enable: "&7Нажми, чтобы включить спавн"
-          click-to-disable: "&7Нажми, чтобы выключить спавн"
-
         back:
           name: "&7Назад"
           description:
@@ -265,8 +269,6 @@ modules:
       squaremap-enabled: "&7Профиль: &fотображение на карте включено."
       squaremap-disabled: "&7Профиль: &fотображение на карте скрыто."
       squaremap-unavailable: "&cSquaremap не найден или ещё не загрузился."
-      phantoms-enabled: "&7Профиль: &fспавн фантомов включен."
-      phantoms-disabled: "&7Профиль: &fспавн фантомов выключен."
 
   active-player:
     enabled: true
