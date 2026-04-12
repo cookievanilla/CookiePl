@@ -1,26 +1,22 @@
 package com.leir4iks.cookiepl.modules.profile.features;
 
 import com.leir4iks.cookiepl.CookiePl;
-import org.bukkit.NamespacedKey;
+import com.leir4iks.cookiepl.modules.profile.ProfileStorage;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.CreatureSpawnEvent;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 
 public class phantoms implements Listener {
 
-    private static final byte TRUE = 1;
-
     private final CookiePl plugin;
-    private final NamespacedKey phantomDisabledKey;
+    private final ProfileStorage storage;
 
-    public phantoms(CookiePl plugin) {
+    public phantoms(CookiePl plugin, ProfileStorage storage) {
         this.plugin = plugin;
-        this.phantomDisabledKey = new NamespacedKey(plugin, "profile_disable_phantom_spawn");
+        this.storage = storage;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -47,9 +43,7 @@ public class phantoms implements Listener {
     }
 
     public boolean isPhantomSpawnDisabled(Player player) {
-        PersistentDataContainer pdc = player.getPersistentDataContainer();
-        Byte value = pdc.get(phantomDisabledKey, PersistentDataType.BYTE);
-        return value != null && value == TRUE;
+        return storage.isPhantomSpawnDisabled(player.getUniqueId());
     }
 
     public boolean togglePhantomSpawnDisabled(Player player) {
@@ -59,13 +53,6 @@ public class phantoms implements Listener {
     }
 
     public void setPhantomSpawnDisabled(Player player, boolean disabled) {
-        PersistentDataContainer pdc = player.getPersistentDataContainer();
-
-        if (!disabled) {
-            pdc.remove(phantomDisabledKey);
-            return;
-        }
-
-        pdc.set(phantomDisabledKey, PersistentDataType.BYTE, TRUE);
+        storage.setPhantomSpawnDisabled(player.getUniqueId(), disabled);
     }
 }

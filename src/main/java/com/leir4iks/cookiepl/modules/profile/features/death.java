@@ -1,23 +1,19 @@
 package com.leir4iks.cookiepl.modules.profile.features;
 
-import com.leir4iks.cookiepl.CookiePl;
+import com.leir4iks.cookiepl.modules.profile.ProfileStorage;
 import net.kyori.adventure.text.Component;
-import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 
 public class death implements Listener {
 
-    private static final byte FALSE = 0;
-    private final NamespacedKey deathVisibleKey;
+    private final ProfileStorage storage;
 
-    public death(CookiePl plugin) {
-        this.deathVisibleKey = new NamespacedKey(plugin, "profile_show_death_messages");
+    public death(ProfileStorage storage) {
+        this.storage = storage;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -35,9 +31,7 @@ public class death implements Listener {
     }
 
     public boolean isVisible(Player player) {
-        PersistentDataContainer pdc = player.getPersistentDataContainer();
-        Byte value = pdc.get(deathVisibleKey, PersistentDataType.BYTE);
-        return value == null || value != FALSE;
+        return storage.isDeathMessageVisible(player.getUniqueId());
     }
 
     public boolean toggleVisible(Player player) {
@@ -47,13 +41,6 @@ public class death implements Listener {
     }
 
     public void setVisible(Player player, boolean visible) {
-        PersistentDataContainer pdc = player.getPersistentDataContainer();
-
-        if (visible) {
-            pdc.remove(deathVisibleKey);
-            return;
-        }
-
-        pdc.set(deathVisibleKey, PersistentDataType.BYTE, FALSE);
+        storage.setDeathMessageVisible(player.getUniqueId(), visible);
     }
 }
