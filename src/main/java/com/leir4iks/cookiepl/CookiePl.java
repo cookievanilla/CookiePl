@@ -3,6 +3,7 @@ package com.leir4iks.cookiepl;
 import com.leir4iks.cookiepl.commands.MainCommand;
 import com.leir4iks.cookiepl.config.ConfigManager;
 import com.leir4iks.cookiepl.modules.IModule;
+import com.leir4iks.cookiepl.permissions.PermissionRegistrar;
 import com.leir4iks.cookiepl.modules.web.DatabaseManager;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.FoliaLib;
@@ -22,6 +23,7 @@ public final class CookiePl extends JavaPlugin {
     private LogManager logManager;
     private FoliaLib foliaLib;
     private ConfigManager configManager;
+    private PermissionRegistrar permissionRegistrar;
     private volatile DatabaseManager webDatabaseManager;
 
     @Override
@@ -37,6 +39,10 @@ public final class CookiePl extends JavaPlugin {
         loadEnabledModules();
 
         Objects.requireNonNull(getCommand("cookiepl")).setExecutor(new MainCommand(this));
+
+        this.permissionRegistrar = new PermissionRegistrar(this);
+        getServer().getPluginManager().registerEvents(this.permissionRegistrar, this);
+        this.permissionRegistrar.apply();
 
         logInfo("CookiePl has been enabled with " + enabledModules.size() + " modules.");
     }
@@ -238,6 +244,9 @@ public final class CookiePl extends JavaPlugin {
         startupDebug();
         scanAndRegisterModules();
         loadEnabledModules();
+        if (permissionRegistrar != null) {
+            permissionRegistrar.apply();
+        }
         logInfo("Reload complete. " + enabledModules.size() + " modules are now active.");
     }
 

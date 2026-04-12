@@ -10,45 +10,79 @@ commands:
   cookiepl:
     description: Main command for the CookiePl plugin.
     usage: /<command> <reload>
-    permission: cookiepl.command.base
-    permission-message: "You do not have permission to use this command."
   wheremyframe:
     description: WhereMyFrame module command.
     usage: /<command> <info>
     aliases: [wmf]
-    permission: cookiepl.command.wmf
-    permission-message: "You do not have permission to use this command."
   fart:
     description: Makes a fart sound and effect.
     usage: /<command>
-    permission: cookiepl.command.fart
-    permission-message: "You do not have permission to use this command."
   spit:
     description: Spits a stream of particles.
     usage: /<command>
-    permission: cookiepl.command.spit
-    permission-message: "You do not have permission to use this command."
   police:
     description: Police system commands.
     usage: /<command> give <item>
-    permission: cookiepl.police.use
-    permission-message: "You do not have permission to use this command."
   resize:
     description: Change the size of yourself or another player.
     usage: /resize <scale> [player]
     aliases: [res]
-    permission: cookiepl.resize
-    permission-message: "You do not have permission to use this command."
   afk:
     description: Toggle AFK status.
     usage: /<command>
-    permission: cookiepl.command.afk
-    permission-message: "You do not have permission to use this command."
   profile:
     description: Open profile settings.
     usage: /<command>
-    permission: cookiepl.command.profile
-    permission-message: "You do not have permission to use this command."
   hat:
     description: Wear the item in your hand as a hat.
     usage: /<command> [remove|off|0]
+
+permissions:
+  cookiepl.command.base:
+    description: Allows use of /cookiepl.
+    default: false
+  cookiepl.command.reload:
+    description: Allows reloading CookiePl.
+    default: false
+  cookiepl.command.wmf:
+    description: Allows use of /wheremyframe.
+    default: false
+  cookiepl.command.fart:
+    description: Allows use of /fart.
+    default: false
+  cookiepl.command.spit:
+    description: Allows use of /spit.
+    default: false
+  cookiepl.command.afk:
+    description: Allows use of /afk.
+    default: false
+  cookiepl.police.use:
+    description: Allows use of /police and police interactions.
+    default: false
+  cookiepl.resize:
+    description: Allows use of /resize.
+    default: false
+  cookiepl.resize.extended:
+    description: Allows extended resize range.
+    default: false
+  cookiepl.resize.others:
+    description: Allows resizing other players.
+    default: false
+  cookiepl.resize.reload:
+    description: Allows resize reload subcommand.
+    default: false
+  cookiepl.resize.bypass.cooldown:
+    description: Allows bypassing resize cooldown.
+    default: false
+  cookiepl.playerheads.bypass:
+    description: Prevents the player head drop mechanic from affecting the player.
+    default: false
+  cookiepl.antielytra.bypass:
+    description: Bypasses anti-elytra restrictions.
+    default: false
+  cookiepl.antigrief.bypass:
+    description: Bypasses anti-grief restrictions.
+    default: false
+  cookiepl.hat.ignore-binding:
+    description: Allows ignoring binding curse restrictions in /hat.
+    default: false

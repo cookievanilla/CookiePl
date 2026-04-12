@@ -196,6 +196,7 @@ modules:
 
   afk-system:
     enabled: true
+    permission: "cookiepl.command.afk"
     afk-time-seconds: 300
     freeze-player: false
     indicator:
