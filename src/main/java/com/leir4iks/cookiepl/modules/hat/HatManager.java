@@ -20,6 +20,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+    /*
+     * Thanks to Essentials
+     */
+
 public class HatManager implements CommandExecutor, TabCompleter {
 
     private final CookiePl plugin;
