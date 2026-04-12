@@ -47,6 +47,7 @@ public class profile implements IModule, Listener, CommandExecutor {
     private static final int CLOSE_SLOT = 22;
 
     private CookiePl plugin;
+    private ProfileStorage storage;
     private death deathFeature;
     private adventure adventureFeature;
     private squaremap squaremapFeature;
@@ -56,9 +57,10 @@ public class profile implements IModule, Listener, CommandExecutor {
     public void enable(CookiePl plugin) {
         this.plugin = plugin;
 
-        this.deathFeature = new death(plugin);
-        this.adventureFeature = new adventure(plugin);
-        this.phantomsFeature = new phantoms(plugin);
+        this.storage = new ProfileStorage(plugin);
+        this.deathFeature = new death(storage);
+        this.adventureFeature = new adventure(storage);
+        this.phantomsFeature = new phantoms(plugin, storage);
 
         if (plugin.getServer().getPluginManager().isPluginEnabled("squaremap")) {
             this.squaremapFeature = new squaremap();
@@ -73,6 +75,7 @@ public class profile implements IModule, Listener, CommandExecutor {
         if (command != null) {
             command.setExecutor(this);
             command.setPermission(null);
+            command.setPermissionMessage(null);
         }
     }
 
@@ -95,6 +98,7 @@ public class profile implements IModule, Listener, CommandExecutor {
             HandlerList.unregisterAll(phantomsFeature);
         }
 
+        this.storage = null;
         this.deathFeature = null;
         this.adventureFeature = null;
         this.squaremapFeature = null;
