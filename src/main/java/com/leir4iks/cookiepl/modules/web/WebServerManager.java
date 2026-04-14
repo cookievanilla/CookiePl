@@ -4,6 +4,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.leir4iks.cookiepl.CookiePl;
+import com.leir4iks.cookiepl.modules.tags.TagsManager;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
@@ -14,12 +15,17 @@ import org.bukkit.entity.Player;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
+import java.math.BigInteger;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 public class WebServerManager {
+    private static final String TAGS_SECRET_HEADER = "X-Tags-Secret";
     private final CookiePl plugin;
     private final DatabaseManager db;
     private final int port;
@@ -46,6 +52,7 @@ public class WebServerManager {
             server.createContext("/serverinfo", this::handleServerInfo);
             server.createContext("/serverstats", this::handleServerStats);
             server.createContext("/admin/players", this::handleAdminPlayers);
+            server.createContext("/tags", this::handleTags);
 
             server.setExecutor(Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors())));
             server.start();
@@ -227,6 +234,58 @@ public class WebServerManager {
         send(ex, 405, "{\"error\":\"Method not allowed\"}");
     }
 
+    private void handleTags(HttpExchange ex) throws IOException {
+        if (preflight(ex)) return;
+
+        String path = ex.getRequestURI().getPath();
+        if (!"/tags/sync".equals(path) && !"/tags/sync/".equals(path)) {
+            send(ex, 404, "{\"error\":\"Not found\"}");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            send(ex, 405, "{\"error\":\"Method not allowed\"}");
+            return;
+        }
+
+        TagsManager tagsManager = plugin.getTagsManager();
+        if (tagsManager == null) {
+            send(ex, 503, "{\"error\":\"Tags module is disabled\"}");
+            return;
+        }
+
+        String remoteIp = clientIp(ex);
+        if (!isTagsIpAllowed(remoteIp)) {
+            send(ex, 403, "{\"error\":\"Forbidden\"}");
+            return;
+        }
+
+        String expectedSecret = plugin.getConfig().getString("modules.tags.secret", "");
+        if (expectedSecret != null && !expectedSecret.isBlank()) {
+            String providedSecret = ex.getRequestHeaders().getFirst(TAGS_SECRET_HEADER);
+            if (providedSecret == null || !expectedSecret.equals(providedSecret)) {
+                send(ex, 401, "{\"error\":\"Unauthorized\"}");
+                return;
+            }
+        }
+
+        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        try {
+            TagsManager.SyncResult result = tagsManager.applySync(body);
+            JsonObject response = new JsonObject();
+            response.addProperty("ok", true);
+            response.addProperty("guild_id", TagsManager.REQUIRED_GUILD_ID);
+            response.addProperty("definitions", result.definitionsCount());
+            response.addProperty("members", result.membersCount());
+            response.addProperty("synced_at", result.syncedAt());
+            send(ex, 200, response.toString());
+        } catch (IllegalArgumentException e) {
+            send(ex, 400, jsonError(e.getMessage()));
+        } catch (Exception e) {
+            plugin.getLogManager().warn("Failed to process tags sync: " + e.getMessage());
+            send(ex, 500, jsonError("Internal server error"));
+        }
+    }
+
     private void handleServerInfo(HttpExchange ex) throws IOException {
         if (preflight(ex)) return;
         send(ex, 200, cachedServerInfoJson);
@@ -241,13 +300,70 @@ public class WebServerManager {
         if (corsEnabled) {
             ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
             ex.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            ex.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization,token");
+            ex.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type,Authorization,token," + TAGS_SECRET_HEADER);
         }
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
             ex.sendResponseHeaders(204, -1);
             return true;
         }
         return false;
+    }
+
+    private boolean isTagsIpAllowed(String ip) {
+        List<String> whitelist = plugin.getConfig().getStringList("modules.tags.ip-whitelist");
+        if (whitelist == null || whitelist.isEmpty()) {
+            return false;
+        }
+        InetAddress address;
+        try {
+            address = InetAddress.getByName(ip);
+        } catch (Exception ignored) {
+            return false;
+        }
+        for (String entry : whitelist) {
+            if (entry == null || entry.isBlank()) {
+                continue;
+            }
+            if (matchesIpRule(address, entry.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesIpRule(InetAddress address, String rule) {
+        try {
+            if (rule.contains("/")) {
+                String[] parts = rule.split("/", 2);
+                InetAddress networkAddress = InetAddress.getByName(parts[0]);
+                int prefixLength = Integer.parseInt(parts[1]);
+                byte[] addressBytes = address.getAddress();
+                byte[] networkBytes = networkAddress.getAddress();
+                if (addressBytes.length != networkBytes.length) {
+                    return false;
+                }
+                int totalBits = addressBytes.length * 8;
+                if (prefixLength < 0 || prefixLength > totalBits) {
+                    return false;
+                }
+                BigInteger addressValue = new BigInteger(1, addressBytes);
+                BigInteger networkValue = new BigInteger(1, networkBytes);
+                BigInteger mask = prefixLength == 0
+                        ? BigInteger.ZERO
+                        : BigInteger.ONE.shiftLeft(totalBits).subtract(BigInteger.ONE).shiftRight(totalBits - prefixLength).shiftLeft(totalBits - prefixLength);
+                return addressValue.and(mask).equals(networkValue.and(mask));
+            }
+            InetAddress exactAddress = InetAddress.getByName(rule);
+            return Arrays.equals(address.getAddress(), exactAddress.getAddress());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String jsonError(String message) {
+        JsonObject out = new JsonObject();
+        out.addProperty("error", message == null ? "Unknown error" : message);
+        return out.toString();
     }
 
     private String clientIp(HttpExchange ex) {

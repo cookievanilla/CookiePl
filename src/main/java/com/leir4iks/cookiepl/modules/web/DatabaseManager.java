@@ -3,6 +3,7 @@ package com.leir4iks.cookiepl.modules.web;
 import com.google.gson.*;
 import com.google.gson.stream.JsonReader;
 import com.leir4iks.cookiepl.CookiePl;
+import com.leir4iks.cookiepl.modules.tags.TagsManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
@@ -906,12 +907,14 @@ public class DatabaseManager {
                 JsonObject summary = new JsonObject();
                 putBase(summary, discordId, minecraftName, minecraftUuid, links, isOnline, active);
                 summary.addProperty("play_time_hours", playHours);
-                summary.add("luckperms", lpGroups);
                 summary.add("flex", buildFlexJson(flexData));
+                summary.add("tags", buildTagsJsonForDiscordId(discordId));
+                summary.add("luckperms", lpGroups);
                 summaryArray.add(summary);
 
                 JsonObject full = new JsonObject();
                 putBase(full, discordId, minecraftName, minecraftUuid, links, isOnline, active);
+                full.add("tags", buildTagsJsonForDiscordId(discordId));
                 full.add("luckperms", lpGroups);
                 full.add("stats", statsObj);
 
@@ -1084,7 +1087,8 @@ public class DatabaseManager {
             }
 
             JsonObject flex = buildFlexJsonForDiscordId(discordId);
-            return GSON.toJson(reorderWithFlex(obj, flex));
+            JsonObject tags = buildTagsJsonForDiscordId(discordId);
+            return GSON.toJson(reorderWithFlexAndTags(obj, flex, tags));
         } catch (Exception ignored) {
             return baseJson;
         }
@@ -1121,18 +1125,20 @@ public class DatabaseManager {
         return out;
     }
 
-    private JsonObject reorderWithFlex(JsonObject src, JsonObject flexObj) {
+    private JsonObject reorderWithFlexAndTags(JsonObject src, JsonObject flexObj, JsonObject tagsObj) {
         JsonObject out = new JsonObject();
         String[] first = {"id", "minecraft_name", "minecraft_uuid", "skinUrl", "headUrl", "is_online", "active"};
         String[] after = {"luckperms", "stats", "tickets", "litebans"};
 
         for (String k : first) if (src.has(k)) out.add(k, src.get(k));
         out.add("flex", flexObj == null ? emptyFlexJson() : flexObj);
+        out.add("tags", tagsObj == null ? emptyTagsJson() : tagsObj);
         for (String k : after) if (src.has(k)) out.add(k, src.get(k));
 
         HashSet<String> used = new HashSet<>();
         Collections.addAll(used, first);
         used.add("flex");
+        used.add("tags");
         Collections.addAll(used, after);
 
         for (Map.Entry<String, JsonElement> e : src.entrySet()) {
@@ -1150,6 +1156,30 @@ public class DatabaseManager {
         o.add("subscription", toJsonArray(v.subscription()));
         o.addProperty("command", nz(v.command()));
         return o;
+    }
+
+    private JsonObject buildTagsJsonForDiscordId(String discordId) {
+        TagsManager tagsManager = plugin.getTagsManager();
+        if (tagsManager == null) {
+            return emptyTagsJson();
+        }
+        try {
+            return tagsManager.buildPlayerTagsJson(discordId);
+        } catch (Exception ignored) {
+            return emptyTagsJson();
+        }
+    }
+
+    private JsonObject emptyTagsJson() {
+        JsonObject out = new JsonObject();
+        out.addProperty("guild_id", TagsManager.REQUIRED_GUILD_ID);
+        out.addProperty("separator", " ");
+        out.addProperty("synced_at", "");
+        out.addProperty("count", 0);
+        out.addProperty("rendered", "");
+        out.add("roles", new JsonArray());
+        out.add("configured_roles", new JsonArray());
+        return out;
     }
 
     private Map<String, Boolean> readAllActiveStates() {
@@ -1487,6 +1517,7 @@ public class DatabaseManager {
 
             JsonObject full = new JsonObject();
             putBase(full, did, mcName, mcUuid, links, online, activeStateByDiscordId.getOrDefault(did, false));
+            full.add("tags", buildTagsJsonForDiscordId(did));
             full.add("luckperms", getLuckPermsGroups(uuid));
             full.add("stats", buildStatsJson(snap, adv, mcUuid, online, false));
             return GSON.toJson(full);

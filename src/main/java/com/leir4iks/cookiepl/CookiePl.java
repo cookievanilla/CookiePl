@@ -4,6 +4,7 @@ import com.leir4iks.cookiepl.commands.MainCommand;
 import com.leir4iks.cookiepl.config.ConfigManager;
 import com.leir4iks.cookiepl.modules.IModule;
 import com.leir4iks.cookiepl.permissions.PermissionRegistrar;
+import com.leir4iks.cookiepl.modules.tags.TagsManager;
 import com.leir4iks.cookiepl.modules.web.DatabaseManager;
 import com.leir4iks.cookiepl.util.LogManager;
 import com.tcoded.folialib.FoliaLib;
@@ -25,6 +26,7 @@ public final class CookiePl extends JavaPlugin {
     private ConfigManager configManager;
     private PermissionRegistrar permissionRegistrar;
     private volatile DatabaseManager webDatabaseManager;
+    private volatile TagsManager tagsManager;
 
     @Override
     public void onEnable() {
@@ -54,6 +56,7 @@ public final class CookiePl extends JavaPlugin {
             foliaLib.getScheduler().cancelAllTasks();
         }
         webDatabaseManager = null;
+        tagsManager = null;
         if (logManager != null) {
             logInfo("CookiePl has been disabled.");
             logManager.close();
@@ -264,5 +267,13 @@ public final class CookiePl extends JavaPlugin {
 
     public void setWebDatabaseManager(DatabaseManager manager) {
         this.webDatabaseManager = manager;
+    }
+
+    public TagsManager getTagsManager() {
+        return tagsManager;
+    }
+
+    public void setTagsManager(TagsManager manager) {
+        this.tagsManager = manager;
     }
 }

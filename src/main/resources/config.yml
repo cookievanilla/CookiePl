@@ -292,6 +292,14 @@ modules:
     check-period-ticks: 100
     save-period-ticks: 1200
 
+  tags:
+    enabled: true
+    storage-file: "tags.yml"
+    separator: " "
+    secret: "CHANGE_ME"
+    ip-whitelist:
+      - "127.0.0.1"
+
   web-server:
     enabled: true
     port: 8080
