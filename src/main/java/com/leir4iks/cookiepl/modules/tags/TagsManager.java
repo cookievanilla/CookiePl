@@ -187,20 +187,7 @@ public class TagsManager {
     }
 
     public String getRenderedTagsForDiscordId(String discordId) {
-        List<TagDefinition> assigned = getAssignedDefinitions(discordId);
-        if (assigned.isEmpty()) {
-            return "";
-        }
-        ArrayList<String> symbols = new ArrayList<>(assigned.size());
-        for (TagDefinition definition : assigned) {
-            if (!isBlank(definition.symbol())) {
-                symbols.add(definition.symbol());
-            }
-        }
-        if (symbols.isEmpty()) {
-            return "";
-        }
-        return String.join(separator == null ? " " : separator, symbols);
+        return renderTags(getAssignedDefinitions(discordId));
     }
 
     public JsonObject buildPlayerTagsJson(String discordId) {
@@ -210,13 +197,27 @@ public class TagsManager {
         out.addProperty("synced_at", nz(syncedAt));
 
         List<TagDefinition> assigned = getAssignedDefinitions(discordId);
-        List<TagDefinition> configured = getConfiguredDefinitions();
 
         out.addProperty("count", assigned.size());
-        out.addProperty("rendered", getRenderedTagsForDiscordId(discordId));
+        out.addProperty("rendered", renderTags(assigned));
         out.add("roles", toJsonArray(assigned));
-        out.add("configured_roles", toJsonArray(configured));
         return out;
+    }
+
+    private String renderTags(List<TagDefinition> assigned) {
+        if (assigned == null || assigned.isEmpty()) {
+            return "";
+        }
+        ArrayList<String> symbols = new ArrayList<>(assigned.size());
+        for (TagDefinition definition : assigned) {
+            if (definition != null && !isBlank(definition.symbol())) {
+                symbols.add(definition.symbol());
+            }
+        }
+        if (symbols.isEmpty()) {
+            return "";
+        }
+        return String.join(separator == null ? " " : separator, symbols);
     }
 
     private List<TagDefinition> getAssignedDefinitions(String discordId) {

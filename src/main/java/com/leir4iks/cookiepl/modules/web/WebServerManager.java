@@ -12,6 +12,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Server;
 import org.bukkit.entity.Player;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
@@ -19,6 +20,7 @@ import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -53,6 +55,7 @@ public class WebServerManager {
             server.createContext("/serverstats", this::handleServerStats);
             server.createContext("/admin/players", this::handleAdminPlayers);
             server.createContext("/tags", this::handleTags);
+            server.createContext("/whitelist", this::handleWhitelist);
 
             server.setExecutor(Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors())));
             server.start();
@@ -277,6 +280,7 @@ public class WebServerManager {
             response.addProperty("definitions", result.definitionsCount());
             response.addProperty("members", result.membersCount());
             response.addProperty("synced_at", result.syncedAt());
+            db.refreshPlayersDataAsync();
             send(ex, 200, response.toString());
         } catch (IllegalArgumentException e) {
             send(ex, 400, jsonError(e.getMessage()));
@@ -284,6 +288,55 @@ public class WebServerManager {
             plugin.getLogManager().warn("Failed to process tags sync: " + e.getMessage());
             send(ex, 500, jsonError("Internal server error"));
         }
+    }
+
+    private void handleWhitelist(HttpExchange ex) throws IOException {
+        if (preflight(ex)) return;
+
+        String path = ex.getRequestURI().getPath();
+        if (!"/whitelist".equals(path) && !"/whitelist/".equals(path)) {
+            send(ex, 404, "{\"error\":\"Not found\"}");
+            return;
+        }
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            send(ex, 405, "{\"error\":\"Method not allowed\"}");
+            return;
+        }
+
+        String remoteIp = clientIp(ex);
+        if (!isTagsIpAllowed(remoteIp)) {
+            send(ex, 403, "{\"error\":\"Forbidden\"}");
+            return;
+        }
+
+        File file = whitelistFile();
+        if (!file.isFile()) {
+            send(ex, 404, "{\"error\":\"Whitelist file not found\"}");
+            return;
+        }
+
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(file.toPath());
+        } catch (IOException e) {
+            plugin.getLogManager().warn("Failed to read whitelist file: " + e.getMessage());
+            send(ex, 500, "{\"error\":\"Failed to read whitelist file\"}");
+            return;
+        }
+
+        ex.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+        ex.sendResponseHeaders(200, bytes.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
+    private File whitelistFile() {
+        File pluginsFolder = plugin.getDataFolder().getParentFile();
+        if (pluginsFolder != null) {
+            return new File(new File(pluginsFolder, "simplewhitelist"), "whitelist.txt");
+        }
+        return new File("plugins/simplewhitelist/whitelist.txt");
     }
 
     private void handleServerInfo(HttpExchange ex) throws IOException {

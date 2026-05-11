@@ -1178,8 +1178,11 @@ public class DatabaseManager {
         out.addProperty("count", 0);
         out.addProperty("rendered", "");
         out.add("roles", new JsonArray());
-        out.add("configured_roles", new JsonArray());
         return out;
+    }
+
+    public void refreshPlayersDataAsync() {
+        plugin.getFoliaLib().getScheduler().runAsync(task -> refreshPlayersData());
     }
 
     private Map<String, Boolean> readAllActiveStates() {
