@@ -58,7 +58,7 @@ public class ActivePlayerManager {
     public void start() {
         long monitorTicks = Math.max(20L, monitorPeriodTicks);
         long persistTicks = Math.max(20L, savePeriodTicks);
-        monitorTask = plugin.getFoliaLib().getScheduler().runTimer(this::tick, 20L, monitorTicks);
+        monitorTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::tick, 20L, monitorTicks);
         saveTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::saveDataSafe, persistTicks, persistTicks);
         bootstrapOnlinePlayers();
     }
