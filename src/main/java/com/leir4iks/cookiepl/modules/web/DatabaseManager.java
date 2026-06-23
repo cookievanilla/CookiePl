@@ -186,7 +186,7 @@ public class DatabaseManager {
             updateFoliaRegionsSnapshot();
         });
 
-        timeTrackTask = plugin.getFoliaLib().getScheduler().runTimer(this::trackOnlineTimeTick, 20L, 20L);
+        timeTrackTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::trackOnlineTimeTick, 20L, 20L);
         timeFlushTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::flushDirtyTimeRows, 200L, 200L);
         extraFlushTask = plugin.getFoliaLib().getScheduler().runTimerAsync(this::flushDirtyExtraRows, 200L, 200L);
 
@@ -3238,9 +3238,8 @@ public class DatabaseManager {
         updateSeasonPeakOnlineIfNeeded(safeOnlineCount());
     }
 
-    private void handleQuit(Player p) {
-        if (p == null) return;
-        String u = p.getUniqueId().toString();
+    private void handleQuitAsync(String u, boolean afk) {
+        if (isBlank(u)) return;
         long now = System.currentTimeMillis();
 
         Long prev = onlineTickMs.get(u);
@@ -3249,11 +3248,6 @@ public class DatabaseManager {
             if (delta < 0L) delta = 0L;
             if (delta > 60000L) delta = 60000L;
             TimeState st = ensureTimeStateLoaded(u, now);
-
-            boolean afk = false;
-            try {
-                if (p.hasMetadata("afk") && !p.getMetadata("afk").isEmpty()) afk = p.getMetadata("afk").get(0).asBoolean();
-            } catch (Exception ignored) {}
 
             synchronized (st) {
                 if (afk) st.afkTotalMs += delta;
@@ -3391,13 +3385,26 @@ public class DatabaseManager {
         }
 
         @EventHandler public void onJoin(PlayerJoinEvent e) {
-            try { handleOnlineChange(e.getPlayer().getUniqueId().toString(), true); } catch (Exception ignored) {}
-            try { handleJoin(e.getPlayer()); } catch (Exception ignored) {}
+            Player p = e.getPlayer();
+            plugin.getFoliaLib().getScheduler().runAsync(t -> {
+                try { handleOnlineChange(p.getUniqueId().toString(), true); } catch (Exception ignored) {}
+                try { handleJoin(p); } catch (Exception ignored) {}
+            });
         }
 
         @EventHandler public void onQuit(PlayerQuitEvent e) {
-            try { handleQuit(e.getPlayer()); } catch (Exception ignored) {}
-            try { handleOnlineChange(e.getPlayer().getUniqueId().toString(), false); } catch (Exception ignored) {}
+            Player p = e.getPlayer();
+            String u = p.getUniqueId().toString();
+            boolean afk = false;
+            try {
+                if (p.hasMetadata("afk") && !p.getMetadata("afk").isEmpty()) afk = p.getMetadata("afk").get(0).asBoolean();
+            } catch (Exception ignored) {}
+
+            final boolean finalAfk = afk;
+            plugin.getFoliaLib().getScheduler().runAsync(t -> {
+                try { handleQuitAsync(u, finalAfk); } catch (Exception ignored) {}
+                try { handleOnlineChange(u, false); } catch (Exception ignored) {}
+            });
         }
 
         @EventHandler public void onChunkLoad(ChunkLoadEvent e) {
