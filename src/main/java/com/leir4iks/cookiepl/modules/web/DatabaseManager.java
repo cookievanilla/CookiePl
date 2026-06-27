@@ -3,7 +3,6 @@ package com.leir4iks.cookiepl.modules.web;
 import com.google.gson.*;
 import com.google.gson.stream.JsonReader;
 import com.leir4iks.cookiepl.CookiePl;
-import com.leir4iks.cookiepl.modules.afk.AFKManager;
 import com.leir4iks.cookiepl.modules.tags.TagsManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import net.luckperms.api.LuckPerms;
@@ -2663,7 +2662,10 @@ public class DatabaseManager {
 
             TimeState st = ensureTimeStateLoaded(u, now);
 
-            boolean afk = AFKManager.isPlayerAfk(p);
+            boolean afk = false;
+            try {
+                if (p.hasMetadata("afk") && !p.getMetadata("afk").isEmpty()) afk = p.getMetadata("afk").get(0).asBoolean();
+            } catch (Exception ignored) {}
 
             synchronized (st) {
                 if (st.dayKey != dkNow) { st.dayKey = dkNow; st.activeTodayMs = 0L; }
@@ -3248,7 +3250,10 @@ public class DatabaseManager {
             if (delta > 60000L) delta = 60000L;
             TimeState st = ensureTimeStateLoaded(u, now);
 
-            boolean afk = AFKManager.isPlayerAfk(p);
+            boolean afk = false;
+            try {
+                if (p.hasMetadata("afk") && !p.getMetadata("afk").isEmpty()) afk = p.getMetadata("afk").get(0).asBoolean();
+            } catch (Exception ignored) {}
 
             synchronized (st) {
                 if (afk) st.afkTotalMs += delta;
