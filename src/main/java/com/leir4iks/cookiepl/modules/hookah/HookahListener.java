@@ -60,9 +60,8 @@ public class HookahListener implements Listener {
             if (item != null && item.getItemMeta() instanceof PotionMeta) {
                 PotionMeta meta = (PotionMeta) item.getItemMeta();
                 possibleEffects.addAll(meta.getCustomEffects());
-                PotionEffectType baseEffectType = meta.getBasePotionData().getType().getEffectType();
-                if (baseEffectType != null) {
-                    possibleEffects.add(new PotionEffect(baseEffectType, 0, 0));
+                if (meta.getBasePotionType() != null) {
+                    possibleEffects.addAll(meta.getBasePotionType().getPotionEffects());
                 }
             }
         }

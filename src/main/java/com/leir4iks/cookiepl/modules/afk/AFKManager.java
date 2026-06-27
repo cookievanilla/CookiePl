@@ -15,6 +15,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
+import io.papermc.paper.event.player.AsyncChatEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.persistence.PersistentDataType;
@@ -22,6 +23,7 @@ import org.bukkit.util.Transformation;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -32,6 +34,7 @@ public class AFKManager implements Listener {
 
     private final Map<UUID, Long> lastActivity = new ConcurrentHashMap<>();
     private final Map<UUID, TextDisplay> activeIndicators = new ConcurrentHashMap<>();
+    private static final Set<UUID> afkPlayers = ConcurrentHashMap.newKeySet();
     private final WrappedTask afkCheckTask;
 
     private final long afkTimeMillis;
@@ -73,6 +76,7 @@ public class AFKManager implements Listener {
             boolean isCurrentlyAfk = isAfk(player);
 
             if (afk && !isCurrentlyAfk) {
+                afkPlayers.add(player.getUniqueId());
                 player.setMetadata(AFK_META, new FixedMetadataValue(plugin, true));
                 player.sendMessage(msgEnabled);
 
@@ -82,6 +86,7 @@ public class AFKManager implements Listener {
                     spawnIndicator(player);
                 }
             } else if (!afk && isCurrentlyAfk) {
+                afkPlayers.remove(player.getUniqueId());
                 player.removeMetadata(AFK_META, plugin);
                 player.sendMessage(msgDisabled);
 
@@ -93,13 +98,20 @@ public class AFKManager implements Listener {
         });
     }
 
+    public static boolean isPlayerAfk(Player player) {
+        return player != null && afkPlayers.contains(player.getUniqueId());
+    }
+
+    public static boolean isPlayerAfk(UUID uuid) {
+        return uuid != null && afkPlayers.contains(uuid);
+    }
+
     public boolean isAfk(Player player) {
-        return player != null && player.hasMetadata(AFK_META) && !player.getMetadata(AFK_META).isEmpty() && player.getMetadata(AFK_META).get(0).asBoolean();
+        return isPlayerAfk(player);
     }
 
     public boolean isAfk(UUID uuid) {
-        Player player = plugin.getServer().getPlayer(uuid);
-        return isAfk(player);
+        return isPlayerAfk(uuid);
     }
 
     private void checkAutoAFK() {
@@ -183,6 +195,7 @@ public class AFKManager implements Listener {
         }
         activeIndicators.clear();
         lastActivity.clear();
+        afkPlayers.clear();
     }
 
     @EventHandler(priority = EventPriority.HIGH)
@@ -243,7 +256,7 @@ public class AFKManager implements Listener {
     }
 
     @EventHandler
-    public void onChat(AsyncPlayerChatEvent event) {
+    public void onChat(AsyncChatEvent event) {
         Player player = event.getPlayer();
         if (isAfk(player)) {
             plugin.getFoliaLib().getScheduler().runAtEntity(player, (task) -> setAfk(player, false));
@@ -269,18 +282,31 @@ public class AFKManager implements Listener {
         if (player.hasMetadata(AFK_META)) {
             player.removeMetadata(AFK_META, plugin);
         }
+        afkPlayers.remove(player.getUniqueId());
 
         if (player.getGameMode() != GameMode.CREATIVE && player.getGameMode() != GameMode.SPECTATOR) {
             player.setInvulnerable(false);
         }
 
         player.setSleepingIgnored(false);
+        removeIndicator(player);
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        lastActivity.remove(event.getPlayer().getUniqueId());
-        removeIndicator(event.getPlayer());
+        Player player = event.getPlayer();
+        afkPlayers.remove(player.getUniqueId());
+        lastActivity.remove(player.getUniqueId());
+        
+        if (player.hasMetadata(AFK_META)) {
+            player.removeMetadata(AFK_META, plugin);
+        }
+        
+        if (sleepIgnoreEnabled) {
+            player.setSleepingIgnored(false);
+        }
+        
+        removeIndicator(player);
     }
 
     @EventHandler

@@ -48,10 +48,10 @@ public class AFKPlaceholder extends PlaceholderExpansion {
         if (player == null) {
             return "";
         }
-        if (afkManager.isAfk(player)) {
-            return afkSymbol;
+        if (!"status".equalsIgnoreCase(params)) {
+            return "";
         }
-        return "";
+        return afkManager.isAfk(player) ? afkSymbol : "";
     }
 
     @NotNull

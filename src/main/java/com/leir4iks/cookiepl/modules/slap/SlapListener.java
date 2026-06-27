@@ -2,9 +2,8 @@ package com.leir4iks.cookiepl.modules.slap;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.web.DatabaseManager;
-import net.md_5.bungee.api.ChatMessageType;
-import net.md_5.bungee.api.chat.TextComponent;
-import org.bukkit.ChatColor;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Color;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
@@ -36,11 +35,11 @@ public class SlapListener implements Listener {
         this.plugin = plugin;
         this.cooldownMillis = plugin.getConfig().getLong("modules.slap.cooldown-seconds", 3) * 1000L;
         this.patChance = plugin.getConfig().getDouble("modules.slap.pat-chance", 90.0);
-        this.msgActionBar = formatColor(plugin.getConfig().getString("modules.slap.messages.action-bar", "&6 ← {player} →"));
-        this.msgPatSender = formatColor(plugin.getConfig().getString("modules.slap.messages.pat-sender", "&6You patted {player} on the shoulder!"));
-        this.msgPatReceiver = formatColor(plugin.getConfig().getString("modules.slap.messages.pat-receiver", "&6{player} patted you on the shoulder!"));
-        this.msgSlapSender = formatColor(plugin.getConfig().getString("modules.slap.messages.slap-sender", "&6You slapped {player} on the ass!"));
-        this.msgSlapReceiver = formatColor(plugin.getConfig().getString("modules.slap.messages.slap-receiver", "&6{player} slapped you on the ass!"));
+        this.msgActionBar = plugin.getConfig().getString("modules.slap.messages.action-bar", "&6 ← {player} →");
+        this.msgPatSender = plugin.getConfig().getString("modules.slap.messages.pat-sender", "&6You patted {player} on the shoulder!");
+        this.msgPatReceiver = plugin.getConfig().getString("modules.slap.messages.pat-receiver", "&6{player} patted you on the shoulder!");
+        this.msgSlapSender = plugin.getConfig().getString("modules.slap.messages.slap-sender", "&6You slapped {player} on the ass!");
+        this.msgSlapReceiver = plugin.getConfig().getString("modules.slap.messages.slap-receiver", "&6{player} slapped you on the ass!");
     }
 
     @EventHandler
@@ -91,11 +90,11 @@ public class SlapListener implements Listener {
     }
 
     private void sendTemporaryActionBar(Player player, String message) {
-        player.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(message));
+        player.sendActionBar(formatComponent(message));
 
         player.getScheduler().runDelayed(plugin, scheduledTask -> {
             if (player.isOnline()) {
-                player.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(""));
+                player.sendActionBar(Component.empty());
             }
         }, null, 60L);
     }
@@ -112,7 +111,7 @@ public class SlapListener implements Listener {
     }
 
     @NotNull
-    private String formatColor(@NotNull String text) {
-        return ChatColor.translateAlternateColorCodes('&', text);
+    private Component formatComponent(@NotNull String text) {
+        return LegacyComponentSerializer.legacyAmpersand().deserialize(text);
     }
 }

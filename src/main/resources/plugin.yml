@@ -1,7 +1,7 @@
 name: CookiePl
 version: 1.0.0
 main: com.leir4iks.cookiepl.CookiePl
-api-version: '1.21'
+api-version: '26.2'
 author: leir4iks
 folia-supported: true
 softdepend: [PlaceholderAPI, DiscordSRV, SkinsRestorer, LuckPerms, squaremap]

@@ -1,6 +1,7 @@
 package com.leir4iks.cookiepl.modules.antigrief;
 
 import com.leir4iks.cookiepl.CookiePl;
+import com.leir4iks.cookiepl.modules.afk.AFKManager;
 import com.leir4iks.cookiepl.modules.web.DatabaseManager;
 import com.tcoded.folialib.wrapper.task.WrappedTask;
 import io.papermc.paper.event.player.AsyncChatEvent;
@@ -302,11 +303,7 @@ public class AntiGriefManager implements Listener {
     }
 
     private boolean isAfk(Player player) {
-        try {
-            return player.hasMetadata("afk") && !player.getMetadata("afk").isEmpty() && player.getMetadata("afk").get(0).asBoolean();
-        } catch (Exception ignored) {
-            return false;
-        }
+        return AFKManager.isPlayerAfk(player);
     }
 
     private PlayerState initializePlayerState(Player player, long now) {
