@@ -85,7 +85,7 @@ public class DatabaseManager {
     private volatile long userCacheLastModified = -1L;
     private volatile Map<String, String> userCacheMap = Map.of();
 
-    private volatile long accountsLastModified = -1L, accountsOldLastModified = -1L;
+    private volatile long accountsLastModified = -1L, accountsOldLastModified = -1L, accountsOldVesennyLastModified = -1L;
     private volatile List<AccountEntry> accountsList = List.of();
 
     private volatile List<File> statsFolders = List.of();
@@ -1219,6 +1219,60 @@ public class DatabaseManager {
         return arr;
     }
 
+    public String getPlayerColour(UUID minecraftUuid) {
+        if (minecraftUuid == null) return "";
+        String discordId = getDiscordIdByMinecraftUuid(minecraftUuid);
+        if (isBlank(discordId)) return "";
+        com.google.gson.JsonObject playerObj = summaryByDiscordId.get(discordId);
+        if (playerObj != null && playerObj.has("flex") && !playerObj.get("flex").isJsonNull()) {
+            com.google.gson.JsonObject flexObj = playerObj.getAsJsonObject("flex");
+            if (flexObj.has("color") && !flexObj.get("color").isJsonNull()) {
+                return nz(flexObj.get("color").getAsString());
+            }
+        }
+        FlexData data = readFlex(discordId);
+        return nz(data.color());
+    }
+
+    public void setPlayerColour(UUID minecraftUuid, String colourData) {
+        if (minecraftUuid == null) return;
+        String discordId = getDiscordIdByMinecraftUuid(minecraftUuid);
+        if (isBlank(discordId)) return;
+        setPlayerColourByDiscordId(discordId, colourData);
+    }
+
+    private FlexData getCachedFlexData(String discordId) {
+        com.google.gson.JsonObject playerObj = summaryByDiscordId.get(discordId);
+        if (playerObj != null && playerObj.has("flex") && !playerObj.get("flex").isJsonNull()) {
+            com.google.gson.JsonObject flexObj = playerObj.getAsJsonObject("flex");
+            long bank = flexObj.has("bank") ? flexObj.get("bank").getAsLong() : 0L;
+            String color = flexObj.has("color") ? flexObj.get("color").getAsString() : "";
+            String command = flexObj.has("command") ? flexObj.get("command").getAsString() : "";
+            List<String> subs = new ArrayList<>();
+            if (flexObj.has("subscription") && flexObj.get("subscription").isJsonArray()) {
+                for (com.google.gson.JsonElement el : flexObj.getAsJsonArray("subscription")) {
+                    subs.add(el.getAsString());
+                }
+            }
+            return new FlexData(bank, color, subs, command);
+        }
+        return readFlex(discordId);
+    }
+
+    public void setPlayerColourByDiscordId(String discordId, String colourData) {
+        if (isBlank(discordId)) return;
+        FlexData cur = getCachedFlexData(discordId);
+        FlexData updated = new FlexData(cur.bank(), nz(colourData), cur.subscription(), cur.command());
+        updateCachedPlayerFlex(discordId, updated);
+        plugin.getFoliaLib().getScheduler().runAsync(t -> {
+            try {
+                upsertFlex(discordId, updated);
+            } catch (Exception e) {
+                plugin.getLogManager().warn("Failed to save colour for " + discordId + ": " + e.getMessage());
+            }
+        });
+    }
+
     public record AdminResponse(int status, String body) {}
 
     public AdminResponse adminGetFlex(String query) {
@@ -1631,29 +1685,34 @@ public class DatabaseManager {
     private List<AccountEntry> loadAccountsIfChanged() {
         File a = new File(discordSrvFolder, "accounts.aof");
         File b = new File(discordSrvFolder, "accounts-old.aof");
+        File cV = new File(discordSrvFolder, "accounts-old-vesenny.aof");
         long lmA = a.exists() ? a.lastModified() : -1L;
         long lmB = b.exists() ? b.lastModified() : -1L;
+        long lmV = cV.exists() ? cV.lastModified() : -1L;
 
         List<AccountEntry> cached = accountsList;
-        if (lmA == accountsLastModified && lmB == accountsOldLastModified && cached != null) return cached;
+        if (lmA == accountsLastModified && lmB == accountsOldLastModified && lmV == accountsOldVesennyLastModified && cached != null) return cached;
 
-        if (lmA == -1L && lmB == -1L) {
+        if (lmA == -1L && lmB == -1L && lmV == -1L) {
             accountsList = List.of();
-            accountsLastModified = accountsOldLastModified = -1L;
+            accountsLastModified = accountsOldLastModified = accountsOldVesennyLastModified = -1L;
             return accountsList;
         }
 
         List<AccountEntry> freshA = a.exists() ? readAccountsFile(a) : List.of();
         List<AccountEntry> freshB = b.exists() ? readAccountsFile(b) : List.of();
+        List<AccountEntry> freshV = cV.exists() ? readAccountsFile(cV) : List.of();
 
-        LinkedHashMap<String, AccountEntry> byDiscord = new LinkedHashMap<>(Math.max(16, freshA.size() + freshB.size()));
-        HashMap<String, String> discordByUuid = new HashMap<>(Math.max(16, freshA.size() + freshB.size()));
+        LinkedHashMap<String, AccountEntry> byDiscord = new LinkedHashMap<>(Math.max(16, freshA.size() + freshB.size() + freshV.size()));
+        HashMap<String, String> discordByUuid = new HashMap<>(Math.max(16, freshA.size() + freshB.size() + freshV.size()));
 
         for (AccountEntry e : freshA) putAccountPreferNew(byDiscord, discordByUuid, e);
         for (AccountEntry e : freshB) putAccountIfNoConflicts(byDiscord, discordByUuid, e);
+        for (AccountEntry e : freshV) putAccountIfNoConflicts(byDiscord, discordByUuid, e);
 
         accountsLastModified = lmA;
         accountsOldLastModified = lmB;
+        accountsOldVesennyLastModified = lmV;
         accountsList = List.copyOf(byDiscord.values());
         return accountsList;
     }

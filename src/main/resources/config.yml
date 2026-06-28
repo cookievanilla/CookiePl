@@ -363,3 +363,40 @@ modules:
 logging:
   enabled: true
   log-level: "INFO"
+
+modules:
+  colourful:
+    enabled: true
+    permission: "cookiepl.colour.use"
+
+    menu:
+      title: "&8Цвет имени"
+
+      category-item:
+        name: "&fЦвет имени"
+
+      items:
+        reset:
+          name: "&fСбросить цвет"
+          description:
+            - "&7Убрать цвет и вернуть дефолтный"
+        bold:
+          name: "&fЖирный текст"
+          description:
+            - "&7Сделать имя жирным"
+        italic:
+          name: "&fКурсив"
+          description:
+            - "&7Сделать имя курсивным"
+        underline:
+          name: "&fПодчёркнутый"
+          description:
+            - "&7Подчеркнуть имя"
+
+    messages:
+      no-permission: "&cУ тебя нет права на изменение цвета."
+      colour-set: "&7Цвет установлен."
+      colour-reset: "&7Цвет сброшен."
+      invalid-colour: "&cНеверный цвет. Используй HEX (#RRGGBB) или английское название."
+      players-only: "&cЭту команду может использовать только игрок."
+

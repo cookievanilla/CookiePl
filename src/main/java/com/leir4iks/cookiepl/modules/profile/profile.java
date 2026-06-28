@@ -2,10 +2,12 @@ package com.leir4iks.cookiepl.modules.profile;
 
 import com.leir4iks.cookiepl.CookiePl;
 import com.leir4iks.cookiepl.modules.IModule;
+import com.leir4iks.cookiepl.modules.colourful.ColourData;
 import com.leir4iks.cookiepl.modules.profile.features.adventure;
 import com.leir4iks.cookiepl.modules.profile.features.death;
 import com.leir4iks.cookiepl.modules.profile.features.phantoms;
 import com.leir4iks.cookiepl.modules.profile.features.squaremap;
+import com.leir4iks.cookiepl.modules.web.DatabaseManager;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
@@ -45,6 +47,17 @@ public class profile implements IModule, Listener, CommandExecutor {
 
     private static final int BACK_SLOT = 18;
     private static final int CLOSE_SLOT = 22;
+
+    private static final int COLOUR_CATEGORY_SLOT = 20;
+    private static final int COLOUR_INFO_SLOT = 4;
+    private static final int COLOUR_RESET_SLOT = 10;
+    private static final int COLOUR_BOLD_SLOT = 12;
+    private static final int COLOUR_ITALIC_SLOT = 14;
+    private static final int COLOUR_UNDERLINE_SLOT = 16;
+    private static final int COLOUR_BACK_SLOT = 18;
+    private static final int COLOUR_CLOSE_SLOT = 22;
+
+    private static final String COLOUR_PERM = "cookiepl.colour.use";
 
     private CookiePl plugin;
     private ProfileStorage storage;
@@ -204,6 +217,8 @@ public class profile implements IModule, Listener, CommandExecutor {
                 getString("modules.profile.menu.items.phantoms.click-to-disable", "&7Нажми, чтобы выключить спавн")
         ));
 
+        inventory.setItem(COLOUR_CATEGORY_SLOT, createColourCategoryItem(player));
+
         inventory.setItem(BACK_SLOT, createItem(
                 Material.ARROW,
                 getString("modules.profile.menu.items.back.name", "&7Назад"),
@@ -217,6 +232,75 @@ public class profile implements IModule, Listener, CommandExecutor {
         inventory.setItem(CLOSE_SLOT, createCloseItem());
     }
 
+    private void openColourSettingsMenu(Player player) {
+        ProfileMenuHolder holder = new ProfileMenuHolder(MenuType.COLOUR_SETTINGS);
+        Inventory inventory = Bukkit.createInventory(holder, INVENTORY_SIZE,
+                color(getString("modules.colourful.menu.title", "&8Цвет имени")));
+        holder.setInventory(inventory);
+        renderColourSettingsMenu(player, inventory);
+        player.openInventory(inventory);
+    }
+
+    private void renderColourSettingsMenu(Player player, Inventory inventory) {
+        ItemStack filler = createItem(Material.LIGHT_GRAY_STAINED_GLASS_PANE, " ", List.of(), true);
+        for (int slot = 0; slot < INVENTORY_SIZE; slot++) {
+            inventory.setItem(slot, filler);
+        }
+
+        String rawColour = getPlayerRawColour(player);
+        List<String> flags = ColourData.parseFlags(rawColour);
+        String colourPart = ColourData.parseColourPart(rawColour);
+        String preview = colourPart.isEmpty()
+                ? color("&7(нет цвета)")
+                : colourPart;
+
+        inventory.setItem(COLOUR_INFO_SLOT, createColourInfoItem(player, preview, flags));
+
+        inventory.setItem(COLOUR_RESET_SLOT, createItem(
+                Material.BUCKET,
+                color(getString("modules.colourful.menu.items.reset.name", "&fСбросить цвет")),
+                List.of(
+                        color("&7Убрать цвет и вернуть дефолтный"),
+                        "",
+                        color("&7Нажми, чтобы сбросить")
+                ),
+                true
+        ));
+
+        inventory.setItem(COLOUR_BOLD_SLOT, createToggleItem(
+                Material.ANVIL,
+                getString("modules.colourful.menu.items.bold.name", "&fЖирный текст"),
+                flags.contains("bold"),
+                getStringList("modules.colourful.menu.items.bold.description",
+                        List.of("&7Сделать имя жирным"))
+        ));
+
+        inventory.setItem(COLOUR_ITALIC_SLOT, createToggleItem(
+                Material.FEATHER,
+                getString("modules.colourful.menu.items.italic.name", "&fКурсив"),
+                flags.contains("italic"),
+                getStringList("modules.colourful.menu.items.italic.description",
+                        List.of("&7Сделать имя курсивным"))
+        ));
+
+        inventory.setItem(COLOUR_UNDERLINE_SLOT, createToggleItem(
+                Material.BOOK,
+                getString("modules.colourful.menu.items.underline.name", "&fПодчёркнутый"),
+                flags.contains("underline"),
+                getStringList("modules.colourful.menu.items.underline.description",
+                        List.of("&7Подчеркнуть имя"))
+        ));
+
+        inventory.setItem(COLOUR_BACK_SLOT, createItem(
+                Material.ARROW,
+                getString("modules.profile.menu.items.back.name", "&7Назад"),
+                List.of(color("&7Вернуться к настройкам профиля")),
+                true
+        ));
+
+        inventory.setItem(COLOUR_CLOSE_SLOT, createCloseItem());
+    }
+
     private ItemStack createSoonCategoryItem() {
         return createItem(
                 Material.GRAY_STAINED_GLASS_PANE,
@@ -224,6 +308,56 @@ public class profile implements IModule, Listener, CommandExecutor {
                 List.of("&7soon..."),
                 true
         );
+    }
+
+    private ItemStack createColourCategoryItem(Player player) {
+        boolean hasPerms = player.hasPermission(COLOUR_PERM);
+        String rawColour = hasPerms ? getPlayerRawColour(player) : "";
+        String colourPart = ColourData.parseColourPart(rawColour);
+        List<String> flags = ColourData.parseFlags(rawColour);
+
+        List<String> lore = new ArrayList<>();
+        lore.add(color("&7Настройка цвета имени в чате и табе"));
+        lore.add("");
+        if (!hasPerms) {
+            lore.add(color("&cНет доступа"));
+        } else {
+            lore.add(color("&7Цвет: &f" + (colourPart.isEmpty() ? "&7(дефолт)" : colourPart)));
+            if (!flags.isEmpty()) {
+                lore.add(color("&7Стиль: &f" + String.join(", ", flags)));
+            }
+            lore.add("");
+            lore.add(color("&7Нажми, чтобы настроить"));
+        }
+        return createItem(
+                Material.NAME_TAG,
+                color(getString("modules.colourful.menu.category-item.name", "&fЦвет имени")),
+                lore,
+                true
+        );
+    }
+
+    private ItemStack createColourInfoItem(Player player, String preview, List<String> flags) {
+        ItemStack item = new ItemStack(Material.PLAYER_HEAD);
+        SkullMeta meta = (SkullMeta) item.getItemMeta();
+        if (meta == null) return item;
+        meta.setOwningPlayer(player);
+        meta.setDisplayName(color("&f" + player.getName()));
+        List<String> lore = new ArrayList<>();
+        lore.add(color("&7Текущий цвет имени"));
+        lore.add("");
+        lore.add(color("&7Цвет: &f" + preview));
+        if (!flags.isEmpty()) {
+            lore.add(color("&7Стиль: &f" + String.join(", ", flags)));
+        } else {
+            lore.add(color("&7Стиль: &7нет"));
+        }
+        lore.add("");
+        lore.add(color("&7Используй &f/colour <цвет>&7 для изменения цвета"));
+        meta.setLore(lore);
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        item.setItemMeta(meta);
+        return item;
     }
 
     private ItemStack createProfileCategoryItem(Player player) {
@@ -444,6 +578,7 @@ public class profile implements IModule, Listener, CommandExecutor {
         switch (holder.getMenuType()) {
             case CATEGORIES -> handleCategoriesClick(player, event.getRawSlot());
             case PROFILE_SETTINGS -> handleProfileSettingsClick(player, event.getRawSlot(), event.getView().getTopInventory());
+            case COLOUR_SETTINGS -> handleColourSettingsClick(player, event.getRawSlot(), event.getView().getTopInventory());
         }
     }
 
@@ -518,10 +653,74 @@ public class profile implements IModule, Listener, CommandExecutor {
                 )));
                 renderProfileSettingsMenu(player, inventory);
             }
+            case COLOUR_CATEGORY_SLOT -> {
+                if (!player.hasPermission(COLOUR_PERM)) {
+                    player.sendMessage(color(getString(
+                            "modules.colourful.messages.no-permission",
+                            "&cУ тебя нет права на изменение цвета."
+                    )));
+                    return;
+                }
+                openColourSettingsMenu(player);
+            }
             case BACK_SLOT -> openCategoriesMenu(player);
             case CLOSE_SLOT -> player.closeInventory();
             default -> {
             }
+        }
+    }
+
+    private void handleColourSettingsClick(Player player, int slot, Inventory inventory) {
+        DatabaseManager db = plugin.getWebDatabaseManager();
+        if (db == null) {
+            player.sendMessage(color("&cСистема цветов временно недоступна."));
+            return;
+        }
+        switch (slot) {
+            case COLOUR_RESET_SLOT -> {
+                String existing = db.getPlayerColour(player.getUniqueId());
+                String newRaw = ColourData.setColourPart(existing, "");
+                if (ColourData.parseColourPart(newRaw).isEmpty() && ColourData.parseFlags(newRaw).isEmpty()) {
+                    newRaw = "";
+                }
+                db.setPlayerColour(player.getUniqueId(), newRaw);
+                player.sendMessage(color(getString(
+                        "modules.colourful.messages.colour-reset", "&7Цвет сброшен."
+                )));
+                renderColourSettingsMenu(player, inventory);
+            }
+            case COLOUR_BOLD_SLOT -> {
+                String existing = db.getPlayerColour(player.getUniqueId());
+                String newRaw = ColourData.toggleFlag(existing, "bold");
+                db.setPlayerColour(player.getUniqueId(), newRaw);
+                renderColourSettingsMenu(player, inventory);
+            }
+            case COLOUR_ITALIC_SLOT -> {
+                String existing = db.getPlayerColour(player.getUniqueId());
+                String newRaw = ColourData.toggleFlag(existing, "italic");
+                db.setPlayerColour(player.getUniqueId(), newRaw);
+                renderColourSettingsMenu(player, inventory);
+            }
+            case COLOUR_UNDERLINE_SLOT -> {
+                String existing = db.getPlayerColour(player.getUniqueId());
+                String newRaw = ColourData.toggleFlag(existing, "underline");
+                db.setPlayerColour(player.getUniqueId(), newRaw);
+                renderColourSettingsMenu(player, inventory);
+            }
+            case COLOUR_BACK_SLOT -> openProfileSettingsMenu(player);
+            case COLOUR_CLOSE_SLOT -> player.closeInventory();
+            default -> {
+            }
+        }
+    }
+
+    private String getPlayerRawColour(Player player) {
+        DatabaseManager db = plugin.getWebDatabaseManager();
+        if (db == null) return "";
+        try {
+            return db.getPlayerColour(player.getUniqueId());
+        } catch (Exception e) {
+            return "";
         }
     }
 
@@ -589,7 +788,8 @@ public class profile implements IModule, Listener, CommandExecutor {
 
     private enum MenuType {
         CATEGORIES,
-        PROFILE_SETTINGS
+        PROFILE_SETTINGS,
+        COLOUR_SETTINGS
     }
 
     private static final class ProfileMenuHolder implements InventoryHolder {

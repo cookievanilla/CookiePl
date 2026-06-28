@@ -36,6 +36,10 @@ commands:
   hat:
     description: Wear the item in your hand as a hat.
     usage: /<command> [remove|off|0]
+  colour:
+    description: Set your personal MiniMessage colour for chat and tab.
+    usage: /colour <color1> [color2] [color3]
+    aliases: [color]
 
 permissions:
   cookiepl.command.base:
@@ -85,4 +89,7 @@ permissions:
     default: false
   cookiepl.hat.ignore-binding:
     description: Allows ignoring binding curse restrictions in /hat.
+    default: false
+  cookiepl.colour.use:
+    description: Allows a player to use /colour and the colour settings panel in /profile.
     default: false
